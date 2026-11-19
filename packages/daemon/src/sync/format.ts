@@ -18,7 +18,7 @@ export function tomlStringArray(values: readonly string[]): string {
   return `[${values.map(tomlString).join(", ")}]`;
 }
 
-const YAML_PLAIN = /^[A-Za-z][\w .,()/'-]*$/;
+const YAML_PLAIN = /^[A-Za-z][\w .,()/'?!;-]*$/;
 const YAML_RESERVED = /^(true|false|yes|no|on|off|null|y|n)$/i;
 
 /** A YAML scalar: plain when unambiguous, else double-quoted (JSON strings are valid YAML). */

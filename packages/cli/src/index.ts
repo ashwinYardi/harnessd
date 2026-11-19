@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
-import { defaultGlobalDir, syncRepo } from "@harnessd/daemon";
+import type { Readable, Writable } from "node:stream";
+import { defaultGlobalDir, findRepoRoot, serveMemory, syncRepo, vaultDirs } from "@harnessd/daemon";
 import { ConfigError, VERSION } from "@harnessd/shared";
 
 export interface CliIO {
@@ -9,6 +10,9 @@ export interface CliIO {
   cwd?: string;
   /** Defaults to process.env. `HARNESSD_HOME` overrides the global folder. */
   env?: NodeJS.ProcessEnv;
+  /** Protocol streams for `mcp` servers. Default to process.stdin and process.stdout. */
+  stdin?: Readable;
+  stdout?: Writable;
 }
 
 const USAGE = `harnessd ${VERSION}
@@ -17,6 +21,8 @@ Usage: harnessd <command>
 
 Commands:
   sync [dir]   Write AGENTS.md and each harness's native files from .harnessd/
+  mcp memory [--workspace <dir>]
+               Serve the memory vaults over MCP on stdio (sync registers it)
   version      Print the version
   help         Show this help`;
 
@@ -37,12 +43,41 @@ async function sync(args: readonly string[], io: CliIO): Promise<number> {
   }
 }
 
+const MCP_USAGE = "Usage: harnessd mcp memory [--workspace <dir>]";
+
+/**
+ * `harnessd mcp memory`: stdout carries only protocol messages, so every
+ * diagnostic goes to `io.err`. The workspace defaults to the nearest folder
+ * above the cwd with a `.harnessd/`.
+ */
+async function mcp(args: readonly string[], io: CliIO): Promise<number> {
+  const [server, ...rest] = args;
+  const withWorkspace = rest.length === 2 && rest[0] === "--workspace";
+  if (server !== "memory" || (rest.length > 0 && !withWorkspace)) {
+    io.err(MCP_USAGE);
+    return 2;
+  }
+  const workspace = withWorkspace ? rest[1] : undefined;
+  const cwd = io.cwd ?? process.cwd();
+  const globalDir = defaultGlobalDir(io.env);
+  const repoDir =
+    workspace === undefined ? await findRepoRoot(cwd, globalDir) : resolve(cwd, workspace);
+  await serveMemory({
+    vaults: vaultDirs(globalDir, repoDir),
+    input: io.stdin ?? process.stdin,
+    output: io.stdout ?? process.stdout,
+  });
+  return 0;
+}
+
 /** Runs the CLI and returns the process exit code. */
 export async function run(argv: readonly string[], io: CliIO): Promise<number> {
   const [command = "help", ...rest] = argv;
   switch (command) {
     case "sync":
       return sync(rest, io);
+    case "mcp":
+      return mcp(rest, io);
     case "version":
     case "--version":
     case "-v":

@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { ConfigError } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
 import { tomlKey, tomlString, yamlString } from "./format.ts";
-import { codexConfig, generateSyncFiles } from "./generate.ts";
+import { codexConfig, generateSyncFiles, syncedMcpServers } from "./generate.ts";
 
 test("generateSyncFiles lists every native file in a stable order", () => {
   const paths = generateSyncFiles(mergeLayers([])).map((f) => f.path);
@@ -25,10 +25,24 @@ test("a skill name that would escape .claude/skills is a config error", () => {
   );
 });
 
-test("codex config writes empty env tables and quotes odd keys", () => {
+test("codex config writes empty env tables", () => {
   const merged = mergeLayers([]);
   merged.mcp = { x: { command: "x", env: {} } };
   assert.match(codexConfig(merged), /\[mcp_servers\.x\]\ncommand = "x"\nenv = \{\}\n$/);
+});
+
+test("the memory server is added by default and a config table replaces it", () => {
+  const merged = mergeLayers([]);
+  assert.deepEqual(syncedMcpServers(merged), {
+    "harnessd-memory": { command: "harnessd", args: ["mcp", "memory"] },
+  });
+  merged.mcp = {
+    "harnessd-memory": { command: "npx", args: ["-y", "@harnessd/cli", "mcp", "memory"] },
+    alpha: { command: "a" },
+  };
+  const servers = syncedMcpServers(merged);
+  assert.deepEqual(Object.keys(servers), ["alpha", "harnessd-memory"]);
+  assert.equal(servers["harnessd-memory"]?.command, "npx");
 });
 
 test("toml and yaml scalars quote only when needed", () => {
@@ -36,6 +50,7 @@ test("toml and yaml scalars quote only when needed", () => {
   assert.equal(tomlKey("a.b"), '"a.b"');
   assert.equal(tomlString('a"\\\n\u007f'), '"a\\"\\\\\\n\\u007F"');
   assert.equal(yamlString("Ship it to staging"), "Ship it to staging");
+  assert.equal(yamlString("Where is it? Here!"), "Where is it? Here!");
   assert.equal(yamlString("a: b"), '"a: b"');
   assert.equal(yamlString("yes"), '"yes"');
   assert.equal(yamlString("#tag"), '"#tag"');

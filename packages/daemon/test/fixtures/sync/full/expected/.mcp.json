@@ -11,6 +11,13 @@
         "LEVEL": "debug"
       }
     },
+    "harnessd-memory": {
+      "command": "harnessd",
+      "args": [
+        "mcp",
+        "memory"
+      ]
+    },
     "search": {
       "command": "search-mcp"
     }

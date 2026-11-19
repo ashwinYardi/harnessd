@@ -5,5 +5,9 @@ command = "docs-mcp"
 args = ["--repo", "say \"hi\""]
 env = { "DOCS.TOKEN" = "", LEVEL = "debug" }
 
+[mcp_servers.harnessd-memory]
+command = "harnessd"
+args = ["mcp", "memory"]
+
 [mcp_servers.search]
 command = "search-mcp"

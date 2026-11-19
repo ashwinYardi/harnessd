@@ -9,6 +9,7 @@ harnessd reads two folders with the same shape (D-004): `~/.harnessd/` (global, 
   rules/<name>.md       one rule per file; the name is the file name
   skills/<folder>/SKILL.md
   agents/<name>.md      one agent per file
+  vault/                memory notes, served over MCP (docs/MEMORY.md)
 ```
 
 ## config.toml
