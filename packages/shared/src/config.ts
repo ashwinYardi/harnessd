@@ -47,6 +47,19 @@ export interface AgentSettings {
   instructions?: string;
 }
 
+/**
+ * One `[mcp.<name>]` table: a stdio MCP server every harness gets on `harnessd sync`.
+ * Servers merge by name; a later layer replaces the whole entry.
+ */
+export interface McpServerConfig {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+/** MCP server names: they become keys in .mcp.json and `[mcp_servers.<name>]` in Codex TOML. */
+export const MCP_NAME = /^[A-Za-z0-9_-]+$/;
+
 /** Fully defaulted settings, the part of config.toml other than agents. */
 export interface Settings {
   limits: LimitsConfig;
@@ -64,6 +77,7 @@ export type DeepPartial<T> = T extends readonly unknown[]
 /** A validated config.toml. Everything is optional; defaults fill the gaps. */
 export interface ConfigFile extends DeepPartial<Settings> {
   agents?: Record<string, AgentSettings>;
+  mcp?: Record<string, McpServerConfig>;
 }
 
 /** A piece of instruction text and the file it came from. */
@@ -111,6 +125,8 @@ export interface ConfigLayer {
   agents: Record<string, AgentLayerEntry>;
   rules: Rule[];
   skills: Skill[];
+  /** `[mcp.<name>]` tables from config.toml. */
+  mcp: Record<string, McpServerConfig>;
   /** The folder's AGENTS.md, if present and non-empty. */
   instructions?: InstructionBlock;
 }
@@ -132,6 +148,8 @@ export interface MergedConfig extends Settings {
   rules: Rule[];
   /** Sorted by name. */
   skills: Skill[];
+  /** MCP servers by name, sorted by name. */
+  mcp: Record<string, McpServerConfig>;
   /** AGENTS.md text, global first. */
   instructions: InstructionBlock[];
 }
@@ -265,6 +283,30 @@ class Checker {
       this.fail(path, `expected an array of strings, got ${describe(value)}`);
     return value.map((item, i) => this.string(item, `${path}[${i}]`));
   }
+
+  /** A table of strings; empty strings are allowed (env values). */
+  stringTable(value: unknown, path: string): Record<string, string> {
+    const t = this.table(value, path);
+    const out: Record<string, string> = {};
+    for (const [key, item] of Object.entries(t)) {
+      if (typeof item !== "string") {
+        this.fail(keyPath(path, key), `expected a string, got ${describe(item)}`);
+      }
+      out[key] = item;
+    }
+    return out;
+  }
+}
+
+/** Validates one `[mcp.<name>]` table. */
+export function parseMcpServer(value: unknown, file: string, path: string): McpServerConfig {
+  const c = new Checker(file);
+  const t = c.table(value, path, ["command", "args", "env"]);
+  if (t.command === undefined) c.fail(keyPath(path, "command"), "required");
+  const out: McpServerConfig = { command: c.string(t.command, keyPath(path, "command")) };
+  if (t.args !== undefined) out.args = c.stringArray(t.args, keyPath(path, "args"));
+  if (t.env !== undefined) out.env = c.stringTable(t.env, keyPath(path, "env"));
+  return out;
 }
 
 /**
@@ -298,7 +340,7 @@ export function parseAgentSettings(
 /** Validates a parsed config.toml. Unknown keys are errors, so typos never pass silently. */
 export function parseConfigFile(value: unknown, file: string): ConfigFile {
   const c = new Checker(file);
-  const root = c.table(value, "", ["limits", "linear", "slack", "merge", "agents"]);
+  const root = c.table(value, "", ["limits", "linear", "slack", "merge", "agents", "mcp"]);
   const out: ConfigFile = {};
 
   if (root.limits !== undefined) {
@@ -355,6 +397,18 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
       agents[name] = parseAgentSettings(def, file, `agents.${name}`);
     }
     out.agents = agents;
+  }
+
+  if (root.mcp !== undefined) {
+    const t = c.table(root.mcp, "mcp");
+    const mcp: Record<string, McpServerConfig> = {};
+    for (const [name, def] of Object.entries(t)) {
+      if (!MCP_NAME.test(name)) {
+        c.fail(`mcp.${name}`, "server names may only use letters, digits, _ and -");
+      }
+      mcp[name] = parseMcpServer(def, file, `mcp.${name}`);
+    }
+    out.mcp = mcp;
   }
 
   return out;

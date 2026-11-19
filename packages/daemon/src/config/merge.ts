@@ -8,6 +8,7 @@ import {
   DEFAULT_SETTINGS,
   type DeepPartial,
   type InstructionBlock,
+  type McpServerConfig,
   type MergedConfig,
   type ResolvedAgentConfig,
   type Rule,
@@ -44,8 +45,9 @@ interface AgentDraft extends Omit<Agent, "role"> {
 
 /**
  * Merges layers in order (global, then workspace) over the defaults.
- * Scalars override, tables deep-merge, rules and skills merge by name with the
- * later layer winning, and instruction text accumulates in layer order.
+ * Scalars override, tables deep-merge, rules, skills and MCP servers merge by
+ * name with the later layer winning (a server is replaced whole, not deep-merged),
+ * and instruction text accumulates in layer order.
  */
 export function mergeLayers(layers: readonly ConfigLayer[]): MergedConfig {
   let settings: Settings = structuredClone(DEFAULT_SETTINGS);
@@ -84,9 +86,16 @@ export function mergeLayers(layers: readonly ConfigLayer[]): MergedConfig {
     agents[rest.name] = { ...rest, role };
   }
 
+  const mcpByName = new Map<string, McpServerConfig>();
+  for (const layer of layers) {
+    for (const [name, server] of Object.entries(layer.mcp)) mcpByName.set(name, server);
+  }
+  const mcp = Object.fromEntries([...mcpByName].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+
   return {
     ...settings,
     agents,
+    mcp,
     rules: byName<Rule>(layers.map((l) => l.rules)),
     skills: byName<Skill>(layers.map((l) => l.skills)),
     instructions: layers

@@ -4,7 +4,16 @@ import { ConfigError, type ConfigLayer, DEFAULT_SETTINGS } from "@harnessd/share
 import { deepMerge, mergeLayers, resolveAgentConfig } from "./merge.ts";
 
 function layer(scope: ConfigLayer["scope"], extra: Partial<ConfigLayer> = {}): ConfigLayer {
-  return { scope, dir: `/${scope}`, settings: {}, agents: {}, rules: [], skills: [], ...extra };
+  return {
+    scope,
+    dir: `/${scope}`,
+    settings: {},
+    agents: {},
+    rules: [],
+    skills: [],
+    mcp: {},
+    ...extra,
+  };
 }
 
 test("no layers gives the defaults", () => {
@@ -190,4 +199,18 @@ test("resolveAgentConfig concatenates global, workspace, then agent instructions
 
 test("resolveAgentConfig rejects unknown agents", () => {
   assert.throws(() => resolveAgentConfig(mergeLayers([]), "nobody"), /unknown agent "nobody"/);
+});
+
+test("mcp servers merge by name and a later layer replaces the whole entry", () => {
+  const merged = mergeLayers([
+    layer("global", {
+      mcp: {
+        zeta: { command: "zeta" },
+        docs: { command: "docs", args: ["--global"], env: { A: "1" } },
+      },
+    }),
+    layer("workspace", { mcp: { docs: { command: "docs-local" }, alpha: { command: "alpha" } } }),
+  ]);
+  assert.deepEqual(Object.keys(merged.mcp), ["alpha", "docs", "zeta"]);
+  assert.deepEqual(merged.mcp.docs, { command: "docs-local" });
 });

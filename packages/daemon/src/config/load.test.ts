@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, test } from "node:test";
 import { ConfigError } from "@harnessd/shared";
 import { parseFrontmatter } from "./frontmatter.ts";
-import { loadConfig, loadLayer } from "./load.ts";
+import { defaultGlobalDir, loadConfig, loadLayer } from "./load.ts";
 import { resolveAgentConfig } from "./merge.ts";
 
 const roots: string[] = [];
@@ -210,4 +210,10 @@ test("parseFrontmatter handles quotes, comments and missing frontmatter", () => 
     () => parseFrontmatter("---\njust text\n---\n", "f"),
     configError('f: frontmatter line 2: expected "key: value"'),
   );
+});
+
+test("defaultGlobalDir honours HARNESSD_HOME", () => {
+  assert.equal(defaultGlobalDir({ HARNESSD_HOME: "/tmp/hd-home" }), "/tmp/hd-home");
+  assert.equal(defaultGlobalDir({ HARNESSD_HOME: "" }), join(homedir(), ".harnessd"));
+  assert.equal(defaultGlobalDir({}), join(homedir(), ".harnessd"));
 });

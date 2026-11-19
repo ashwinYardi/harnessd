@@ -1,6 +1,6 @@
 # Config reference
 
-harnessd reads two folders with the same shape (D-004): `~/.harnessd/` (global) and `<repo>/.harnessd/` (workspace). Either may be missing. Types and the validator live in `packages/shared/src/config.ts`; loading and merging in `packages/daemon/src/config/`.
+harnessd reads two folders with the same shape (D-004): `~/.harnessd/` (global, or `$HARNESSD_HOME` when set) and `<repo>/.harnessd/` (workspace). Either may be missing. Types and the validator live in `packages/shared/src/config.ts`; loading and merging in `packages/daemon/src/config/`.
 
 ```
 .harnessd/
@@ -35,8 +35,13 @@ role = "backend"            # coordinator | backend | frontend | qa
 harness = "claude-code"     # claude-code | codex | antigravity | opencode | cursor | grok
 model = "opus"              # optional, passed to the harness
 instructions = "..."        # optional
+
+[mcp.docs]                  # a stdio MCP server for every harness (see docs/SYNC.md)
+command = "npx"             # required
+args = ["-y", "docs-mcp"]   # optional
+env = { DOCS_MODE = "ro" }  # optional, string values
 ```
-Default agents: coordinator, backend, frontend and qa, all on `claude-code`. Any other agent name must set `role`. Unknown keys are errors.
+Default agents: coordinator, backend, frontend and qa, all on `claude-code`. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
 
 ## agents/<name>.md
 Optional frontmatter with `role`, `harness` and `model`; the body is the agent's instructions.
@@ -56,7 +61,7 @@ Optional frontmatter with `name` (defaults to the folder name) and `description`
 Order: defaults, then global, then workspace, then the agent.
 - Scalars override. Arrays (such as `protected_paths`) replace. Tables deep-merge.
 - Agent fields (`role`, `harness`, `model`) override per layer.
-- Rules and skills merge by name; the workspace wins.
+- Rules, skills and MCP servers merge by name; the workspace wins. An `[mcp.<name>]` table is replaced whole, not deep-merged.
 - An agent's instruction text is global AGENTS.md, workspace AGENTS.md, then the agent's own instructions from global and then workspace, joined by blank lines.
 
 Errors name the file and the key: `~/.harnessd/config.toml: agents.backend.harness: expected one of claude-code, codex, antigravity, opencode, cursor, grok, got "vim"`.

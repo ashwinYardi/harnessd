@@ -42,3 +42,6 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 export * from "./config/load.ts";
 export * from "./config/merge.ts";
 export * from "./linear/client.ts";
+export * from "./sync/generate.ts";
+export * from "./sync/sync.ts";
+export * from "./sync/write.ts";

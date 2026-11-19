@@ -1,0 +1,7 @@
+[mcp.docs]
+command = "npx"
+args = ["-y", "docs-mcp", "--global"]
+env = { DOCS_MODE = "global" }
+
+[mcp.search]
+command = "search-mcp"
