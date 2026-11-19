@@ -1,0 +1,87 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "9f1c2d3e-0a4b-4c5d-8e6f-112233445517",
+          "identifier": "MET-17",
+          "title": "Daemon pauses on the kill switch",
+          "description": "**Why**\nThe human needs a global stop.\n\n**Done when**\n- [ ] harnessd pause stops new tasks\n\n**Spec links**\n- docs/SPEC.md#linear-filing-rules\n\n**Size**: S",
+          "priority": 1,
+          "url": "https://linear.app/meta-harness/issue/met-17",
+          "createdAt": "2026-11-03T07:45:00.000Z",
+          "state": {
+            "name": "Ready"
+          },
+          "team": {
+            "id": "5b3e4a0c-2f1d-4a8e-9c61-7d2b8f0e3a11",
+            "key": "MET"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "name": "coordinator"
+              }
+            ]
+          },
+          "projectMilestone": null,
+          "inverseRelations": {
+            "nodes": [
+              {
+                "type": "related",
+                "issue": {
+                  "identifier": "MET-13",
+                  "state": {
+                    "type": "started"
+                  }
+                }
+              },
+              {
+                "type": "blocks",
+                "issue": {
+                  "identifier": "MET-9",
+                  "state": {
+                    "type": "canceled"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "9f1c2d3e-0a4b-4c5d-8e6f-112233445518",
+          "identifier": "MET-18",
+          "title": "Board shows per-agent activity",
+          "description": "**Why**\nVisibility.\n\n**Done when**\n- [ ] Each agent row shows its current task\n\n**Spec links**\n- docs/SPEC.md#linear-filing-rules\n\n**Size**: L",
+          "priority": 4,
+          "url": "https://linear.app/meta-harness/issue/met-18",
+          "createdAt": "2026-10-28T16:20:00.000Z",
+          "state": {
+            "name": "Ready"
+          },
+          "team": {
+            "id": "5b3e4a0c-2f1d-4a8e-9c61-7d2b8f0e3a11",
+            "key": "MET"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "name": "ui"
+              }
+            ]
+          },
+          "projectMilestone": {
+            "name": "v0.1 MVP"
+          },
+          "inverseRelations": {
+            "nodes": []
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": "WyIyMDI2LTExLTAzVDA3OjQ1OjAwLjAwMFoiXQ=="
+      }
+    }
+  }
+}

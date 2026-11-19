@@ -1,0 +1,13 @@
+{
+  "data": {
+    "issueUpdate": {
+      "success": true,
+      "issue": {
+        "id": "9f1c2d3e-0a4b-4c5d-8e6f-112233445512",
+        "state": {
+          "name": "In Progress"
+        }
+      }
+    }
+  }
+}

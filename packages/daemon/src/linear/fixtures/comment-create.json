@@ -1,0 +1,11 @@
+{
+  "data": {
+    "commentCreate": {
+      "success": true,
+      "comment": {
+        "id": "c4d5e6f7-1a2b-4c3d-8e9f-aabbccddeeff",
+        "url": "https://linear.app/meta-harness/issue/met-12#comment-c4d5e6f7"
+      }
+    }
+  }
+}
