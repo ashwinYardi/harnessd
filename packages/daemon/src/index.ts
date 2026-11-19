@@ -2,6 +2,12 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { VERSION } from "@harnessd/shared";
 
+export {
+  type ClaudeCodeOptions,
+  claudeArgs,
+  createClaudeCodeAdapter,
+} from "./adapters/claude-code.ts";
+
 export interface DaemonOptions {
   /** Port to listen on. 0 picks a free port. */
   port?: number;

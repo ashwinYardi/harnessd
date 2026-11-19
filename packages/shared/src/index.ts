@@ -17,4 +17,5 @@ export function isHarnessId(value: string): value is HarnessId {
   return (HARNESSES as readonly string[]).includes(value);
 }
 
+export * from "./adapter.ts";
 export * from "./config.ts";
