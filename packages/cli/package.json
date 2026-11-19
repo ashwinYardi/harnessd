@@ -1,0 +1,28 @@
+{
+  "name": "@harnessd/cli",
+  "version": "0.0.0",
+  "description": "The harnessd command line.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'src/**/*.test.ts'"
+  },
+  "bin": {
+    "harnessd": "./dist/bin.js"
+  },
+  "dependencies": {
+    "@harnessd/daemon": "workspace:*",
+    "@harnessd/shared": "workspace:*"
+  }
+}

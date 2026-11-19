@@ -1,0 +1,21 @@
+{
+  "name": "@harnessd/shared",
+  "version": "0.0.0",
+  "description": "Types and contracts shared by the harnessd daemon, CLI and UI.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test 'src/**/*.test.ts'"
+  }
+}

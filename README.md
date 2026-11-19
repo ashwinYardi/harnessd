@@ -14,8 +14,14 @@ harnessd runs a coordinator and a team of persistent agents (Backend, Frontend, 
 ## Install (planned)
 ```sh
 npx @harnessd/cli            # or
-curl -fsSL https://raw.githubusercontent.com/ashwinYardi/harnessd/master/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ashwinYardi/harnessd/main/install.sh | sh
 ```
+
+## Develop
+```sh
+pnpm i && pnpm build && pnpm test
+```
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 MIT
