@@ -35,7 +35,7 @@ Instruction layers merge in this order: global → workspace → agent (schema a
 
 ## Autonomy loop
 1. The coordinator picks the highest-priority Ready issue.
-2. It checks the issue for ambiguity. It resolves what it can from the spec, decisions, code and vault, and records the call as a comment and a decision note.
+2. It checks the issue for ambiguity. It resolves what it can from the spec, decisions, code and vault, and records the call as a comment and a decision note (contract: docs/COORDINATOR.md).
 3. Escalation happens only when the "worth asking" test passes (D-011). Then the issue moves to **Needs input**, one Slack ping goes out, and the loop moves on to the next issue.
 4. It splits, assigns, and runs each task in its own git worktree and branch.
 5. A PR opens and CI runs. QA verifies against the "Done when" checklist.

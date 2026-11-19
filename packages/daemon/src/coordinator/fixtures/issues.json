@@ -1,0 +1,44 @@
+{
+  "clear": {
+    "id": "0b6f1a52-6c1e-4f0e-9a51-0000000000a1",
+    "key": "MET-40",
+    "title": "Daemon reports its version on /health",
+    "description": "**Why**\nThe CLI checks the daemon is up.\n\n**Done when**\n- [ ] GET /health returns { ok, version }\n- [ ] Unknown paths return 404\n\n**Spec links**\n- docs/SPEC.md#components\n\n**Size**: S",
+    "priority": 3,
+    "state": "Ready",
+    "labels": ["infra"],
+    "size": "S",
+    "doneWhen": [
+      { "text": "GET /health returns { ok, version }", "checked": false },
+      { "text": "Unknown paths return 404", "checked": false }
+    ],
+    "url": "https://linear.app/meta-harness/issue/met-40",
+    "blockedBy": []
+  },
+  "secret": {
+    "id": "0b6f1a52-6c1e-4f0e-9a51-0000000000a2",
+    "key": "MET-41",
+    "title": "Merges and blocks post a line to Slack",
+    "description": "**Why**\nThe human follows the loop from Slack (D-015).\n\n**Done when**\n- [ ] One line per merge or block in #harnessd\n\n**Spec links**\n- docs/SPEC.md#visibility\n\n**Size**: S",
+    "priority": 2,
+    "state": "Ready",
+    "labels": ["coordinator"],
+    "size": "S",
+    "doneWhen": [{ "text": "One line per merge or block in #harnessd", "checked": false }],
+    "url": "https://linear.app/meta-harness/issue/met-41",
+    "blockedBy": []
+  },
+  "taste": {
+    "id": "0b6f1a52-6c1e-4f0e-9a51-0000000000a3",
+    "key": "MET-42",
+    "title": "Agents have avatars on the board",
+    "description": "**Why**\nThe board should feel like a team.\n\n**Done when**\n- [ ] Each agent card shows an avatar\n\n**Size**: S",
+    "priority": 3,
+    "state": "Ready",
+    "labels": ["ui"],
+    "size": "S",
+    "doneWhen": [{ "text": "Each agent card shows an avatar", "checked": false }],
+    "url": "https://linear.app/meta-harness/issue/met-42",
+    "blockedBy": []
+  }
+}

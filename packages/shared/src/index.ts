@@ -19,4 +19,5 @@ export function isHarnessId(value: string): value is HarnessId {
 
 export * from "./adapter.ts";
 export * from "./config.ts";
+export * from "./coordinator.ts";
 export * from "./linear.ts";
