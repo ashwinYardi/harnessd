@@ -1,16 +1,7 @@
+import type { DecisionNote } from "@harnessd/shared";
 import { VaultError, writeNote } from "./vault.ts";
 
-/** A call the coordinator made instead of asking the human (SPEC autonomy loop, D-011). */
-export interface DecisionNote {
-  /** Linear issue key, such as `MET-11`. */
-  issue: string;
-  /** Short title; it becomes the file name slug. */
-  title: string;
-  question: string;
-  decision: string;
-  /** What settled it: spec section, decision record, code or vault note. */
-  basis: string;
-}
+export type { DecisionNote };
 
 const ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
 

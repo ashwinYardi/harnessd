@@ -41,9 +41,14 @@ function isAlive(pid: number): boolean {
     return false;
   }
   // An unreaped zombie still answers signal 0; on Linux /proc tells them apart.
+  // The entry can vanish between checks once the process is reaped, which means dead.
   const stat = `/proc/${pid}/stat`;
-  if (existsSync(stat)) return !/^\d+ \(.*\) Z/.test(readFileSync(stat, "utf8"));
-  return true;
+  if (!existsSync("/proc/self/stat")) return true;
+  try {
+    return !/^\d+ \(.*\) Z/.test(readFileSync(stat, "utf8"));
+  } catch {
+    return false;
+  }
 }
 
 async function waitDead(pid: number, ms = 2_000): Promise<boolean> {

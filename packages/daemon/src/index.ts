@@ -41,6 +41,10 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
 
 export * from "./config/load.ts";
 export * from "./config/merge.ts";
+export * from "./coordinator/decisions.ts";
+export * from "./coordinator/grill.ts";
+export * from "./coordinator/notifier.ts";
+export * from "./coordinator/prompt.ts";
 export * from "./linear/client.ts";
 export * from "./memory/decisions.ts";
 export * from "./memory/server.ts";
