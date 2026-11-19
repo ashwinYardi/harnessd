@@ -1,0 +1,70 @@
+# harnessd: spec v0.1
+
+harnessd is a local daemon and desktop app that runs a team of coding agents on autopilot. Each agent uses a harness CLI (Claude Code, Codex, Antigravity, OpenCode, Cursor, Grok). Every harness reads one shared config.
+
+## Goal of v0.1 (MVP)
+A coordinator plus three persistent agents (Backend, Frontend, QA) take Ready issues from Linear and ship merged PRs non-stop, asking the human only when a decision is worth it.
+
+## Principles
+1. **Autopilot first.** The human is asked only for real inputs: secrets, money, irreversible or taste calls the spec doesn't settle.
+2. **Harness CLIs only.** No vendor SDKs. Adapters call each CLI in headless/JSON mode, with a terminal pane as the fallback.
+3. **One parent config.** Harness-native files are generated from it and never hand-edited.
+4. **Linear is the source of truth** for work. Well-formed issues are a hard requirement.
+5. **Anti-slop UI.** The UI is dense, quiet and professional, after t3.code and cloudroom.dev.
+
+## Components
+| Component | v0.1 |
+|---|---|
+| `harnessd` daemon | TypeScript (Node/Bun) local server: scheduler, adapters, worktrees, Linear/GitHub/Slack clients |
+| UI | React + Vite, served by the daemon; Electron wrapper |
+| CLI | `npx @harnessd/cli` → `harnessd` command |
+| Installer | `curl -fsSL https://…/install.sh \| sh`: installs Node, harness CLIs, the daemon and launchd service |
+| Memory | Obsidian-compatible markdown vaults (global + per workspace), exposed via a built-in MCP server. No DB in v1 |
+
+## Config layout
+```
+~/.harnessd/              global: config.toml, skills/, rules/, agents/, AGENTS.md, vault/
+<repo>/.harnessd/         workspace: same shape, overrides global
+<repo>/AGENTS.md          generated; CLAUDE.md -> AGENTS.md (symlink)
+```
+Instruction layers merge in this order: global → workspace → agent. Native files (`.claude/`, `.codex/`, `opencode.json`, `.cursor/rules`, …) are generated on `harnessd sync`.
+
+## The team
+- **Coordinator**: always on. Pulls Ready issues, grills the issue against the spec and decisions, and only escalates when needed (see D-011). Splits issues into backend/frontend sub-issues plus a QA sub-issue that depends on them. Assigns them, watches budgets, keeps the board honest.
+- **Backend, Frontend, QA**: persistent agents with a name, avatar, role and their own instructions. Default harness: **Claude Code for all** (swappable per agent).
+
+## Autonomy loop
+1. The coordinator picks the highest-priority Ready issue.
+2. It checks the issue for ambiguity. It resolves what it can from the spec, decisions, code and vault, and records the call as a comment and a decision note.
+3. Escalation happens only when the "worth asking" test passes (D-011). Then the issue moves to **Needs input**, one Slack ping goes out, and the loop moves on to the next issue.
+4. It splits, assigns, and runs each task in its own git worktree and branch.
+5. A PR opens and CI runs. QA verifies against the "Done when" checklist.
+6. Auto-merge happens when the gate passes (D-013). Otherwise the PR is sent back once, then escalated.
+7. Issue → Done, then a Slack line. Repeat.
+
+## Merge gate (D-013)
+A PR auto-merges when **all** of these hold: CI is green, QA approves every "Done when" item, and no protected path is touched. Protected paths are auth, payments, secrets, release config, and the merge-gate config itself. Protected PRs wait for the human.
+
+## Limits (D-014)
+- Per-task token and time budget by size: S 30 min, M 2 h, L must be split.
+- At most 3 agents run concurrently (configurable).
+- Two QA failures → escalate rather than loop.
+- A global kill switch: `harnessd pause`, plus a UI button.
+
+## Visibility
+Slack **#harnessd**: one line per merge or block, and a 9 PM IST summary. The app shows the live board and per-agent activity. The canvas with personas and avatars comes in v0.2.
+
+## Linear filing rules
+- Title is the outcome ("Agents run in isolated worktrees"), not the task.
+- The body has **Why**, **Done when** (a checklist), **Spec links**, **Size** (S/M/L; L gets split).
+- One area label: `harness-adapter`, `ui`, `cloud`, `memory`, `coordinator`, `infra`.
+- Only **Ready** issues get picked up. States: Backlog → Ready → In progress → In review → Done, plus Needs input.
+
+## Out of scope for v0.1 (→ v0.2+)
+Containers/sandboxes, cloud runtimes (VPS, Cloudroom, agent37, boat.dev, harness-native cloud), team canvas and avatars, Linux/Windows, signed .dmg ($99/yr Apple Developer), Composio connectors beyond Linear/GitHub/Slack, reasonmachines-style speed work.
+
+## Platform
+macOS first, then Linux, then Windows via WSL.
+
+## Bootstrap
+Developer bot builds v0.1 by hand. From the first working loop on, harnessd builds harnessd.
