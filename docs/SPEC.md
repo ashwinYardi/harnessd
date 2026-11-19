@@ -27,7 +27,7 @@ A coordinator plus three persistent agents (Backend, Frontend, QA) take Ready is
 <repo>/.harnessd/         workspace: same shape, overrides global
 <repo>/AGENTS.md          generated; CLAUDE.md -> AGENTS.md (symlink)
 ```
-Instruction layers merge in this order: global → workspace → agent. Native files (`.claude/`, `.codex/`, `opencode.json`, `.cursor/rules`, …) are generated on `harnessd sync`.
+Instruction layers merge in this order: global → workspace → agent (schema and merge rules: docs/CONFIG.md). Native files (`.claude/`, `.codex/`, `opencode.json`, `.cursor/rules`, …) are generated on `harnessd sync`.
 
 ## The team
 - **Coordinator**: always on. Pulls Ready issues, grills the issue against the spec and decisions, and only escalates when needed (see D-011). Splits issues into backend/frontend sub-issues plus a QA sub-issue that depends on them. Assigns them, watches budgets, keeps the board honest.

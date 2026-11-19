@@ -19,6 +19,7 @@
     "test": "node --test 'src/**/*.test.ts'"
   },
   "dependencies": {
-    "@harnessd/shared": "workspace:*"
+    "@harnessd/shared": "workspace:*",
+    "smol-toml": "^1.9.1"
   }
 }

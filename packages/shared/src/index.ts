@@ -16,3 +16,5 @@ export type HarnessId = (typeof HARNESSES)[number];
 export function isHarnessId(value: string): value is HarnessId {
   return (HARNESSES as readonly string[]).includes(value);
 }
+
+export * from "./config.ts";
