@@ -18,6 +18,10 @@ test("parseConfigFile accepts a full config", () => {
     slack: { channel: "#ops" },
     merge: { protected_paths: ["infra/**"] },
     agents: { backend: { role: "backend", harness: "codex", model: "gpt-5", instructions: "Hi" } },
+    mcp: {
+      docs: { command: "npx", args: ["-y", "docs-mcp"], env: { TOKEN: "", MODE: "ro" } },
+      bare: { command: "bare-mcp" },
+    },
   };
   assert.deepEqual(parseConfigFile(input, FILE), input);
 });
@@ -40,7 +44,7 @@ test("unknown keys are rejected with their path", () => {
   );
   rejects(
     { colour: "red" },
-    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, agents`,
+    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, agents, mcp`,
   );
   rejects(
     { limits: { budget_minutes: { L: 300 } } },
@@ -79,4 +83,25 @@ test("parseAgentSettings without a prefix reports bare keys", () => {
     () => parseAgentSettings({ instructions: "x" }, "agents/qa.md", "", false),
     /agents\/qa\.md: instructions: unknown key/,
   );
+});
+
+test("mcp servers are validated with their path", () => {
+  rejects({ mcp: { docs: {} } }, `${FILE}: mcp.docs.command: required`);
+  rejects(
+    { mcp: { docs: { command: "x", cwd: "/" } } },
+    `${FILE}: mcp.docs.cwd: unknown key, expected one of command, args, env`,
+  );
+  rejects(
+    { mcp: { docs: { command: "x", args: "a b" } } },
+    `${FILE}: mcp.docs.args: expected an array of strings, got "a b"`,
+  );
+  rejects(
+    { mcp: { docs: { command: "x", env: { PORT: 80 } } } },
+    `${FILE}: mcp.docs.env.PORT: expected a string, got 80`,
+  );
+  rejects(
+    { mcp: { "my docs": { command: "x" } } },
+    `${FILE}: mcp.my docs: server names may only use letters, digits, _ and -`,
+  );
+  rejects({ mcp: [] }, `${FILE}: mcp: expected a table, got an array`);
 });

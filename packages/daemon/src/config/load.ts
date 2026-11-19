@@ -1,7 +1,7 @@
 import type { Dirent } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, sep } from "node:path";
+import { join, resolve, sep } from "node:path";
 import {
   type AgentLayerEntry,
   ConfigError,
@@ -26,9 +26,13 @@ export interface LoadConfigOptions {
   home?: string;
 }
 
-/** `~/.harnessd`. Call this at the edge (CLI, daemon start), never inside the loader. */
-export function defaultGlobalDir(): string {
-  return join(homedir(), ".harnessd");
+/**
+ * The global folder: `$HARNESSD_HOME` when set, else `~/.harnessd`.
+ * Call this at the edge (CLI, daemon start), never inside the loader.
+ */
+export function defaultGlobalDir(env: NodeJS.ProcessEnv = process.env): string {
+  const override = env.HARNESSD_HOME?.trim();
+  return override ? resolve(override) : join(homedir(), ".harnessd");
 }
 
 /** Loads the global and workspace folders and merges them. Missing folders and files are fine. */
@@ -93,15 +97,24 @@ export async function loadLayer(
   home = homedir(),
 ): Promise<ConfigLayer> {
   const show = (path: string) => displayPath(path, home);
-  const layer: ConfigLayer = { scope, dir, settings: {}, agents: {}, rules: [], skills: [] };
+  const layer: ConfigLayer = {
+    scope,
+    dir,
+    settings: {},
+    agents: {},
+    rules: [],
+    skills: [],
+    mcp: {},
+  };
 
   // config.toml
   const configPath = join(dir, "config.toml");
   const configText = await readOptional(configPath);
   if (configText !== undefined) {
     const label = show(configPath);
-    const { agents, ...settings } = parseConfigFile(parseToml(configText, label), label);
+    const { agents, mcp, ...settings } = parseConfigFile(parseToml(configText, label), label);
     layer.settings = settings;
+    layer.mcp = mcp ?? {};
     for (const [name, def] of Object.entries(agents ?? {})) {
       const { instructions, ...rest } = def;
       const entry: AgentLayerEntry = { ...rest, label, keyPrefix: `agents.${name}` };

@@ -1,0 +1,7 @@
+[agents.backend]
+harness = "codex"
+
+[mcp.docs]
+command = "docs-mcp"
+args = ["--repo", "say \"hi\""]
+env = { "DOCS.TOKEN" = "", LEVEL = "debug" }
