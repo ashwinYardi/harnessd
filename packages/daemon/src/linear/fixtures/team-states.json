@@ -1,0 +1,46 @@
+{
+  "data": {
+    "team": {
+      "id": "5b3e4a0c-2f1d-4a8e-9c61-7d2b8f0e3a11",
+      "states": {
+        "nodes": [
+          {
+            "id": "0c7e1b2a-3d4f-4e5a-9b6c-000000000001",
+            "name": "Backlog",
+            "type": "backlog"
+          },
+          {
+            "id": "0c7e1b2a-3d4f-4e5a-9b6c-000000000002",
+            "name": "Ready",
+            "type": "unstarted"
+          },
+          {
+            "id": "0c7e1b2a-3d4f-4e5a-9b6c-000000000003",
+            "name": "In Progress",
+            "type": "started"
+          },
+          {
+            "id": "0c7e1b2a-3d4f-4e5a-9b6c-000000000004",
+            "name": "In Review",
+            "type": "started"
+          },
+          {
+            "id": "0c7e1b2a-3d4f-4e5a-9b6c-000000000005",
+            "name": "Needs input",
+            "type": "started"
+          },
+          {
+            "id": "0c7e1b2a-3d4f-4e5a-9b6c-000000000006",
+            "name": "Done",
+            "type": "completed"
+          },
+          {
+            "id": "0c7e1b2a-3d4f-4e5a-9b6c-000000000007",
+            "name": "Canceled",
+            "type": "canceled"
+          }
+        ]
+      }
+    }
+  }
+}

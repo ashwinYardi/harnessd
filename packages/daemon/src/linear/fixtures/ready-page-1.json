@@ -1,0 +1,155 @@
+{
+  "data": {
+    "issues": {
+      "nodes": [
+        {
+          "id": "9f1c2d3e-0a4b-4c5d-8e6f-112233445512",
+          "identifier": "MET-12",
+          "title": "Coordinator picks the highest-priority Ready issue",
+          "description": "**Why**\nThe loop needs a single next issue to work on.\n\n**Done when**\n- [ ] Picks the urgent Ready issue first\n- [x] Skips blocked issues\n- [ ] Records the pick as a comment\n\n**Spec links**\n- docs/SPEC.md#linear-filing-rules\n\n**Size**: M",
+          "priority": 2,
+          "url": "https://linear.app/meta-harness/issue/met-12",
+          "createdAt": "2026-11-02T09:15:00.000Z",
+          "state": {
+            "name": "Ready"
+          },
+          "team": {
+            "id": "5b3e4a0c-2f1d-4a8e-9c61-7d2b8f0e3a11",
+            "key": "MET"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "name": "coordinator"
+              }
+            ]
+          },
+          "projectMilestone": {
+            "name": "v0.1 MVP"
+          },
+          "inverseRelations": {
+            "nodes": [
+              {
+                "type": "blocks",
+                "issue": {
+                  "identifier": "MET-5",
+                  "state": {
+                    "type": "completed"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "9f1c2d3e-0a4b-4c5d-8e6f-112233445514",
+          "identifier": "MET-14",
+          "title": "Docs explain the Linear filing rules",
+          "description": null,
+          "priority": 0,
+          "url": "https://linear.app/meta-harness/issue/met-14",
+          "createdAt": "2026-11-01T08:00:00.000Z",
+          "state": {
+            "name": "Ready"
+          },
+          "team": {
+            "id": "5b3e4a0c-2f1d-4a8e-9c61-7d2b8f0e3a11",
+            "key": "MET"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "name": "infra"
+              }
+            ]
+          },
+          "projectMilestone": null,
+          "inverseRelations": {
+            "nodes": []
+          }
+        },
+        {
+          "id": "9f1c2d3e-0a4b-4c5d-8e6f-112233445515",
+          "identifier": "MET-15",
+          "title": "QA verifies Done-when items on the PR",
+          "description": "**Why**\nQA gates merges.\n\n**Done when**\n- [ ] QA comments a verdict per item\n\n**Spec links**\n- docs/SPEC.md#linear-filing-rules\n\n**Size**: S",
+          "priority": 1,
+          "url": "https://linear.app/meta-harness/issue/met-15",
+          "createdAt": "2026-10-30T12:00:00.000Z",
+          "state": {
+            "name": "Ready"
+          },
+          "team": {
+            "id": "5b3e4a0c-2f1d-4a8e-9c61-7d2b8f0e3a11",
+            "key": "MET"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "name": "coordinator"
+              }
+            ]
+          },
+          "projectMilestone": {
+            "name": "v0.1 MVP"
+          },
+          "inverseRelations": {
+            "nodes": [
+              {
+                "type": "blocks",
+                "issue": {
+                  "identifier": "MET-13",
+                  "state": {
+                    "type": "started"
+                  }
+                }
+              },
+              {
+                "type": "blocks",
+                "issue": {
+                  "identifier": "MET-5",
+                  "state": {
+                    "type": "completed"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "id": "9f1c2d3e-0a4b-4c5d-8e6f-112233445516",
+          "identifier": "MET-16",
+          "title": "Agents run in isolated worktrees",
+          "description": "**Why**\nAgents must not step on each other.\n\n**Done when**\n- [ ] One worktree per task\n\n**Spec links**\n- docs/SPEC.md#linear-filing-rules\n\n**Size**: S",
+          "priority": 2,
+          "url": "https://linear.app/meta-harness/issue/met-16",
+          "createdAt": "2026-11-01T10:30:00.000Z",
+          "state": {
+            "name": "Ready"
+          },
+          "team": {
+            "id": "5b3e4a0c-2f1d-4a8e-9c61-7d2b8f0e3a11",
+            "key": "MET"
+          },
+          "labels": {
+            "nodes": [
+              {
+                "name": "harness-adapter"
+              }
+            ]
+          },
+          "projectMilestone": {
+            "name": "v0.1 MVP"
+          },
+          "inverseRelations": {
+            "nodes": []
+          }
+        }
+      ],
+      "pageInfo": {
+        "hasNextPage": true,
+        "endCursor": "WyIyMDI2LTExLTAxVDEwOjMwOjAwLjAwMFoiXQ=="
+      }
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "errors": [
+    {
+      "message": "Argument Validation Error",
+      "path": ["issueUpdate"],
+      "extensions": {
+        "type": "invalid input",
+        "code": "INVALID_INPUT",
+        "userPresentableMessage": "stateId must be a UUID."
+      }
+    }
+  ],
+  "data": null
+}

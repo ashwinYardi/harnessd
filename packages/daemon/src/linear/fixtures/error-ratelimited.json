@@ -1,0 +1,12 @@
+{
+  "errors": [
+    {
+      "message": "Rate limit exceeded",
+      "extensions": {
+        "type": "ratelimited",
+        "code": "RATELIMITED",
+        "userPresentableMessage": "Too many requests. Try again shortly."
+      }
+    }
+  ]
+}
