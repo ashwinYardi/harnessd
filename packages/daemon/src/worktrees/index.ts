@@ -1,0 +1,486 @@
+/**
+ * Per-task git worktrees (D-012): one worktree and one branch per task, under
+ * `<root>/<repo-name>/<branch>`, where root defaults to `~/.harnessd/worktrees`.
+ *
+ * A manifest at `<root>/.harnessd-worktrees.json` records every worktree we own.
+ * Entries are written before git touches the disk, so a crash at any point leaves
+ * a record that `recoverOnStartup` can reconcile.
+ */
+import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { mkdir, open, readdir, readFile, realpath, rename, rm, stat } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { promisify } from "node:util";
+
+const run = promisify(execFile);
+
+/** Maximum length of a whole branch name, `met-<n>-<slug>` included. */
+export const MAX_BRANCH_LENGTH = 60;
+
+export const MANIFEST_FILE = ".harnessd-worktrees.json";
+
+/**
+ * active: a live daemon owns it. done: being removed. stale: its daemon died; the
+ * branch (and the folder, if it survived) are kept so a resumed task picks them up.
+ */
+export type WorktreeStatus = "active" | "done" | "stale";
+
+export interface WorktreeEntry {
+  issueKey: string;
+  branch: string;
+  path: string;
+  repoDir: string;
+  status: WorktreeStatus;
+  pid: number;
+  createdAt: string;
+}
+
+export interface Manifest {
+  version: 1;
+  entries: WorktreeEntry[];
+}
+
+export interface Worktree {
+  path: string;
+  branch: string;
+  /** True when an existing branch or worktree was picked back up. */
+  resumed: boolean;
+}
+
+export function defaultWorktreesRoot(): string {
+  return join(homedir(), ".harnessd", "worktrees");
+}
+
+function slugify(text: string): string {
+  return text
+    .normalize("NFKD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * `branchName("MET-12", "Coordinator splits issues into sub-issues")` is
+ * `met-12-coordinator-splits-issues-into-sub-issues`. The slug is cut at a word
+ * boundary so the whole name stays within MAX_BRANCH_LENGTH; a single word longer
+ * than the budget is cut hard. An empty slug yields just the key.
+ */
+export function branchName(issueKey: string, title: string): string {
+  const key = slugify(issueKey);
+  if (!/^[a-z]+-\d+$/.test(key)) {
+    throw new Error(`invalid issue key: ${JSON.stringify(issueKey)}`);
+  }
+  const budget = MAX_BRANCH_LENGTH - key.length - 1;
+  let slug = slugify(title);
+  if (slug.length > budget) {
+    const cut = slug.slice(0, budget + 1);
+    const lastDash = cut.lastIndexOf("-");
+    slug = lastDash > 0 ? cut.slice(0, lastDash) : slug.slice(0, budget);
+    slug = slug.replace(/-+$/, "");
+  }
+  return slug && budget > 0 ? `${key}-${slug}` : key;
+}
+
+async function git(cwd: string, args: string[]): Promise<string> {
+  try {
+    const { stdout } = await run("git", ["-C", cwd, ...args], {
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      maxBuffer: 16 * 1024 * 1024,
+    });
+    return stdout;
+  } catch (error) {
+    const stderr = (error as { stderr?: string }).stderr?.trim();
+    throw new Error(`git ${args.join(" ")} failed in ${cwd}${stderr ? `: ${stderr}` : ""}`, {
+      cause: error,
+    });
+  }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** realpath that tolerates missing paths, so /tmp vs /private/tmp compare equal. */
+async function canonical(path: string): Promise<string> {
+  try {
+    return await realpath(path);
+  } catch {
+    const parent = dirname(path);
+    return parent === path ? path : join(await canonical(parent), basename(path));
+  }
+}
+
+function isInside(root: string, path: string): boolean {
+  const rel = relative(root, path);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+}
+
+/** Deletes a folder, but only if it sits inside the worktrees root. */
+async function removeDir(root: string, path: string): Promise<void> {
+  if (!isInside(await canonical(root), await canonical(path))) {
+    throw new Error(`refusing to delete ${path}: outside worktrees root ${root}`);
+  }
+  await rm(path, { recursive: true, force: true });
+}
+
+/** Paths of the worktrees git has registered for a repo, canonicalised. */
+async function registeredWorktrees(repoDir: string): Promise<Map<string, string | undefined>> {
+  const out = await git(repoDir, ["worktree", "list", "--porcelain"]);
+  const result = new Map<string, string | undefined>();
+  for (const block of out.split("\n\n")) {
+    const lines = block.split("\n");
+    const pathLine = lines.find((l) => l.startsWith("worktree "));
+    if (!pathLine) continue;
+    const branchLine = lines.find((l) => l.startsWith("branch "));
+    const branch = branchLine?.slice("branch refs/heads/".length);
+    result.set(await canonical(pathLine.slice("worktree ".length)), branch);
+  }
+  return result;
+}
+
+async function branchExists(repoDir: string, branch: string): Promise<boolean> {
+  try {
+    await git(repoDir, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// --- manifest -------------------------------------------------------------
+
+function manifestPath(root: string): string {
+  return join(root, MANIFEST_FILE);
+}
+
+function isEntry(value: unknown): value is WorktreeEntry {
+  const e = value as Partial<WorktreeEntry> | null;
+  return (
+    typeof e === "object" &&
+    e !== null &&
+    typeof e.issueKey === "string" &&
+    typeof e.branch === "string" &&
+    typeof e.path === "string" &&
+    typeof e.repoDir === "string" &&
+    typeof e.pid === "number" &&
+    typeof e.createdAt === "string" &&
+    (e.status === "active" || e.status === "done" || e.status === "stale")
+  );
+}
+
+/**
+ * Reads the manifest. A missing file is an empty manifest. An unreadable one is
+ * moved aside to `<file>.corrupt-<ts>` so the daemon can still start; the orphan
+ * scan in recoverOnStartup then cleans up what it can.
+ */
+export async function readManifest(root: string): Promise<Manifest> {
+  const file = manifestPath(root);
+  let text: string;
+  try {
+    text = await readFile(file, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 1, entries: [] };
+    throw error;
+  }
+  try {
+    const parsed = JSON.parse(text) as Partial<Manifest>;
+    if (!Array.isArray(parsed.entries)) throw new Error("no entries array");
+    return { version: 1, entries: parsed.entries.filter(isEntry) };
+  } catch {
+    await rename(file, `${file}.corrupt-${Date.now()}`);
+    return { version: 1, entries: [] };
+  }
+}
+
+/** Writes tmp, fsyncs, then renames, so readers see the old or the new file, never half. */
+async function writeManifest(root: string, manifest: Manifest): Promise<void> {
+  await mkdir(root, { recursive: true });
+  const file = manifestPath(root);
+  const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+  const handle = await open(tmp, "w");
+  try {
+    await handle.writeFile(`${JSON.stringify(manifest, null, 2)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  try {
+    await rename(tmp, file);
+  } catch (error) {
+    await rm(tmp, { force: true });
+    throw error;
+  }
+}
+
+const locks = new Map<string, Promise<unknown>>();
+
+/** Serialises read-modify-write of one manifest within this process. */
+async function updateManifest<T>(
+  root: string,
+  fn: (manifest: Manifest) => Promise<T> | T,
+): Promise<T> {
+  const key = resolve(root);
+  const previous = locks.get(key) ?? Promise.resolve();
+  const next = previous.then(async () => {
+    const manifest = await readManifest(root);
+    const result = await fn(manifest);
+    await writeManifest(root, manifest);
+    return result;
+  });
+  const settled = next.catch(() => undefined);
+  locks.set(key, settled);
+  try {
+    return await next;
+  } finally {
+    if (locks.get(key) === settled) locks.delete(key);
+  }
+}
+
+function upsert(manifest: Manifest, entry: WorktreeEntry): void {
+  const i = manifest.entries.findIndex((e) => e.path === entry.path);
+  if (i === -1) manifest.entries.push(entry);
+  else manifest.entries[i] = entry;
+}
+
+function drop(manifest: Manifest, path: string): void {
+  manifest.entries = manifest.entries.filter((e) => e.path !== path);
+}
+
+// --- create / remove ------------------------------------------------------
+
+export interface CreateWorktreeOptions {
+  repoDir: string;
+  issueKey: string;
+  title: string;
+  /** Branch or commit the new branch starts from. Default "main". */
+  base?: string;
+  /** Worktrees root. Default `~/.harnessd/worktrees`. */
+  root?: string;
+  /** Owner recorded in the manifest. Default this process. */
+  pid?: number;
+}
+
+/**
+ * Creates `<root>/<repo-name>/<branch>` on a new branch from `base`. If the branch
+ * already exists (a resumed task) it is checked out as is; if the worktree itself
+ * is still there, it is reused. Fetches nothing.
+ */
+export async function createWorktree(options: CreateWorktreeOptions): Promise<Worktree> {
+  const root = resolve(options.root ?? defaultWorktreesRoot());
+  const repoDir = (await git(options.repoDir, ["rev-parse", "--show-toplevel"])).trim();
+  const branch = branchName(options.issueKey, options.title);
+  const path = join(root, basename(repoDir), branch);
+  const pid = options.pid ?? process.pid;
+
+  return updateManifest(root, async (manifest) => {
+    const previous = manifest.entries.find((e) => e.path === path);
+    const entry: WorktreeEntry = {
+      issueKey: options.issueKey,
+      branch,
+      path,
+      repoDir,
+      status: "active",
+      pid,
+      createdAt: previous?.createdAt ?? new Date().toISOString(),
+    };
+
+    await git(repoDir, ["worktree", "prune"]);
+    const registered = await registeredWorktrees(repoDir);
+    const canonicalPath = await canonical(path);
+    if (registered.has(canonicalPath)) {
+      const onBranch = registered.get(canonicalPath);
+      if (onBranch !== branch) {
+        throw new Error(`${path} is a worktree on ${onBranch ?? "a detached HEAD"}, not ${branch}`);
+      }
+      upsert(manifest, entry);
+      return { path, branch, resumed: true };
+    }
+    if (await exists(path)) {
+      throw new Error(`${path} exists but is not a git worktree; run recoverOnStartup first`);
+    }
+
+    // Record intent before git writes anything, so a crash mid-add is recoverable.
+    upsert(manifest, entry);
+    await writeManifest(root, manifest);
+
+    await mkdir(dirname(path), { recursive: true });
+    const resumed = await branchExists(repoDir, branch);
+    const base = options.base ?? "main";
+    try {
+      await git(
+        repoDir,
+        resumed ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, base],
+      );
+    } catch (error) {
+      if (previous) upsert(manifest, previous);
+      else drop(manifest, path);
+      await writeManifest(root, manifest);
+      throw error;
+    }
+    return { path, branch, resumed };
+  });
+}
+
+export interface RemoveWorktreeOptions {
+  repoDir: string;
+  path: string;
+  root?: string;
+  /** Also delete the branch. Default false: the PR needs it. */
+  deleteBranch?: boolean;
+}
+
+async function teardown(root: string, repoDir: string, path: string): Promise<void> {
+  if (await exists(path)) {
+    await git(repoDir, ["worktree", "remove", "--force", path]).catch(() => undefined);
+    if (await exists(path)) await removeDir(root, path);
+  }
+  await git(repoDir, ["worktree", "prune"]);
+}
+
+/** Removes a task's worktree and its manifest entry. The branch is kept unless asked. */
+export async function removeWorktree(options: RemoveWorktreeOptions): Promise<void> {
+  const root = resolve(options.root ?? defaultWorktreesRoot());
+  const path = resolve(options.path);
+  if (!isInside(await canonical(root), await canonical(path))) {
+    throw new Error(`refusing to remove ${path}: outside worktrees root ${root}`);
+  }
+  await updateManifest(root, async (manifest) => {
+    const entry = manifest.entries.find((e) => e.path === path);
+    const repoDir = entry?.repoDir ?? options.repoDir;
+    const branch = entry?.branch ?? (await registeredWorktrees(repoDir)).get(await canonical(path));
+
+    // Mark done first: if we crash below, recovery finishes the job.
+    if (entry) {
+      entry.status = "done";
+      await writeManifest(root, manifest);
+    }
+    await teardown(root, repoDir, path);
+    if (options.deleteBranch && branch && (await branchExists(repoDir, branch))) {
+      await git(repoDir, ["branch", "-D", branch]);
+    }
+    drop(manifest, path);
+  });
+}
+
+// --- recovery -------------------------------------------------------------
+
+export function isPidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+export interface RecoverOptions {
+  root?: string;
+  /** Liveness check, injectable for tests. Default: signal 0, and never this process. */
+  isAlive?: (pid: number) => boolean;
+}
+
+export interface RecoveryReport {
+  /** Entries whose owner died; marked stale and kept so the task can resume its branch. */
+  resumed: string[];
+  /** Folders deleted: finished worktrees, and orphans git no longer knows about. */
+  removed: string[];
+  /** Worktrees whose folder vanished behind git's back; git's record was pruned. */
+  pruned: string[];
+}
+
+/** At startup no task is ours yet, so our own pid in the manifest is a reused one. */
+function defaultIsAlive(pid: number): boolean {
+  return pid !== process.pid && isPidAlive(pid);
+}
+
+/** Reads the gitdir a worktree's `.git` file points at, if any. */
+async function linkedGitDir(path: string): Promise<string | undefined> {
+  try {
+    const text = await readFile(join(path, ".git"), "utf8");
+    const match = /^gitdir: (.+)$/m.exec(text);
+    return match?.[1] ? resolve(path, match[1].trim()) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Reconciles the manifest with disk and git after a crash. For every entry whose
+ * owner is gone (or that is done): prune git's record if the folder vanished,
+ * delete the folder if git no longer knows it, then drop done entries and mark the
+ * rest stale. Folders under the root that are in no entry and point at no live
+ * git worktree are deleted too. Entries owned by a live process are left alone.
+ */
+export async function recoverOnStartup(options: RecoverOptions = {}): Promise<RecoveryReport> {
+  const root = resolve(options.root ?? defaultWorktreesRoot());
+  const isAlive = options.isAlive ?? defaultIsAlive;
+  const report: RecoveryReport = { resumed: [], removed: [], pruned: [] };
+  if (!(await exists(root))) return report;
+
+  await updateManifest(root, async (manifest) => {
+    const kept: WorktreeEntry[] = [];
+    for (const entry of manifest.entries) {
+      if (entry.status === "active" && isAlive(entry.pid)) {
+        kept.push(entry);
+        continue;
+      }
+      if (!(await exists(entry.repoDir))) {
+        // The repo is gone; nothing to resume. Clear the folder if we can.
+        if (await exists(entry.path)) {
+          await removeDir(root, entry.path);
+          report.removed.push(entry.path);
+        }
+        continue;
+      }
+      const registered = await registeredWorktrees(entry.repoDir);
+      const known = registered.has(await canonical(entry.path));
+      const onDisk = await exists(entry.path);
+
+      if (known && !onDisk) {
+        await git(entry.repoDir, ["worktree", "prune"]);
+        report.pruned.push(entry.path);
+      } else if (onDisk && !known) {
+        await removeDir(root, entry.path);
+        await git(entry.repoDir, ["worktree", "prune"]);
+        report.removed.push(entry.path);
+      }
+
+      if (entry.status === "done") {
+        if (known && onDisk) {
+          await teardown(root, entry.repoDir, entry.path);
+          report.removed.push(entry.path);
+        }
+        continue;
+      }
+      entry.status = "stale";
+      kept.push(entry);
+      report.resumed.push(entry.path);
+    }
+    manifest.entries = kept;
+
+    // Orphans: folders at <root>/<repo>/<branch> that no entry claims and whose
+    // .git link points nowhere (or is missing).
+    const claimed = new Set(await Promise.all(kept.map((e) => canonical(e.path))));
+    for (const repo of await readdir(root, { withFileTypes: true })) {
+      if (!repo.isDirectory()) continue;
+      for (const child of await readdir(join(root, repo.name), { withFileTypes: true })) {
+        if (!child.isDirectory()) continue;
+        const path = join(root, repo.name, child.name);
+        if (claimed.has(await canonical(path))) continue;
+        const gitDir = await linkedGitDir(path);
+        if (gitDir && (await exists(gitDir))) continue; // git still knows it; not ours to judge
+        await removeDir(root, path);
+        report.removed.push(path);
+      }
+    }
+  });
+  return report;
+}

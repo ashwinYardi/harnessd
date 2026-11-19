@@ -1,0 +1,300 @@
+import assert from "node:assert/strict";
+import { execFileSync, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, before, describe, test } from "node:test";
+import {
+  branchName,
+  createWorktree,
+  MANIFEST_FILE,
+  MAX_BRANCH_LENGTH,
+  readManifest,
+  recoverOnStartup,
+  removeWorktree,
+} from "./index.ts";
+
+describe("branchName", () => {
+  test("lowercases the key and slugs the title", () => {
+    assert.equal(
+      branchName("MET-12", "Coordinator splits issues into sub-issues"),
+      "met-12-coordinator-splits-issues-into-sub-issues",
+    );
+  });
+
+  test("folds accents and drops other non-ascii", () => {
+    assert.equal(branchName("MET-1", "Café naïve résumé"), "met-1-cafe-naive-resume");
+    assert.equal(branchName("MET-2", "日本語 only 🚀"), "met-2-only");
+    assert.equal(branchName("MET-3", "日本語"), "met-3");
+  });
+
+  test("collapses punctuation and trims dashes", () => {
+    assert.equal(branchName("MET-4", "  Fix: `foo()` -- bar!! "), "met-4-fix-foo-bar");
+    assert.equal(branchName("MET-5", "a/b\\c_d.e"), "met-5-a-b-c-d-e");
+  });
+
+  test("empty or symbol-only titles give just the key", () => {
+    assert.equal(branchName("MET-6", ""), "met-6");
+    assert.equal(branchName("MET-7", "   "), "met-7");
+    assert.equal(branchName("MET-8", "?!#"), "met-8");
+  });
+
+  test("caps the name at a word boundary", () => {
+    const name = branchName(
+      "MET-9",
+      "Each task runs in its own git worktree and branch with crash safe cleanup on restart",
+    );
+    assert.ok(name.length <= MAX_BRANCH_LENGTH, name);
+    assert.equal(name, "met-9-each-task-runs-in-its-own-git-worktree-and-branch-with");
+  });
+
+  test("a word that ends exactly at the cap is kept whole", () => {
+    const title = `${"a".repeat(10)} ${"b".repeat(MAX_BRANCH_LENGTH - "met-1-".length - 11)} c`;
+    const name = branchName("MET-1", title);
+    assert.equal(name.length, MAX_BRANCH_LENGTH);
+    assert.ok(name.endsWith("b"));
+  });
+
+  test("hard-cuts a single word longer than the budget", () => {
+    const name = branchName("MET-10", "x".repeat(100));
+    assert.equal(name.length, MAX_BRANCH_LENGTH);
+    assert.ok(name.startsWith("met-10-xxx"));
+  });
+
+  test("rejects keys that are not <team>-<n>", () => {
+    assert.throws(() => branchName("", "t"), /invalid issue key/);
+    assert.throws(() => branchName("MET", "t"), /invalid issue key/);
+    assert.throws(() => branchName("12", "t"), /invalid issue key/);
+  });
+});
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+    encoding: "utf8",
+  }).trim();
+}
+
+/** A pid that existed a moment ago and is now gone: a crashed daemon. */
+function deadPid(): number {
+  const { pid } = spawnSync(process.execPath, ["-e", ""]);
+  assert.ok(pid);
+  return pid;
+}
+
+describe("worktrees", () => {
+  let tmp: string;
+  let repoDir: string;
+  let root: string;
+  let n = 100;
+  // Each test uses its own issue so branches never collide.
+  const nextKey = () => `MET-${n++}`;
+
+  before(async () => {
+    tmp = await realpath(await mkdtemp(join(tmpdir(), "harnessd-wt-")));
+    repoDir = join(tmp, "repo");
+    root = join(tmp, "worktrees");
+    await mkdir(repoDir);
+    git(repoDir, "init", "-q", "-b", "main");
+    await writeFile(join(repoDir, "README.md"), "hello\n");
+    git(repoDir, "add", ".");
+    git(repoDir, "commit", "-q", "-m", "init");
+  });
+
+  after(async () => {
+    await rm(tmp, { recursive: true, force: true });
+  });
+
+  const registered = () => git(repoDir, "worktree", "list", "--porcelain");
+  const branches = () => git(repoDir, "branch", "--format=%(refname:short)").split("\n");
+  const entry = async (path: string) =>
+    (await readManifest(root)).entries.find((e) => e.path === path);
+
+  test("creates <root>/<repo>/<branch> on a new branch from main", async () => {
+    const wt = await createWorktree({ repoDir, issueKey: "MET-12", title: "Split issues", root });
+    assert.equal(wt.branch, "met-12-split-issues");
+    assert.equal(wt.path, join(root, "repo", "met-12-split-issues"));
+    assert.equal(wt.resumed, false);
+    assert.ok(existsSync(join(wt.path, "README.md")));
+    assert.equal(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD"), wt.branch);
+    assert.equal(git(wt.path, "rev-parse", "HEAD"), git(repoDir, "rev-parse", "main"));
+    assert.match(registered(), new RegExp(`worktree ${wt.path}`));
+
+    const e = await entry(wt.path);
+    assert.ok(e);
+    assert.equal(e.status, "active");
+    assert.equal(e.pid, process.pid);
+    assert.equal(e.issueKey, "MET-12");
+    assert.equal(e.repoDir, repoDir);
+    assert.ok(!Number.isNaN(Date.parse(e.createdAt)));
+
+    // Atomic writes leave no tmp files behind.
+    assert.deepEqual(
+      (await readdir(root)).filter((f) => f.startsWith(MANIFEST_FILE)),
+      [MANIFEST_FILE],
+    );
+  });
+
+  test("calling create twice reuses the live worktree", async () => {
+    const issueKey = nextKey();
+    const first = await createWorktree({ repoDir, issueKey, title: "twice", root });
+    const second = await createWorktree({ repoDir, issueKey, title: "twice", root });
+    assert.equal(second.path, first.path);
+    assert.equal(second.resumed, true);
+    assert.equal((await readManifest(root)).entries.filter((e) => e.path === first.path).length, 1);
+  });
+
+  test("remove keeps the branch by default and reuses it on resume", async () => {
+    const issueKey = nextKey();
+    const wt = await createWorktree({ repoDir, issueKey, title: "resume me", root });
+    await writeFile(join(wt.path, "work.txt"), "progress\n");
+    git(wt.path, "add", ".");
+    git(wt.path, "commit", "-q", "-m", "progress");
+
+    await removeWorktree({ repoDir, path: wt.path, root });
+    assert.equal(existsSync(wt.path), false);
+    assert.doesNotMatch(registered(), new RegExp(`worktree ${wt.path}`));
+    assert.equal(await entry(wt.path), undefined);
+    assert.ok(branches().includes(wt.branch));
+
+    const again = await createWorktree({ repoDir, issueKey, title: "resume me", root });
+    assert.equal(again.resumed, true);
+    assert.equal(again.branch, wt.branch);
+    assert.ok(existsSync(join(again.path, "work.txt")));
+  });
+
+  test("remove can delete the branch", async () => {
+    const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "throwaway", root });
+    await writeFile(join(wt.path, "dirty.txt"), "uncommitted\n");
+    await removeWorktree({ repoDir, path: wt.path, root, deleteBranch: true });
+    assert.equal(existsSync(wt.path), false);
+    assert.ok(!branches().includes(wt.branch));
+  });
+
+  test("remove refuses paths outside the root", async () => {
+    await assert.rejects(
+      removeWorktree({ repoDir, path: repoDir, root }),
+      /outside worktrees root/,
+    );
+    assert.ok(existsSync(join(repoDir, "README.md")));
+  });
+
+  test("create fails cleanly on an unknown base and leaves no entry", async () => {
+    const issueKey = nextKey();
+    await assert.rejects(
+      createWorktree({ repoDir, issueKey, title: "bad base", base: "nope", root }),
+      /git worktree add/,
+    );
+    const path = join(root, "repo", branchName(issueKey, "bad base"));
+    assert.equal(await entry(path), undefined);
+  });
+
+  describe("recoverOnStartup", () => {
+    test("dead owner, folder intact: marked stale, folder and branch kept, then resumed", async () => {
+      const issueKey = nextKey();
+      const wt = await createWorktree({ repoDir, issueKey, title: "crash", root, pid: deadPid() });
+      await writeFile(join(wt.path, "wip.txt"), "uncommitted\n");
+
+      const report = await recoverOnStartup({ root });
+      assert.ok(report.resumed.includes(wt.path));
+      assert.ok(!report.removed.includes(wt.path));
+      assert.equal((await entry(wt.path))?.status, "stale");
+      assert.ok(existsSync(join(wt.path, "wip.txt")));
+      assert.ok(branches().includes(wt.branch));
+
+      const again = await createWorktree({ repoDir, issueKey, title: "crash", root });
+      assert.equal(again.resumed, true);
+      assert.ok(existsSync(join(again.path, "wip.txt")));
+      const e = await entry(wt.path);
+      assert.equal(e?.status, "active");
+      assert.equal(e?.pid, process.pid);
+    });
+
+    test("folder deleted behind git's back: pruned, kept stale, re-created on resume", async () => {
+      const issueKey = nextKey();
+      const wt = await createWorktree({ repoDir, issueKey, title: "gone", root, pid: deadPid() });
+      git(wt.path, "commit", "-q", "--allow-empty", "-m", "on branch");
+      await rm(wt.path, { recursive: true, force: true });
+      assert.match(registered(), new RegExp(`worktree ${wt.path}`));
+
+      const report = await recoverOnStartup({ root });
+      assert.ok(report.pruned.includes(wt.path));
+      assert.ok(report.resumed.includes(wt.path));
+      assert.doesNotMatch(registered(), new RegExp(`worktree ${wt.path}`));
+      assert.equal((await entry(wt.path))?.status, "stale");
+
+      const again = await createWorktree({ repoDir, issueKey, title: "gone", root });
+      assert.equal(again.resumed, true);
+      assert.equal(git(again.path, "log", "-1", "--format=%s"), "on branch");
+    });
+
+    test("crash mid-remove (status done): finishes the removal and drops the entry", async () => {
+      const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "half", root });
+      const manifest = await readManifest(root);
+      for (const e of manifest.entries) if (e.path === wt.path) e.status = "done";
+      await writeFile(join(root, MANIFEST_FILE), JSON.stringify(manifest));
+
+      const report = await recoverOnStartup({ root });
+      assert.ok(report.removed.includes(wt.path));
+      assert.equal(existsSync(wt.path), false);
+      assert.doesNotMatch(registered(), new RegExp(`worktree ${wt.path}`));
+      assert.equal(await entry(wt.path), undefined);
+      assert.ok(branches().includes(wt.branch));
+    });
+
+    test("removes orphan folders git no longer knows about", async () => {
+      // A worktree whose git record was pruned while the folder survived.
+      const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "orphan", root });
+      const manifest = await readManifest(root);
+      manifest.entries = manifest.entries.filter((e) => e.path !== wt.path);
+      await writeFile(join(root, MANIFEST_FILE), JSON.stringify(manifest));
+      await rm(join(repoDir, ".git", "worktrees", wt.branch), { recursive: true, force: true });
+      // And a stray folder with no .git at all.
+      const stray = join(root, "repo", "met-999-stray");
+      await mkdir(stray, { recursive: true });
+
+      const report = await recoverOnStartup({ root });
+      assert.ok(report.removed.includes(wt.path));
+      assert.ok(report.removed.includes(stray));
+      assert.equal(existsSync(wt.path), false);
+      assert.equal(existsSync(stray), false);
+    });
+
+    test("leaves worktrees owned by a live process alone", async () => {
+      const wt = await createWorktree({
+        repoDir,
+        issueKey: nextKey(),
+        title: "alive",
+        root,
+        pid: process.ppid,
+      });
+      const report = await recoverOnStartup({ root });
+      assert.ok(!report.resumed.includes(wt.path));
+      assert.ok(!report.removed.includes(wt.path));
+      assert.equal((await entry(wt.path))?.status, "active");
+      assert.ok(existsSync(wt.path));
+    });
+
+    test("treats its own pid as a reused pid from a dead daemon", async () => {
+      const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "self", root });
+      const report = await recoverOnStartup({ root });
+      assert.ok(report.resumed.includes(wt.path));
+      assert.equal((await entry(wt.path))?.status, "stale");
+    });
+
+    test("moves a corrupt manifest aside and still starts", async () => {
+      const other = join(tmp, "corrupt-root");
+      await mkdir(other);
+      await writeFile(join(other, MANIFEST_FILE), "{ not json");
+      const report = await recoverOnStartup({ root: other });
+      assert.deepEqual(report, { resumed: [], removed: [], pruned: [] });
+      const files = await readdir(other);
+      assert.ok(files.some((f) => f.startsWith(`${MANIFEST_FILE}.corrupt-`)));
+    });
+
+    test("a missing root is a no-op", async () => {
+      const report = await recoverOnStartup({ root: join(tmp, "never-created") });
+      assert.deepEqual(report, { resumed: [], removed: [], pruned: [] });
+    });
+  });
+});
