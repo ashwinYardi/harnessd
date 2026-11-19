@@ -32,3 +32,6 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     close: () => new Promise((resolve, reject) => server.close((e) => (e ? reject(e) : resolve()))),
   };
 }
+
+export * from "./config/load.ts";
+export * from "./config/merge.ts";

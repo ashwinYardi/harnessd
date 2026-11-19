@@ -35,6 +35,9 @@ importers:
       '@harnessd/shared':
         specifier: workspace:*
         version: link:../shared
+      smol-toml:
+        specifier: ^1.9.1
+        version: 1.9.1
 
   packages/shared: {}
 
@@ -268,6 +271,10 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  smol-toml@1.9.1:
+    resolution: {integrity: sha512-j7WyPdf0CJoutMzMoPLF/bVXHtKZIT9Rb4eGeEbWw8X2t5oirjPgpL+OpaENZrILYaXqYwnVH+qgUwVbl+pUJQ==}
+    engines: {node: '>= 18'}
+
   turbo@2.11.13:
     resolution: {integrity: sha512-2EZ8StW6tqaj71HGF60oUOmJrPQHidmZ5dcwv2VORofya9JthVrfZhxbzRMx/QxjPwYi754i2h5RFsZSDzpnaQ==}
     hasBin: true
@@ -406,6 +413,8 @@ snapshots:
 
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
+
+  smol-toml@1.9.1: {}
 
   turbo@2.11.13:
     optionalDependencies:
