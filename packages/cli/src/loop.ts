@@ -154,9 +154,23 @@ interface Blocker {
 
 const blocked = (check: Blocker["check"], message: string): Blocker => ({ check, message });
 
-/** Builds the loop from the config and the Linear key, or says what blocks it. */
-async function buildLoop(deps: Deps): Promise<Built | Blocker> {
-  const { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log } = deps;
+const isBlocker = <T extends object>(b: T | Blocker): b is Blocker => "check" in b;
+
+/** What the loop is built from, once nothing blocks it. */
+interface Ready {
+  config: MergedConfig;
+  teamId: string;
+  team: ListReadyOptions;
+}
+
+/**
+ * Says what blocks the loop: the Linear key, the config or linear.team_id. It builds no
+ * Linear client, notifier or loop, so it is safe to run on each read.
+ */
+async function findBlocker(
+  deps: Pick<Deps, "repoDir" | "globalDir" | "secrets">,
+): Promise<Ready | Blocker> {
+  const { repoDir, globalDir, secrets } = deps;
   // Saved value or reference first, then LINEAR_API_KEY (D-030).
   try {
     if ((await secrets.value("linear.api_key")) === undefined) {
@@ -190,6 +204,15 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
     if (UUID.test(project)) team.projectId = project;
     else team.projectName = project;
   }
+  return { config, teamId, team };
+}
+
+/** Builds the loop from the config and the Linear key, or says what blocks it. */
+async function buildLoop(deps: Deps): Promise<Built | Blocker> {
+  const { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log } = deps;
+  const ready = await findBlocker(deps);
+  if (isBlocker(ready)) return ready;
+  const { config, teamId, team } = ready;
   // Read on each request, so a key replaced in Settings is used on the next tick.
   const linear = new LinearClient({
     apiKey: async () => {
@@ -241,8 +264,6 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
   });
   return { loop, linear, team, teamId, config, visibility };
 }
-
-const isBlocker = (b: Built | Blocker): b is Blocker => "check" in b;
 
 /**
  * Runs the coordinator loop for one repo. The Linear key comes from the secret store,
@@ -296,8 +317,8 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
 
   // Every harness and connection, before anything is dispatched (MET-27, D-023).
   const startChecks = await checks(options);
-  let blocking = startChecks.filter(isBlocking).map((c) => c.id);
-  if (isBlocker(built)) blocking = [...new Set([built.check, ...blocking])];
+  const startIds = startChecks.filter(isBlocking).map((c) => c.id);
+  const blocking = isBlocker(built) ? [...new Set([built.check, ...startIds])] : startIds;
   if (blocking.length > 0 && parsed.once) {
     for (const line of refusalLines(startChecks)) io.err(line);
     return 1;
@@ -331,29 +352,45 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     pause,
   });
 
+  // The blocking ids from the checks as they are now, the loop's own blocker first.
+  const currentBlocking = async (): Promise<{ blocking: string[]; blocker?: Blocker }> => {
+    const now = await checks({ ...options, servingPort: true });
+    const ready = await findBlocker(deps);
+    const ids = now.filter(isBlocking).map((c) => c.id);
+    if (!isBlocker(ready)) return { blocking: ids };
+    return { blocking: [...new Set([ready.check, ...ids])], blocker: ready };
+  };
+
   const loopRoutes: Route[] = [
     {
       method: "GET",
       path: "/api/loop",
-      handler: async () => ({
-        state: active ? "running" : "setup",
-        blocking: active ? [] : blocking,
-      }),
+      // Only reads: in setup it runs the checks again, so a saved key or a setup action
+      // shows at once (D-026). It never starts the loop.
+      handler: async () =>
+        active
+          ? { state: "running", blocking: [] }
+          : { state: "setup", blocking: (await currentBlocking()).blocking },
     },
     {
       method: "POST",
       path: "/api/start",
       handler: async () => {
         if (active) return { state: "running", blocking: [] };
-        const now = await checks({ ...options, servingPort: true });
-        const next = await buildLoop(deps);
-        blocking = now.filter(isBlocking).map((c) => c.id);
-        if (isBlocker(next)) blocking = [...new Set([next.check, ...blocking])];
-        if (isBlocker(next) || blocking.length > 0) {
+        const now = await currentBlocking();
+        if (now.blocking.length > 0) {
           throw new HttpError(
             409,
             "setup_incomplete",
-            `Fix these first: ${blocking.join(", ")}.${isBlocker(next) ? ` ${next.message}` : ""}`,
+            `Fix these first: ${now.blocking.join(", ")}.${now.blocker ? ` ${now.blocker.message}` : ""}`,
+          );
+        }
+        const next = await buildLoop(deps);
+        if (isBlocker(next)) {
+          throw new HttpError(
+            409,
+            "setup_incomplete",
+            `Fix these first: ${next.check}. ${next.message}`,
           );
         }
         if (active) return { state: "running", blocking: [] };
