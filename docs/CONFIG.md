@@ -31,6 +31,11 @@ channel = "#harnessd"
 # .github/workflows/** (release and CI) and .harnessd/config.toml (merge gate).
 protected_paths = ["**/auth/**"]
 
+[qa]
+# Run in a fresh worktree at the PR head before the QA agent starts (docs/LOOP.md "QA").
+setup_command = "pnpm install --frozen-lockfile --prefer-offline"   # "" skips it
+test_command = "pnpm test"   # a failure means changes requested, whatever the agent says
+
 [agents.backend]
 role = "backend"            # coordinator | backend | frontend | qa
 harness = "claude-code"     # claude-code | codex | antigravity | opencode | cursor | grok

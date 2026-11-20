@@ -20,6 +20,16 @@ export interface InFlightRun {
   pid: number;
 }
 
+/** What QA asked a part to fix; its next run's prompt carries it. */
+export interface QaFeedback {
+  /** The part's PR, when one was found. */
+  prUrl?: string;
+  /** The request-changes review, when it was posted. */
+  reviewUrl?: string;
+  /** One line per failing item: the item and its evidence. */
+  failing: string[];
+}
+
 export interface LoopState {
   version: 1;
   /** ISO time of the last poll, null before the first. */
@@ -27,10 +37,21 @@ export interface LoopState {
   inFlight: InFlightRun[];
   /** Failed runs per sub-issue id (D-014: one retry, then Needs input). */
   attempts: Record<string, number>;
+  /** Failed QA rounds per parent issue id (D-014: the second one escalates). */
+  qaFailures: Record<string, number>;
+  /** Open QA requests per part sub-issue id, cleared when the part's next run succeeds. */
+  qaFeedback: Record<string, QaFeedback>;
 }
 
 export function emptyLoopState(): LoopState {
-  return { version: 1, lastPollAt: null, inFlight: [], attempts: {} };
+  return {
+    version: 1,
+    lastPollAt: null,
+    inFlight: [],
+    attempts: {},
+    qaFailures: {},
+    qaFeedback: {},
+  };
 }
 
 /** Where the loop keeps its state. */
@@ -59,21 +80,42 @@ function isRun(value: unknown): value is InFlightRun {
   );
 }
 
+function counts(value: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, n] of Object.entries(value)) {
+    if (typeof n === "number" && Number.isInteger(n) && n > 0) out[id] = n;
+  }
+  return out;
+}
+
+function feedback(value: unknown): Record<string, QaFeedback> {
+  const out: Record<string, QaFeedback> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const f = raw as Partial<QaFeedback> | null;
+    if (typeof f !== "object" || f === null || !Array.isArray(f.failing)) continue;
+    const entry: QaFeedback = { failing: f.failing.filter((l) => typeof l === "string") };
+    if (typeof f.prUrl === "string") entry.prUrl = f.prUrl;
+    if (typeof f.reviewUrl === "string") entry.reviewUrl = f.reviewUrl;
+    out[id] = entry;
+  }
+  return out;
+}
+
 /** Reads a state file's JSON, keeping only well-formed parts. Throws on anything unreadable. */
 export function parseLoopState(text: string): LoopState {
   const raw = JSON.parse(text) as Partial<LoopState> | null;
   if (typeof raw !== "object" || raw === null || !Array.isArray(raw.inFlight)) {
     throw new Error("no inFlight array");
   }
-  const attempts: Record<string, number> = {};
-  for (const [id, n] of Object.entries(raw.attempts ?? {})) {
-    if (typeof n === "number" && Number.isInteger(n) && n > 0) attempts[id] = n;
-  }
   return {
     version: 1,
     lastPollAt: typeof raw.lastPollAt === "string" ? raw.lastPollAt : null,
     inFlight: raw.inFlight.filter(isRun),
-    attempts,
+    attempts: counts(raw.attempts),
+    qaFailures: counts(raw.qaFailures),
+    qaFeedback: feedback(raw.qaFeedback),
   };
 }
 

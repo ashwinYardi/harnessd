@@ -34,6 +34,14 @@ export interface SlackConfig {
   channel: string;
 }
 
+/** How harnessd itself checks a PR before QA approves it (D-013). */
+export interface QaConfig {
+  /** Run first in the fresh QA worktree, e.g. to install dependencies. Empty skips it. */
+  setup_command: string;
+  /** The repo's tests. QA never approves when it fails, whatever the model says. */
+  test_command: string;
+}
+
 export interface MergeConfig {
   /** Globs; a PR touching any of them waits for a human (D-013). */
   protected_paths: string[];
@@ -68,6 +76,7 @@ export interface Settings {
   linear: LinearConfig;
   slack: SlackConfig;
   merge: MergeConfig;
+  qa: QaConfig;
 }
 
 export type DeepPartial<T> = T extends readonly unknown[]
@@ -192,6 +201,10 @@ export const DEFAULT_SETTINGS: Settings = {
       ".harnessd/config.toml",
     ],
   },
+  qa: {
+    setup_command: "pnpm install --frozen-lockfile --prefer-offline",
+    test_command: "pnpm test",
+  },
 };
 
 /** The default team (D-010): every agent on Claude Code. */
@@ -256,6 +269,12 @@ class Checker {
         }
       }
     }
+    return value;
+  }
+
+  /** A string that may be empty (an empty command means "skip"). */
+  text(value: unknown, path: string): string {
+    if (typeof value !== "string") this.fail(path, `expected a string, got ${describe(value)}`);
     return value;
   }
 
@@ -347,7 +366,7 @@ export function parseAgentSettings(
 /** Validates a parsed config.toml. Unknown keys are errors, so typos never pass silently. */
 export function parseConfigFile(value: unknown, file: string): ConfigFile {
   const c = new Checker(file);
-  const root = c.table(value, "", ["limits", "linear", "slack", "merge", "agents", "mcp"]);
+  const root = c.table(value, "", ["limits", "linear", "slack", "merge", "qa", "agents", "mcp"]);
   const out: ConfigFile = {};
 
   if (root.limits !== undefined) {
@@ -395,6 +414,15 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
       t.protected_paths === undefined
         ? {}
         : { protected_paths: c.stringArray(t.protected_paths, "merge.protected_paths") };
+  }
+
+  if (root.qa !== undefined) {
+    const t = c.table(root.qa, "qa", ["setup_command", "test_command"]);
+    const qa: Partial<QaConfig> = {};
+    if (t.setup_command !== undefined)
+      qa.setup_command = c.text(t.setup_command, "qa.setup_command");
+    if (t.test_command !== undefined) qa.test_command = c.string(t.test_command, "qa.test_command");
+    out.qa = qa;
   }
 
   if (root.agents !== undefined) {

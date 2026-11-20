@@ -1,0 +1,511 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  type AdapterEvent,
+  type AdapterRun,
+  emptyTokenUsage,
+  type HarnessAdapter,
+  type Issue,
+  type LinkedIssue,
+  type ResolvedAgentConfig,
+  type RunResult,
+  type Task,
+  type WorkflowStateName,
+} from "@harnessd/shared";
+import type { GitHub, PullRequest, ReviewInput } from "../github/client.ts";
+import type { Worktree } from "../worktrees/index.ts";
+import type { Notifier } from "./notifier.ts";
+import {
+  type CommandResult,
+  type CommandRunner,
+  parseQaVerdict,
+  type QaRunInput,
+  type QaRunResult,
+  qaChecklist,
+  runQa,
+  runQaTests,
+  runShellCommand,
+  settleQa,
+} from "./qa.ts";
+import { partMarker } from "./split.ts";
+import { emptyLoopState } from "./state.ts";
+
+const agent: ResolvedAgentConfig = {
+  name: "qa",
+  role: "qa",
+  harness: "claude-code",
+  instructions: "Be strict.",
+  rules: [],
+  skills: [],
+};
+
+function issue(key: string, extra: Partial<LinkedIssue> = {}): LinkedIssue {
+  return {
+    id: `id-${key}`,
+    key,
+    title: `Title ${key}`,
+    description: "",
+    priority: 0,
+    state: "In Review",
+    labels: [],
+    size: "S",
+    doneWhen: [],
+    url: `https://linear.test/${key}`,
+    blockedBy: [],
+    blockers: [],
+    ...extra,
+  } as LinkedIssue;
+}
+
+const parent: Issue = issue("MET-50", {
+  state: "In Progress",
+  size: "M",
+  doneWhen: [
+    { text: "Avatars are served", checked: false },
+    { text: "It has tests", checked: false },
+  ],
+});
+const qa = issue("MET-53", { parentId: parent.id, description: partMarker("qa"), state: "Ready" });
+const backend = issue("MET-51", { parentId: parent.id, description: partMarker("backend") });
+const frontend = issue("MET-52", { parentId: parent.id, description: partMarker("frontend") });
+
+function pr(number: number, key: string): PullRequest {
+  return {
+    number,
+    title: `${key}: work`,
+    url: `https://github.test/o/r/pull/${number}`,
+    headRefName: `${key.toLowerCase()}-work`,
+    headRefOid: `sha${number}`,
+    baseRefName: "main",
+    isDraft: false,
+  };
+}
+
+type Reply = string | { status: RunResult["status"]; error: string };
+
+function fakeAdapter(replies: Reply[]) {
+  const tasks: Task[] = [];
+  const cwds: string[] = [];
+  const queue = [...replies];
+  const adapter: HarnessAdapter = {
+    id: "claude-code",
+    start(task, worktree): AdapterRun {
+      tasks.push(task);
+      cwds.push(worktree);
+      const reply = queue.shift() ?? "";
+      const result: RunResult = {
+        status: typeof reply === "string" ? "ok" : reply.status,
+        exitCode: typeof reply === "string" ? 0 : 1,
+        durationMs: 5,
+        tokens: emptyTokenUsage(),
+      };
+      if (typeof reply === "string") result.finalText = reply;
+      else result.error = reply.error;
+      const events: AdapterEvent[] = [{ type: "end", result }];
+      return {
+        events: (async function* () {
+          yield* events;
+        })(),
+        result: Promise.resolve(result),
+        cancel: async () => {},
+      };
+    },
+  };
+  return { adapter, tasks, cwds };
+}
+
+interface Options {
+  replies?: Reply[];
+  prs?: Record<string, PullRequest>;
+  /** Exit code of the test command. */
+  testExit?: number;
+  /** Make postReview refuse these events. */
+  refuse?: string[];
+  checkoutFails?: boolean;
+}
+
+function harness(options: Options = {}) {
+  const reviews: Array<ReviewInput & { number: number }> = [];
+  const checkouts: Array<{ issueKey: string; title: string; branch: string; sha: string }> = [];
+  const removed: string[] = [];
+  const commands: Array<{ command: string; cwd: string }> = [];
+  const worktreeLog: string[] = [];
+  const logs: string[] = [];
+  const prs = options.prs ?? { [backend.key]: pr(7, backend.key) };
+  const github: GitHub = {
+    async findPrForIssue(key) {
+      return prs[key];
+    },
+    async prFiles() {
+      return [{ path: "src/avatars.ts", additions: 40, deletions: 2 }];
+    },
+    async postReview(number, review) {
+      if (options.refuse?.includes(review.event)) {
+        throw new Error("HTTP 422: Can not approve your own pull request");
+      }
+      reviews.push({ number, ...review });
+      return `https://github.test/o/r/pull/${number}#review-${reviews.length}`;
+    },
+  };
+  const { adapter, tasks, cwds } = fakeAdapter(options.replies ?? []);
+  const runCommand: CommandRunner = async (command, cwd): Promise<CommandResult> => {
+    commands.push({ command, cwd });
+    const exitCode = command === "pnpm test" ? (options.testExit ?? 0) : 0;
+    return { exitCode, timedOut: false, output: exitCode === 0 ? "ok 12" : "not ok 3 - avatars" };
+  };
+  const deps = {
+    github,
+    worktrees: {
+      async checkout(input: (typeof checkouts)[number]): Promise<Worktree> {
+        if (options.checkoutFails) throw new Error("fetch failed");
+        checkouts.push(input);
+        return { path: `/wt/qa-${input.sha}`, branch: input.branch, resumed: false };
+      },
+      async remove(path: string) {
+        removed.push(path);
+      },
+    },
+    adapter,
+    agent,
+    commands: { setup_command: "", test_command: "pnpm test" },
+    runCommand,
+    onWorktree: (path: string) => worktreeLog.push(path),
+    log: (line: string) => logs.push(line),
+  };
+  const input: QaRunInput = {
+    qa,
+    parent,
+    parts: [backend],
+    budgetMs: 60_000,
+    round: 1,
+    maxRounds: 2,
+  };
+  return { deps, input, reviews, checkouts, removed, commands, worktreeLog, logs, tasks, cwds };
+}
+
+const verdict = (pass: boolean[], testsPassed = true) =>
+  JSON.stringify({
+    items: pass.map((p, i) => ({
+      text: qaChecklist(parent)[i],
+      pass: p,
+      evidence: p ? `src/avatars.ts:${i + 1}` : `nothing covers item ${i + 1}`,
+    })),
+    testsPassed,
+  });
+
+function settleDeps() {
+  const comments: Array<{ issueId: string; body: string }> = [];
+  const moves: Array<{ issueId: string; state: WorkflowStateName }> = [];
+  const pings: string[] = [];
+  const notifier: Notifier = {
+    async notify(text) {
+      pings.push(text);
+    },
+  };
+  const linear = {
+    async comment(issueId: string, body: string) {
+      comments.push({ issueId, body });
+      return `comment-${comments.length}`;
+    },
+    async moveTo(issueId: string, state: WorkflowStateName) {
+      moves.push({ issueId, state });
+    },
+  };
+  return { deps: { linear, notifier, maxFailures: 2 }, comments, moves, pings };
+}
+
+test("every item and the tests pass: approve at the PR head, then QA moves to In Review", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "approved");
+  assert.equal(h.reviews.length, 1);
+  assert.equal(h.reviews[0]?.event, "APPROVE");
+  assert.equal(h.reviews[0]?.number, 7);
+  assert.equal(h.reviews[0]?.commitId, "sha7");
+  assert.match(h.reviews[0]?.body ?? "", /approved/);
+  assert.match(h.reviews[0]?.body ?? "", /- \[x\] Avatars are served: src\/avatars.ts:1/);
+
+  const prompt = h.tasks[0]?.prompt ?? "";
+  assert.match(
+    prompt,
+    /## Done when \(MET-50: Title MET-50\)\n1\. Avatars are served\n2\. It has tests/,
+  );
+  assert.match(prompt, /src\/avatars\.ts \(\+40 -2\)/);
+  assert.match(prompt, /gh pr diff 7/);
+  assert.match(prompt, /`pnpm test` passed/);
+  assert.match(prompt, /exactly 2 item\(s\)/);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "approved");
+  assert.deepEqual(state.qaFailures, {});
+  assert.deepEqual(s.moves, [{ issueId: qa.id, state: "In Review" }]);
+  assert.equal(s.comments.length, 1);
+  assert.equal(s.comments[0]?.issueId, qa.id);
+  assert.match(
+    s.comments[0]?.body ?? "",
+    /MET-51 \[PR #7\]\(https:\/\/github\.test\/o\/r\/pull\/7\): approved \(\[review\]\(https:\/\/github\.test\/o\/r\/pull\/7#review-1\)\)/,
+  );
+  assert.deepEqual(s.pings, []);
+});
+
+test("the worktree is checked out at the PR head, used as the agent's cwd and removed", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  await runQa(h.input, h.deps);
+  assert.deepEqual(h.checkouts, [
+    { issueKey: "MET-53", title: "pr 7", branch: "met-51-work", sha: "sha7" },
+  ]);
+  assert.deepEqual(
+    h.commands,
+    [{ command: "pnpm test", cwd: "/wt/qa-sha7" }],
+    "empty setup skipped",
+  );
+  assert.deepEqual(h.cwds, ["/wt/qa-sha7"]);
+  assert.equal(h.tasks[0]?.id, "MET-53-qa-1-pr7");
+  assert.deepEqual(h.removed, ["/wt/qa-sha7"]);
+  assert.deepEqual(h.worktreeLog, ["/wt/qa-sha7", ""]);
+});
+
+test("the worktree is removed even when the agent run fails", async () => {
+  const h = harness({ replies: [{ status: "timeout", error: "budget" }] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "error");
+  assert.match(result.reviews[0]?.error ?? "", /harness run timeout: budget/);
+  assert.deepEqual(h.removed, ["/wt/qa-sha7"]);
+  assert.equal(h.reviews.length, 0, "no review without a verdict");
+});
+
+test("one failing item requests changes listing it; the part goes back to Ready", async () => {
+  const h = harness({ replies: [verdict([true, false])] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "changes_requested");
+  assert.equal(h.reviews[0]?.event, "REQUEST_CHANGES");
+  const body = h.reviews[0]?.body ?? "";
+  assert.match(body, /changes requested, round 1 of 2/);
+  assert.match(body, /Failing:\n- \[ \] It has tests: nothing covers item 2/);
+  assert.match(body, /Passing:\n- \[x\] Avatars are served/);
+  assert.deepEqual(result.reviews[0]?.failing, ["It has tests: nothing covers item 2"]);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "sent_back");
+  assert.equal(state.qaFailures[parent.id], 1);
+  assert.deepEqual(state.qaFeedback[backend.id], {
+    failing: ["It has tests: nothing covers item 2"],
+    prUrl: "https://github.test/o/r/pull/7",
+    reviewUrl: "https://github.test/o/r/pull/7#review-1",
+  });
+  assert.deepEqual(s.moves, [
+    { issueId: backend.id, state: "Ready" },
+    { issueId: qa.id, state: "Ready" },
+  ]);
+  const partComment = s.comments.find((c) => c.issueId === backend.id)?.body ?? "";
+  assert.match(partComment, /changes requested on \[PR #7\].*\[review\]\(.*#review-1\)/);
+  assert.match(partComment, /backend agent fixes the PR/);
+  assert.match(partComment, /- It has tests: nothing covers item 2/);
+  assert.match(s.comments.at(-1)?.body ?? "", /runs again once every part is back in review/);
+  assert.deepEqual(s.pings, []);
+});
+
+test("failing tests request changes even when the model says everything passes", async () => {
+  const h = harness({ replies: [verdict([true, true], true)], testExit: 1 });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "changes_requested");
+  assert.equal(h.reviews[0]?.event, "REQUEST_CHANGES");
+  const body = h.reviews[0]?.body ?? "";
+  assert.match(
+    body,
+    /- \[ \] Tests: `pnpm test` exited with code 1 when harnessd ran it, although the QA agent said they pass/,
+  );
+  assert.match(body, /```text\nnot ok 3 - avatars\n```/);
+  assert.match(h.tasks[0]?.prompt ?? "", /`pnpm test` exited with code 1/);
+});
+
+test("the model reporting failing tests also blocks approval", async () => {
+  const h = harness({ replies: [verdict([true, true], false)] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "changes_requested");
+  assert.match(result.reviews[0]?.failing[0] ?? "", /QA agent saw failing tests/);
+});
+
+test("an invalid verdict is a failed QA run: no review, counted, nothing sent back", async () => {
+  const h = harness({ replies: ["Looks good to me!"] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "error");
+  assert.equal(h.reviews.length, 0);
+  assert.match(result.reviews[0]?.error ?? "", /QA verdict was unusable: not JSON/);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "sent_back");
+  assert.equal(state.qaFailures[parent.id], 1);
+  assert.deepEqual(state.qaFeedback, {});
+  assert.deepEqual(s.moves, [{ issueId: qa.id, state: "Ready" }], "only QA runs again");
+  assert.match(s.comments[0]?.body ?? "", /QA could not judge every PR, so MET-53 runs again/);
+  assert.match(s.comments[0]?.body ?? "", /not judged: the QA verdict was unusable/);
+});
+
+test("an invalid verdict with failing tests still requests changes", async () => {
+  const h = harness({ replies: ["{}"], testExit: 2 });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "changes_requested");
+  assert.match(
+    h.reviews[0]?.body ?? "",
+    /Also, the QA verdict was unusable: items: expected an array/,
+  );
+});
+
+test("the second failure escalates to the human once and sends nothing back", async () => {
+  const h = harness({ replies: [verdict([false, true])] });
+  const input = { ...h.input, round: 2 };
+  const result = await runQa(input, h.deps);
+  assert.match(h.reviews[0]?.body ?? "", /round 2 of 2/);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+  state.qaFeedback[backend.id] = { failing: ["old"] };
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "escalated");
+  assert.deepEqual(state.qaFailures, {});
+  assert.deepEqual(state.qaFeedback, {});
+  assert.deepEqual(s.moves, [
+    { issueId: qa.id, state: "Needs input" },
+    { issueId: parent.id, state: "Needs input" },
+  ]);
+  assert.equal(s.comments.length, 1);
+  assert.equal(s.comments[0]?.issueId, parent.id);
+  assert.match(s.comments[0]?.body ?? "", /QA failed twice for MET-50, so this needs a human/);
+  assert.match(s.comments[0]?.body ?? "", /- Avatars are served: nothing covers item 1/);
+  assert.deepEqual(s.pings, [
+    "MET-50 needs input (QA failed twice): MET-53 could not approve MET-51 https://linear.test/MET-50",
+  ]);
+});
+
+test("a part without an open PR is sent back without a checkout", async () => {
+  const h = harness({ prs: {} });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "changes_requested");
+  assert.deepEqual(result.reviews[0]?.failing, [
+    "No open PR has MET-51 in its title. Push the branch and open one.",
+  ]);
+  assert.deepEqual(h.checkouts, []);
+  assert.deepEqual(h.tasks, []);
+});
+
+test("Done parts are skipped and every other part's PR is reviewed", async () => {
+  const h = harness({
+    prs: { [backend.key]: pr(7, backend.key), [frontend.key]: pr(8, frontend.key) },
+    replies: [verdict([true, true]), verdict([true, true])],
+  });
+  const done = issue("MET-54", { state: "Done", description: partMarker("backend") });
+  const result = await runQa({ ...h.input, parts: [backend, done, frontend] }, h.deps);
+  assert.equal(result.outcome, "approved");
+  assert.deepEqual(
+    h.reviews.map((r) => [r.number, r.event]),
+    [
+      [7, "APPROVE"],
+      [8, "APPROVE"],
+    ],
+  );
+  assert.deepEqual(h.removed, ["/wt/qa-sha7", "/wt/qa-sha8"]);
+});
+
+test("a refused review event on your own PR falls back to a comment review", async () => {
+  const h = harness({ replies: [verdict([true, true])], refuse: ["APPROVE"] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "approved");
+  assert.equal(h.reviews[0]?.event, "COMMENT");
+  assert.equal(result.reviews[0]?.postedAs, "COMMENT");
+  assert.match(h.logs[0] ?? "", /APPROVE on PR #7 refused/);
+});
+
+test("an approval that cannot be posted at all is an error, not an approval", async () => {
+  const h = harness({ replies: [verdict([true, true])], refuse: ["APPROVE", "COMMENT"] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "error");
+  assert.match(result.reviews[0]?.error ?? "", /could not post the approval/);
+});
+
+test("a failed checkout is an error and nothing runs", async () => {
+  const h = harness({ checkoutFails: true });
+  const result: QaRunResult = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "error");
+  assert.match(result.reviews[0]?.error ?? "", /could not check out PR #7: fetch failed/);
+  assert.deepEqual(h.commands, []);
+  assert.deepEqual(h.removed, []);
+});
+
+test("parseQaVerdict is strict", () => {
+  const good = verdict([true, false]);
+  const parsed = parseQaVerdict(`Here it is:\n\`\`\`json\n${good}\n\`\`\``, 2);
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.ok && parsed.verdict.items[1]?.pass, false);
+
+  const bad = (text: string, n = 1) => {
+    const r = parseQaVerdict(text, n);
+    assert.equal(r.ok, false, text);
+    return r.ok ? "" : r.error;
+  };
+  const item = { text: "a", pass: true, evidence: "b" };
+  assert.match(bad("no json"), /not JSON/);
+  assert.match(bad("[]"), /expected a JSON object/);
+  assert.match(
+    bad(JSON.stringify({ items: [item], testsPassed: true, extra: 1 })),
+    /unknown key "extra"/,
+  );
+  assert.match(bad(JSON.stringify({ items: [item] })), /testsPassed: expected true or false/);
+  assert.match(bad(JSON.stringify({ items: [item], testsPassed: "yes" })), /testsPassed/);
+  assert.match(bad(JSON.stringify({ items: [item], testsPassed: true }), 2), /expected 2.*got 1/);
+  assert.match(
+    bad(JSON.stringify({ items: [{ ...item, pass: "true" }], testsPassed: true })),
+    /items\[0\]\.pass/,
+  );
+  assert.match(
+    bad(JSON.stringify({ items: [{ ...item, evidence: " " }], testsPassed: true })),
+    /items\[0\]\.evidence: expected a non-empty string/,
+  );
+  assert.match(
+    bad(JSON.stringify({ items: [{ ...item, note: "x" }], testsPassed: true })),
+    /items\[0\]: unknown key "note"/,
+  );
+});
+
+test("qaChecklist falls back to the issue as written", () => {
+  assert.deepEqual(qaChecklist(parent), ["Avatars are served", "It has tests"]);
+  assert.deepEqual(qaChecklist(issue("MET-9")), ["Matches MET-9 as written"]);
+});
+
+test("runQaTests runs setup then tests, stopping at the first failure", async () => {
+  const seen: string[] = [];
+  const run: CommandRunner = async (command) => {
+    seen.push(command);
+    return { exitCode: command === "setup" ? 3 : 0, timedOut: false, output: "" };
+  };
+  const failed = await runQaTests({ setup_command: "setup", test_command: "t" }, "/x", 1000, run);
+  assert.deepEqual(seen, ["setup"]);
+  assert.equal(failed.passed, false);
+  assert.equal(failed.command, "setup");
+  assert.equal(failed.exitCode, 3);
+
+  seen.length = 0;
+  const passed = await runQaTests({ setup_command: " ", test_command: "t" }, "/x", 1000, run);
+  assert.deepEqual(seen, ["t"]);
+  assert.equal(passed.passed, true);
+});
+
+test("runShellCommand reports the exit code and output, and kills on timeout", async () => {
+  const ok = await runShellCommand("echo out; echo err >&2; exit 4", process.cwd(), 10_000);
+  assert.equal(ok.exitCode, 4);
+  assert.equal(ok.timedOut, false);
+  assert.match(ok.output, /out/);
+  assert.match(ok.output, /err/);
+
+  const ci = await runShellCommand('printf "%s" "$CI"', process.cwd(), 10_000);
+  assert.equal(ci.output, "1");
+
+  const started = Date.now();
+  const slow = await runShellCommand("sleep 30", process.cwd(), 200);
+  assert.equal(slow.timedOut, true);
+  assert.ok(Date.now() - started < 10_000);
+});

@@ -18,10 +18,10 @@ import {
   type WorkflowStateName,
 } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
+import type { GitHub, PullRequest, ReviewInput } from "../github/client.ts";
 import type { CreateSubIssueInput, ListReadyOptions } from "../linear/client.ts";
 import { parseLinkedIssue, type RawIssue } from "../linear/parse.ts";
 import { createGitWorktrees, type TaskWorktrees, type Worktree } from "../worktrees/index.ts";
-import type { QaPromptInput } from "./dispatch.ts";
 import { type CoordinatorLoopOptions, createCoordinatorLoop, type LoopLinear } from "./loop.ts";
 import { partMarker, readPartMarker } from "./split.ts";
 import { createFileLoopStore, emptyLoopState, type LoopState, type LoopStore } from "./state.ts";
@@ -179,6 +179,11 @@ class FakeLinear implements LoopLinear {
     this.comments.push({ key: this.#get(issueId).key, body });
     return `comment-${this.comments.length}`;
   }
+
+  async getIssue(keyOrId: string) {
+    const issue = this.issues.get(keyOrId) ?? this.byKey(keyOrId);
+    return this.#linked(issue);
+  }
 }
 
 // --- fake adapter ----------------------------------------------------------
@@ -186,7 +191,7 @@ class FakeLinear implements LoopLinear {
 interface PendingRun {
   task: Task;
   cwd: string;
-  finish(status?: RunResult["status"], error?: string): void;
+  finish(status?: RunResult["status"], error?: string, text?: string): void;
 }
 
 /**
@@ -224,7 +229,7 @@ function fakeAdapter(
         pending.push({
           task,
           cwd,
-          finish: (status = "ok", error) => resolve(result(status, undefined, error)),
+          finish: (status = "ok", error, text) => resolve(result(status, text, error)),
         });
       }
       const events = (async function* (): AsyncGenerator<AdapterEvent> {
@@ -239,17 +244,53 @@ function fakeAdapter(
 function fakeWorktrees() {
   const created: string[] = [];
   const removed: string[] = [];
+  const checkouts: Array<{ issueKey: string; title: string; branch: string; sha: string }> = [];
   const worktrees: TaskWorktrees = {
     async create({ issueKey }): Promise<Worktree> {
       created.push(issueKey);
       return { path: `/wt/${issueKey}`, branch: issueKey.toLowerCase(), resumed: false };
+    },
+    async checkout(input): Promise<Worktree> {
+      checkouts.push(input);
+      return { path: `/wt/${input.issueKey}-${input.sha}`, branch: input.branch, resumed: false };
     },
     async remove(path) {
       removed.push(path);
     },
     async recover() {},
   };
-  return { worktrees, created, removed };
+  return { worktrees, created, removed, checkouts };
+}
+
+function fakeGitHub() {
+  const prs: Record<string, PullRequest> = {};
+  const reviews: Array<ReviewInput & { number: number }> = [];
+  const github: GitHub = {
+    async findPrForIssue(key) {
+      return prs[key];
+    },
+    async prFiles() {
+      return [{ path: "src/x.ts", additions: 3, deletions: 1 }];
+    },
+    async postReview(number, review) {
+      reviews.push({ number, ...review });
+      return `https://github.test/o/r/pull/${number}#review-${reviews.length}`;
+    },
+  };
+  const open = (key: string, number: number): PullRequest => {
+    const pr: PullRequest = {
+      number,
+      title: `${key}: work`,
+      url: `https://github.test/o/r/pull/${number}`,
+      headRefName: key.toLowerCase(),
+      headRefOid: `sha${number}`,
+      baseRefName: "main",
+      isDraft: false,
+    };
+    prs[key] = pr;
+    return pr;
+  };
+  return { github, prs, reviews, open };
 }
 
 function memoryStore(initial: LoopState = emptyLoopState()): LoopStore & { state: LoopState } {
@@ -287,6 +328,8 @@ function setup(
   const linear = options.linear ?? new FakeLinear();
   const adapter = options.adapter ?? fakeAdapter();
   const wt = fakeWorktrees();
+  const gh = fakeGitHub();
+  const commands: Array<{ command: string; cwd: string }> = [];
   const memory = memoryStore();
   const store = options.store ?? memory;
   const notes: DecisionNote[] = [];
@@ -297,6 +340,11 @@ function setup(
     linear,
     adapters: { "claude-code": adapter.adapter },
     worktrees: options.worktrees ?? wt.worktrees,
+    github: gh.github,
+    runCommand: async (command, cwd) => {
+      commands.push({ command, cwd });
+      return { exitCode: 0, timedOut: false, output: "all green" };
+    },
     store,
     repoDir: "/repo",
     team: { teamId: "MET" },
@@ -316,7 +364,7 @@ function setup(
     pid: 4242,
     ...options.extra,
   });
-  return { loop, linear, adapter, wt, memory, notes, pings, logs };
+  return { loop, linear, adapter, wt, gh, commands, memory, notes, pings, logs };
 }
 
 /** Lets every pending promise chain run (the fakes do no I/O). */
@@ -598,17 +646,33 @@ test("a failed run goes back to Ready once; the second failure goes to Needs inp
   assert.equal(t.adapter.runs().length, 2, "Needs input is not picked up again");
 });
 
-test("QA runs only once every part is In Review or Done, through the QA prompt seam", async () => {
-  const seen: QaPromptInput[] = [];
-  const t = setup({
-    extra: {
-      buildQaPrompt: (input) => {
-        seen.push(input);
-        return `QA ${input.issue.key}`;
-      },
-    },
+/** A parent with one backend part and its QA sub-issue, as a split leaves them. */
+function qaFixture(t: ReturnType<typeof setup>, partState = "In Review") {
+  const parent = t.linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const backend = t.linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: partState,
+    description: `${partMarker("backend")}\n**Size**: S`,
   });
-  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const qa = t.linear.add({
+    title: "QA: P",
+    parentId: parent.id,
+    description: `${partMarker("qa")}\n**Size**: M`,
+  });
+  t.linear.relations.push({ blocker: backend.id, blocked: qa.id });
+  return { parent, backend, qa };
+}
+
+const verdict = (...pass: boolean[]) =>
+  JSON.stringify({
+    items: pass.map((p, i) => ({ text: `item ${i + 1}`, pass: p, evidence: `evidence ${i + 1}` })),
+    testsPassed: true,
+  });
+
+test("QA waits for every part, checks the PR out at its head, tests it and approves", async () => {
+  const t = setup();
+  const parent = t.linear.add({ title: "P", state: "In Progress", description: BODY("M") });
   const backend = t.linear.add({
     title: "API",
     parentId: parent.id,
@@ -630,25 +694,102 @@ test("QA runs only once every part is In Review or Done, through the QA prompt s
     { blocker: backend.id, blocked: qa.id },
     { blocker: frontend.id, blocked: qa.id },
   );
+  t.gh.open(backend.key, 7);
 
   assert.deepEqual((await t.loop.tick()).dispatched, []);
   frontend.state = "Done";
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  assert.equal(qa.state, "In Progress");
+  await settle();
 
+  assert.deepEqual(t.wt.checkouts, [
+    { issueKey: qa.key, title: "pr 7", branch: backend.key.toLowerCase(), sha: "sha7" },
+  ]);
+  const path = `/wt/${qa.key}-sha7`;
+  assert.deepEqual(t.commands, [
+    { command: "pnpm install --frozen-lockfile --prefer-offline", cwd: path },
+    { command: "pnpm test", cwd: path },
+  ]);
   const run = t.adapter.runs()[0];
-  assert.equal(run?.prompt, `QA ${qa.key}`);
-  assert.equal(run?.budgetMs, 120 * 60_000);
-  assert.deepEqual(
-    seen[0]?.parts.map((p) => [p.key, p.state]),
-    [
-      [backend.key, "In Review"],
-      [frontend.key, "Done"],
-    ],
+  assert.equal(t.adapter.pending[0]?.cwd, path);
+  assert.equal(run?.id, `${qa.key}-qa-1-pr7`);
+  assert.ok((run?.budgetMs ?? 0) <= 120 * 60_000);
+  assert.match(run?.prompt ?? "", /1\. Works\n2\. Has tests/);
+  assert.match(run?.prompt ?? "", /`pnpm test` passed/);
+  assert.equal(
+    t.memory.state.inFlight[0]?.worktree,
+    path,
+    "the worktree is recorded for a restart",
   );
-  assert.equal(seen[0]?.agent.role, "qa");
-  t.adapter.pending[0]?.finish("ok");
+
+  t.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
+  assert.equal(t.gh.reviews.length, 1, "the Done part is not reviewed");
+  assert.equal(t.gh.reviews[0]?.event, "APPROVE");
+  assert.equal(t.gh.reviews[0]?.commitId, "sha7");
+  assert.deepEqual(t.wt.removed, [path]);
   assert.equal(qa.state, "In Review");
+  assert.equal(backend.state, "In Review");
+  assert.match(t.linear.comments.at(-1)?.body ?? "", /approved.*\n\n.*PR #7.*review-1/s);
+  assert.deepEqual(t.memory.state.inFlight, []);
+  assert.deepEqual(t.memory.state.qaFailures, {});
+});
+
+test("a failed QA sends the part back with the review; the second failure escalates once", async () => {
+  const t = setup();
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+
+  // Round 1: one item fails.
+  await t.loop.tick();
+  await settle();
+  t.adapter.pending[0]?.finish("ok", undefined, verdict(true, false));
+  await t.loop.idle();
+  assert.equal(t.gh.reviews[0]?.event, "REQUEST_CHANGES");
+  assert.match(t.gh.reviews[0]?.body ?? "", /- \[ \] Has tests: evidence 2/);
+  assert.equal(backend.state, "Ready");
+  assert.equal(qa.state, "Ready");
+  assert.match(
+    t.linear.comments.find((c) => c.key === backend.key)?.body ?? "",
+    /changes requested on \[PR #7\].*review-1.*\n\n- Has tests: evidence 2/s,
+  );
+  assert.equal(t.memory.state.qaFailures[parent.id], 1);
+
+  // The part's agent runs again with the review in its prompt, while QA waits.
+  const report = await t.loop.tick();
+  assert.deepEqual(report.dispatched, [backend.key]);
+  const fix = t.adapter.runs().at(-1);
+  assert.match(fix?.prompt ?? "", /## QA requested changes/);
+  assert.match(
+    fix?.prompt ?? "",
+    /Your PR is already open \(https:\/\/github\.test\/o\/r\/pull\/7\)/,
+  );
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+  assert.equal(backend.state, "In Review");
+  assert.deepEqual(t.memory.state.qaFeedback, {});
+
+  // Round 2: still failing. QA and the parent go to Needs input; nothing goes back.
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  assert.match(t.adapter.runs().at(-1)?.id ?? "", /-qa-2-pr7$/);
+  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(false, true));
+  await t.loop.idle();
+  assert.equal(t.gh.reviews[1]?.event, "REQUEST_CHANGES");
+  assert.match(t.gh.reviews[1]?.body ?? "", /round 2 of 2/);
+  assert.equal(qa.state, "Needs input");
+  assert.equal(parent.state, "Needs input");
+  assert.equal(backend.state, "In Review", "not sent back a second time");
+  assert.equal(t.linear.comments.filter((c) => c.key === parent.key).length, 1);
+  assert.match(t.linear.comments.at(-1)?.body ?? "", /QA failed twice for MET-100/);
+  assert.deepEqual(t.pings, [
+    `${parent.key} needs input (QA failed twice): ${qa.key} could not approve ${backend.key} https://linear.test/${parent.key}`,
+  ]);
+
+  const runs = t.adapter.runs().length;
+  assert.deepEqual((await t.loop.tick()).dispatched, [], "no more loops");
+  assert.equal(t.adapter.runs().length, runs);
+  assert.equal(t.pings.length, 1);
 });
 
 test("an escalated grill skips the issue: no plan, no sub-issues", async () => {

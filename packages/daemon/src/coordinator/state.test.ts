@@ -38,6 +38,8 @@ const state: LoopState = {
     },
   ],
   attempts: { "id-1": 1 },
+  qaFailures: { "parent-1": 1 },
+  qaFeedback: { "id-1": { prUrl: "https://github.test/pull/7", failing: ["Works: no test"] } },
 };
 
 test("a missing file loads as the empty state", async () => {
@@ -53,6 +55,8 @@ test("save writes loop.json atomically with a .gitignore, and load reads it back
   const loaded = await store.load();
   assert.equal(loaded.lastPollAt, "2026-11-19T10:00:30.000Z");
   assert.deepEqual(loaded.inFlight, state.inFlight);
+  assert.deepEqual(loaded.qaFailures, state.qaFailures);
+  assert.deepEqual(loaded.qaFeedback, state.qaFeedback);
   const files = (await readdir(join(dir, ".harnessd", "state"))).sort();
   assert.deepEqual(files, [".gitignore", "loop.json"], "no tmp files left behind");
   assert.equal(await readFile(join(dir, ".harnessd", "state", ".gitignore"), "utf8"), "*\n");
@@ -75,6 +79,8 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
       lastPollAt: 5,
       inFlight: [state.inFlight[0], { issueId: "x" }],
       attempts: { a: 1, b: 0, c: "2", d: 1.5 },
+      qaFailures: { p: 1, q: -1 },
+      qaFeedback: { a: { failing: ["x", 3], reviewUrl: "u" }, b: { failing: "x" }, c: null },
     }),
   );
   assert.deepEqual(parsed, {
@@ -82,6 +88,13 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
     lastPollAt: null,
     inFlight: state.inFlight,
     attempts: { a: 1 },
+    qaFailures: { p: 1 },
+    qaFeedback: { a: { failing: ["x"], reviewUrl: "u" } },
   });
+  assert.deepEqual(
+    parseLoopState('{"inFlight":[]}'),
+    emptyLoopState(),
+    "a file from before QA still loads",
+  );
   assert.throws(() => parseLoopState("[]"), /no inFlight array/);
 });
