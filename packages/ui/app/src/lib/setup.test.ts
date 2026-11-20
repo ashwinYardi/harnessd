@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Check } from "./checks.ts";
+import { mergeChecks } from "./secrets.ts";
 import {
   blockingAreas,
   connectionCards,
@@ -153,4 +154,20 @@ test("startState is ready only when the checks loaded, nothing blocks, and the d
       loading: false,
     },
   );
+});
+
+test("startState enables Start after a secret save, once the loop state is read again (MET-41)", () => {
+  const before = [c("node", "ok"), c("linear.key", "missing", "LINEAR_API_KEY is not set")];
+  const stale = { state: "setup" as const, blocking: ["linear.key"] };
+  assert.equal(startState(before, stale).ready, false);
+  // The save puts the re-run Linear checks in place.
+  const after = mergeChecks(before, "linear.", [c("linear.key", "ok"), c("linear.team", "ok")]);
+  // A stale loop state still names linear.key, so Start stays off.
+  assert.deepEqual(startState(after, stale), { ready: false, areas: ["Linear"], loading: false });
+  // The fresh loop state comes from the current checks, so Start enables.
+  assert.deepEqual(startState(after, { state: "setup", blocking: [] }), {
+    ready: true,
+    areas: [],
+    loading: false,
+  });
 });

@@ -56,11 +56,13 @@ export function App() {
     if (to) go(to);
   }, [loop.loop, go]);
 
-  // A recheck may clear the last blocker, so the loop state is read again with it.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: runs on each new status
+  // A full load and a per-card replace each make a new status object. A recheck, a setup
+  // job or a secret save may clear the last blocker, so each one reads the loop state again
+  // (MET-41). useLoop reads it on mount, so the loading state does not.
+  const checks = status.status;
   useEffect(() => {
-    void refreshLoop();
-  }, [status.status, refreshLoop]);
+    if (checks.status === "ready") void refreshLoop();
+  }, [checks, refreshLoop]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const { recheck } = status;
 
