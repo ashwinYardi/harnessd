@@ -1,7 +1,7 @@
 // Edits one `key = "value"` line of a `[table]` in config.toml text, keeping every other
 // line and comment (MET-28, MET-33). The caller checks the result with the validator.
 
-const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const escapeRe = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 /**
  * Sets `key` in `[table]` to a string, or removes it when `value` is null. A table left
@@ -14,9 +14,9 @@ export function applyTableKey(
   value: string | null,
 ): string {
   const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
-  const name = table.split(".").map(escape).join("\\s*\\.\\s*");
+  const name = table.split(".").map(escapeRe).join("\\s*\\.\\s*");
   const headerRe = new RegExp(`^\\s*\\[\\s*${name}\\s*\\]`);
-  const keyRe = new RegExp(`^\\s*${escape(key)}\\s*=`);
+  const keyRe = new RegExp(`^\\s*${escapeRe(key)}\\s*=`);
   const header = lines.findIndex((l) => headerRe.test(l));
   const line = value === null ? undefined : `${key} = ${JSON.stringify(value)}`;
   if (header === -1) {

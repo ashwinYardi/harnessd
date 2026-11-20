@@ -20,7 +20,7 @@ const CONNECTION: Record<SecretId, "linear" | "slack"> = {
 
 const BODY_HINT = 'send { "value": "…" } with the secret, or an op:// or env: reference';
 
-function valueOf(body: unknown): string {
+function bodyValue(body: unknown): string {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     throw new HttpError(400, "invalid_body", BODY_HINT);
   }
@@ -80,7 +80,7 @@ export function secretRoutes(options: SecretRoutesOptions): Route[] {
         path: `/api/secrets/${id}`,
         handler: ({ body }) =>
           guard(async () => {
-            const secret = await store.save(id, valueOf(body));
+            const secret = await store.save(id, bodyValue(body));
             log(`settings: saved ${id} (${secret.source})`);
             return after(id, secret);
           }),
