@@ -1,7 +1,9 @@
 // Serves the built UI with synthetic data, so the UI can be checked without Linear or a
 // harness. The data is made up. Usage, after `pnpm build`:
-//   node scripts/demo.ts [--port 4848] [--empty] [--broken] [--slow] [--setup]
+//   node scripts/demo.ts [--port 4848] [--empty] [--broken] [--slow] [--setup] [--static]
 // --setup makes the harness checks fail, as on a fresh machine.
+// --static serves no live event stream, so a page scanner such as `impeccable detect <url>`
+// sees the network go idle. The page loads its data once and shows the stream as down.
 
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -34,6 +36,7 @@ const empty = flag("empty");
 const broken = flag("broken");
 const slow = flag("slow");
 const setup = flag("setup");
+const staticMode = flag("static");
 
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -181,7 +184,7 @@ const ACTIONS: Array<[string, string, string]> = [
   ["backend", "MET-41", "Edit packages/daemon/src/linear/client.ts"],
 ];
 let next = 0;
-if (!empty) {
+if (!empty && !staticMode) {
   setInterval(() => {
     const action = ACTIONS[next++ % ACTIONS.length];
     if (action) logs.push(action[2], { source: action[0], issueKey: action[1] });
@@ -339,7 +342,17 @@ const daemon = await startDaemon({
   port,
   pause,
   routes: [
-    ...ui.routes,
+    // A 503 ends an EventSource for good: it does not reconnect, so the network goes idle.
+    ...ui.routes.map((route) =>
+      staticMode && route.path === "/api/events"
+        ? {
+            ...route,
+            handler: () => {
+              throw new HttpError(503, "static_demo", "the static demo has no event stream");
+            },
+          }
+        : route,
+    ),
     ...statusRoutes(async () => {
       await sleep(400);
       return CHECKS();
@@ -349,4 +362,4 @@ const daemon = await startDaemon({
     ...(await staticRoutes(UI_DIR)),
   ],
 });
-console.log(`harnessd demo: ${daemon.url} (synthetic data)`);
+console.log(`harnessd demo: ${daemon.url} (synthetic data${staticMode ? ", static" : ""})`);

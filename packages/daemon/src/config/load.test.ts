@@ -233,6 +233,38 @@ test("a skill keeps its other frontmatter lines and lists its other files", asyn
   assert.deepEqual(skill?.files, ["LICENSE", "reference/craft.md"]);
 });
 
+test("a skill's .harnessd-native/ folder gives its hooks and Claude Code agents", async () => {
+  const hooks = {
+    claude: { Stop: [{ hooks: [{ type: "command", command: "run hook", timeout: 30 }] }] },
+    codex: { Stop: [{ hooks: [{ type: "command", command: "run codex hook" }] }] },
+  };
+  const f = await fixture({
+    "home/.harnessd/skills/ui/SKILL.md": "Body\n",
+    "home/.harnessd/skills/ui/LICENSE": "Apache",
+    "home/.harnessd/skills/ui/.harnessd-native/hooks.json": JSON.stringify(hooks),
+    "home/.harnessd/skills/ui/.harnessd-native/claude-agents/ui-reviewer.md":
+      "---\nname: ui-reviewer\n---\nReview.\n",
+  });
+  const skill = (await loadLayer(f.globalDir, "global", f.home)).skills[0];
+  assert.deepEqual(skill?.files, ["LICENSE"]);
+  assert.deepEqual(skill?.native, {
+    claudeHooks: hooks.claude,
+    codexHooks: hooks.codex,
+    claudeAgents: [{ name: "ui-reviewer", text: "---\nname: ui-reviewer\n---\nReview.\n" }],
+  });
+});
+
+test("a bad .harnessd-native/hooks.json is a config error", async () => {
+  const f = await fixture({
+    "home/.harnessd/skills/ui/SKILL.md": "Body\n",
+    "home/.harnessd/skills/ui/.harnessd-native/hooks.json": '{"claude":{"Stop":[{"hooks":[{}]}]}}',
+  });
+  await assert.rejects(
+    loadLayer(f.globalDir, "global", f.home),
+    configError(/hooks\.json: claude\.Stop\[0\]\.hooks\[0\]\.command: expected a string/),
+  );
+});
+
 test("a [skills.<name>] table loads into the layer", async () => {
   const f = await fixture({ "repo/.harnessd/config.toml": "[skills.tdd]\nenabled = false\n" });
   const layer = await loadLayer(f.workspaceDir, "workspace", f.home);

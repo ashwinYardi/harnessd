@@ -1,6 +1,13 @@
 import { join } from "node:path";
-import { ConfigError, type McpServerConfig, type MergedConfig, type Skill } from "@harnessd/shared";
+import {
+  ConfigError,
+  type HookEvents,
+  type McpServerConfig,
+  type MergedConfig,
+  type Skill,
+} from "@harnessd/shared";
 import { jsonFile, tomlKey, tomlString, tomlStringArray, yamlString } from "./format.ts";
+import type { NativeSettings } from "./settings.ts";
 
 /**
  * One file `harnessd sync` owns, relative to the repo root with `/` separators.
@@ -9,7 +16,12 @@ import { jsonFile, tomlKey, tomlString, tomlStringArray, yamlString } from "./fo
 export type SyncFile =
   | { path: string; content: string }
   | { path: string; symlinkTarget: string }
-  | { path: string; copyFrom: string };
+  | { path: string; copyFrom: string }
+  /** A JSON settings file the user may also edit: sync merges `settings` into it. */
+  | { path: string; settings: NativeSettings };
+
+/** Where Claude Code reads project subagents. */
+export const CLAUDE_AGENTS_DIR = ".claude/agents";
 
 /** Where each harness reads repo skills: Claude Code, then Codex. */
 export const SKILL_ROOTS = [".claude/skills", ".agents/skills"] as const;
@@ -69,12 +81,43 @@ function mcpServers(config: MergedConfig): Record<string, Record<string, unknown
   return out;
 }
 
-/** `.claude/settings.json`: pre-approves the project MCP servers from `.mcp.json`. */
-export function claudeSettings(config: MergedConfig): string {
-  return jsonFile({
-    $schema: "https://json.schemastore.org/claude-code-settings.json",
-    enabledMcpjsonServers: Object.keys(syncedMcpServers(config)),
-  });
+/** Every enabled skill's hooks for one harness, joined per event in skill order. */
+export function skillHooks(config: MergedConfig, harness: "claude" | "codex"): HookEvents {
+  const out: HookEvents = {};
+  for (const skill of config.skills) {
+    const hooks = harness === "claude" ? skill.native?.claudeHooks : skill.native?.codexHooks;
+    for (const [event, groups] of Object.entries(hooks ?? {})) {
+      out[event] = [...(out[event] ?? []), ...groups];
+    }
+  }
+  return out;
+}
+
+/**
+ * `.claude/settings.json`: pre-approves the project MCP servers from `.mcp.json` and adds
+ * the skills' hooks. Sync merges this into the file, so the user's own keys stay.
+ */
+export function claudeSettings(config: MergedConfig): NativeSettings {
+  return {
+    keys: {
+      $schema: "https://json.schemastore.org/claude-code-settings.json",
+      enabledMcpjsonServers: Object.keys(syncedMcpServers(config)),
+    },
+    hooks: skillHooks(config, "claude"),
+  };
+}
+
+/** `.claude/agents/<name>.md`: the agent file with the generated note after its frontmatter. */
+export function agentMd(text: string): string {
+  const note = `<!-- ${GENERATED_NOTE} -->\n`;
+  if (text.startsWith("---\n")) {
+    const end = text.indexOf("\n---\n", 3);
+    if (end !== -1) {
+      const at = end + "\n---\n".length;
+      return `${text.slice(0, at)}${note}${text.slice(at)}`;
+    }
+  }
+  return `${note}${text}`;
 }
 
 /** `.mcp.json`, the project MCP file Claude Code reads. */
@@ -98,21 +141,37 @@ export function codexConfig(config: MergedConfig): string {
 
 /**
  * Every native file for a merged config, in a stable order. Pure: no I/O.
- * Codex reads AGENTS.md natively; it gets its config.toml and the skills in `.agents/skills/`.
+ * Codex reads AGENTS.md natively; it gets its config.toml, the skills in `.agents/skills/`
+ * and, when a skill has Codex hooks, `.codex/hooks.json`.
  */
 export function generateSyncFiles(config: MergedConfig): SyncFile[] {
   const files: SyncFile[] = [
     { path: "AGENTS.md", content: agentsMd(config) },
     { path: "CLAUDE.md", symlinkTarget: "AGENTS.md" },
-    { path: ".claude/settings.json", content: claudeSettings(config) },
+    { path: ".claude/settings.json", settings: claudeSettings(config) },
   ];
+  const badName = (name: string) => !SKILL_NAME.test(name) || name === "." || name === "..";
   for (const skill of config.skills) {
-    if (!SKILL_NAME.test(skill.name) || skill.name === "." || skill.name === "..") {
+    if (badName(skill.name)) {
       throw new ConfigError(
         skill.source,
         "name",
         `skill names may only use letters, digits, ".", "_" and "-", got ${JSON.stringify(skill.name)}`,
       );
+    }
+    for (const agent of skill.native?.claudeAgents ?? []) {
+      if (badName(agent.name)) {
+        throw new ConfigError(
+          skill.source,
+          "claude-agents",
+          `agent file names may only use letters, digits, ".", "_" and "-", got ${JSON.stringify(agent.name)}`,
+        );
+      }
+    }
+  }
+  for (const skill of config.skills) {
+    for (const agent of skill.native?.claudeAgents ?? []) {
+      files.push({ path: `${CLAUDE_AGENTS_DIR}/${agent.name}.md`, content: agentMd(agent.text) });
     }
   }
   for (const root of SKILL_ROOTS) {
@@ -125,5 +184,9 @@ export function generateSyncFiles(config: MergedConfig): SyncFile[] {
   }
   files.push({ path: ".mcp.json", content: mcpJson(config) });
   files.push({ path: ".codex/config.toml", content: codexConfig(config) });
+  const codexHooks = skillHooks(config, "codex");
+  if (Object.keys(codexHooks).length > 0) {
+    files.push({ path: ".codex/hooks.json", settings: { keys: {}, hooks: codexHooks } });
+  }
   return files;
 }

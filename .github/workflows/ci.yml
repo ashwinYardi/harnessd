@@ -28,3 +28,11 @@ jobs:
       - run: pnpm test
       - name: impeccable detect (UI anti-patterns)
         run: npx -y impeccable@4.10.0 detect --github packages/ui/app/src
+      # Needs `pnpm build` above: the demo serves packages/ui/dist/app.
+      - name: impeccable detect (rendered page, static demo)
+        run: |
+          node packages/ui/scripts/demo.ts --static --port 4848 &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:4848/api/status >/dev/null && break; sleep 1; done
+          curl -sf http://127.0.0.1:4848/api/status >/dev/null || { echo "demo did not start"; exit 1; }
+          npx -y impeccable@4.10.0 detect --github http://127.0.0.1:4848/
+          npx -y impeccable@4.10.0 detect --github --viewport 390x844 http://127.0.0.1:4848/

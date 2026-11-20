@@ -3,13 +3,14 @@
 // own CLIs (D-002); Linear through one GraphQL read. Checks run in parallel, each
 // group under a short timeout. No secret value ever reaches a detail or a fix.
 
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { ConfigError, DEFAULT_SETTINGS, type HarnessId, type MergedConfig } from "@harnessd/shared";
 import { loadConfig } from "../config/load.ts";
 import { SLACK_WEBHOOK_ENV } from "../coordinator/slack.ts";
 import { LinearClient, LinearError } from "../linear/client.ts";
+import { missingHookEvents } from "../sync/settings.ts";
 import {
   compareSemver,
   type Exec,
@@ -658,6 +659,18 @@ function portGroup(ctx: Ctx): Group {
   };
 }
 
+const CLAUDE_SETTINGS = ".claude/settings.json";
+
+/** Enabled skills whose Claude Code hooks the repo's settings file lacks (docs/SYNC.md). */
+async function skillsWithoutHook(ctx: Ctx): Promise<string[]> {
+  const skills = (ctx.config?.skills ?? []).filter((s) => s.native?.claudeHooks !== undefined);
+  if (skills.length === 0) return [];
+  const text = await readFile(join(ctx.o.repoDir, CLAUDE_SETTINGS), "utf8").catch(() => undefined);
+  return skills
+    .filter((s) => missingHookEvents(text, s.native?.claudeHooks ?? {}).length > 0)
+    .map((s) => s.name);
+}
+
 function skillsGroup(ctx: Ctx, names: readonly string[]): Group {
   return {
     ids: ["skills.pack"],
@@ -673,8 +686,19 @@ function skillsGroup(ctx: Ctx, names: readonly string[]): Group {
       );
       const missing = names.filter((_, i) => !present[i]);
       const found = names.length - missing.length;
-      if (missing.length === 0)
-        return [ok("skills.pack", `${found} of ${names.length} skills in place`)];
+      if (missing.length === 0) {
+        const inPlace = `${found} of ${names.length} skills in place`;
+        const unhooked = await skillsWithoutHook(ctx);
+        if (unhooked.length === 0) return [ok("skills.pack", inPlace)];
+        return [
+          bad(
+            "skills.pack",
+            "warn",
+            `${inPlace}; ${unhooked.join(", ")} hook missing from ${CLAUDE_SETTINGS}`,
+            "Run: harnessd sync",
+          ),
+        ];
+      }
       const list =
         missing.length > 3
           ? `${missing.slice(0, 3).join(", ")} and ${missing.length - 3} more`
