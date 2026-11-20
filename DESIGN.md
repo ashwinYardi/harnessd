@@ -1,152 +1,179 @@
 ---
 name: harnessd
-description: Dense, quiet operator UI for a local team of coding agents.
+description: Dense, quiet operator UI for a local team of coding agents, on T3 Code's stack and tokens (D-025).
 colors:
-  ground: "#f3f4f6"
-  surface: "#ffffff"
-  surface-2: "#eaecf0"
-  line: "#dadde3"
-  line-strong: "#b9bec8"
-  text: "#14171c"
-  text-2: "#464d5a"
-  text-3: "#5a6170"
-  accent: "#2847c7"
-  band: "#1a2130"
-  band-text: "#e8ebf1"
-  band-paused: "#7a4500"
-  band-live: "#5fd39a"
-  band-pending: "#f2b85b"
-  signal: "#b3261e"
-  signal-bg: "#fcebea"
-  signal-line: "#e7a6a1"
-  warn: "#8a4f00"
-  warn-fill: "#b86b00"
-  ok: "#157347"
-  dark-ground: "#101318"
-  dark-surface: "#161a21"
-  dark-text: "#e6e9ef"
-  dark-text-3: "#9199a7"
-  dark-signal: "#ff9b93"
-  dark-band: "#0b0e13"
+  background: "zinc-25 oklch(99.2% 0 0)"
+  foreground: "zinc-900"
+  card: "white"
+  popover: "white"
+  primary: "oklch(0.488 0.217 264)"
+  primary-foreground: "white"
+  secondary: "zinc-50"
+  muted: "zinc-50"
+  muted-foreground: "zinc-600"
+  placeholder: "zinc-500"
+  accent: "zinc-100"
+  border: "zinc-200"
+  input: "zinc-300"
+  ring: "primary"
+  destructive: "red-600"
+  error: "red-500"
+  error-foreground: "red-700"
+  error-surface: "red-500 at 8%"
+  warning: "amber-500"
+  warning-foreground: "amber-800"
+  warning-surface: "amber-500 at 8%"
+  success: "emerald-500"
+  success-foreground: "emerald-700"
+  info-foreground: "blue-700"
+  sidebar: "zinc-50"
+  sidebar-row-hover: "zinc-100"
+  sidebar-row-active: "white"
+  dark-background: "#000"
+  dark-foreground: "neutral-100"
+  dark-card: "neutral-950 + 3% white"
+  dark-primary: "oklch(0.571 0.21 264)"
+  dark-muted-foreground: "neutral-400"
+  dark-border: "white at 8%"
+  dark-input: "white at 14%"
+  dark-error-foreground: "red-400"
+  dark-warning-foreground: "amber-400"
+  dark-success-foreground: "emerald-400"
 typography:
   body:
     fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif"
-    fontSize: "13px"
+    fontSize: "14px"
     fontWeight: 400
     lineHeight: 1.4
   heading:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif"
-    fontSize: "13px"
-    fontWeight: 650
-    lineHeight: 1.4
-  meta:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif"
-    fontSize: "12px"
-    fontWeight: 400
-    lineHeight: 1.4
-  brand:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif"
     fontSize: "14px"
-    fontWeight: 650
-    lineHeight: 1.4
-    letterSpacing: "-0.01em"
+    fontWeight: 600
+  meta:
+    fontSize: "12px"
   tag:
-    fontFamily: "-apple-system, BlinkMacSystemFont, Segoe UI, system-ui, sans-serif"
     fontSize: "11px"
-    fontWeight: 400
-    lineHeight: "16px"
   data:
     fontFamily: "ui-monospace, SF Mono, Menlo, Consolas, monospace"
     fontSize: "12px"
-    fontWeight: 400
     lineHeight: "18px"
 rounded:
-  xs: "2px"
-  sm: "3px"
-  md: "4px"
+  sm: "4px"
+  md: "6px"
+  lg: "8px (--radius, --control-radius)"
+  xl: "12px"
+  2xl: "16px"
 spacing:
-  xs: "4px"
-  sm: "8px"
-  md: "12px"
-  lg: "16px"
+  base: "4px (Tailwind --spacing)"
+  control-height: "32px default, 28px sm, 24px xs"
+  header: "52px"
+  sidebar: "224px, 48px icon rail below 768px"
+motion:
+  fast: "100ms (hover, tooltip, sidebar row)"
+  base: "150ms (button, dialog, toast, select, tabs)"
+  max: "200ms (switch, theme change)"
+  ease: "ease-out; drawer cubic-bezier(0.32, 0.72, 0, 1)"
+  reduced: "prefers-reduced-motion stops every transition and animation"
 components:
-  band:
-    backgroundColor: "{colors.band}"
-    textColor: "{colors.band-text}"
-    height: "44px"
-  band-paused:
-    backgroundColor: "{colors.band-paused}"
-    textColor: "{colors.band-text}"
-  button-kill:
-    backgroundColor: "#f3f5f9"
-    textColor: "{colors.text}"
-    rounded: "{rounded.md}"
-    height: "28px"
-  button:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.md}"
-    height: "28px"
-    padding: "0 10px"
-  issue-row:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.text}"
-    rounded: "{rounded.md}"
-    padding: "7px 9px 8px"
-  issue-row-loud:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.signal}"
-  column-needs-you:
-    backgroundColor: "{colors.signal-bg}"
-    textColor: "{colors.signal}"
-  region-head:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.text}"
-    height: "34px"
+  button: "components/ui/button.tsx: default, outline, secondary, ghost, ghost-muted, destructive, warning-outline, link"
+  badge: "components/ui/badge.tsx"
+  card: "components/ui/card.tsx"
+  dialog: "components/ui/dialog.tsx"
+  tooltip: "components/ui/tooltip.tsx"
+  toast: "components/ui/toast.tsx"
+  input: "components/ui/input.tsx"
+  select: "components/ui/select.tsx"
+  switch: "components/ui/switch.tsx"
+  tabs: "components/ui/tabs.tsx"
+  sidebar: "components/ui/sidebar.tsx"
+  scroll-area: "components/ui/scroll-area.tsx"
+  skeleton: "components/ui/skeleton.tsx"
+  kbd: "components/ui/kbd.tsx"
+  command-palette: "components/ui/command.tsx"
 ---
 
 ## Overview
-harnessd's UI is an Operate surface (PRODUCT.md): one page that answers what runs, what is blocked and what needs the owner. It reads like the stock tables of a financial page. Every state and figure sits in a fixed column on one baseline, so a glance finds what changed. The world adds only type, palette, density and one move; the layout, the controls and the navigation are standard.
-
-The signature move: the **Needs you** column, set in the one signal ink, sits first on the board, and the header band carries the kill switch and turns amber while paused.
+harnessd's UI is an Operate surface (PRODUCT.md). It answers three questions fast: what runs, what is blocked, and what needs the owner. Since D-025 it is built on T3 Code's stack (Tailwind v4, Base UI, CVA, lucide-react) and takes T3 Code's tokens, so it feels like the tool the owner already uses (Jakob's law). harnessd keeps its own name, copy and one signature: **Needs you** is the only loud thing on screen.
 
 ## Colors
-Restrained: cool ink-on-newsprint neutrals, never cream, plus four colors that each do one job.
-- **Band** (`band`): the header across the top. It holds the name, the connection, the needs-you count and the pause control. It becomes `band-paused` (amber) while paused, so the state is visible from across the room.
-- **Signal** (`signal`, `signal-bg`, `signal-line`): only for Needs input and Blocked. Nothing else on screen is red.
-- **Warn** (`warn`, `warn-fill`): budgets at 80 percent or more, stopping runs and warning log lines.
-- **Ok** (`ok`): the running-agent marker on a board row. In the band, `band-live` and `band-pending` color the connection dot.
-- **Accent** (`accent`): the focus ring and nothing else.
+Restrained, after T3 Code: zinc neutrals in light, true black and neutral in dark, one blue primary, and three state colors that each do one job.
+- **Primary** (blue): the default button, focus rings, the switch, the budget bar under 80 percent. Nothing else.
+- **Destructive and error** (red): only Needs you, Blocked, blocking checks (fail and missing, D-023) and failed calls. The Needs you column, its count in the sidebar and the header button are red. Nothing else is red.
+- **Warning** (amber): budgets at 80 percent or more, stopping runs, warning log lines, warn checks, and the header while paused.
+- **Success** (emerald): the live connection dot, the running-agent dot, ok checks and success toasts.
 
-Dark theme tokens mirror the light ones under `prefers-color-scheme: dark` and `[data-theme="dark"]` (see `packages/ui/app/src/styles.css`). Every text pair meets WCAG AA (4.5:1); lines are hairlines and carry no meaning alone.
+Text contrast, computed from the Tailwind v4 oklch values (WCAG 2.1, sRGB compositing):
+
+| Pair | Light | Dark |
+|---|---|---|
+| foreground on background | 17.3 | 19.3 |
+| muted-foreground on background | 7.6 | 8.1 |
+| muted-foreground on accent or card | 7.0 | 7.3 |
+| placeholder on background | 4.7 | 8.1 |
+| white on primary | 6.7 | 4.6 |
+| white on destructive | 4.8 | 4.8 |
+| error-foreground on error-surface | 5.7 | 6.4 |
+| warning-foreground on warning-surface | 6.7 | 10.0 |
+| success-foreground on success surface | 5.0 | 10.9 |
+
+Three tokens are one step darker than T3 Code's, so every pair passes 4.5:1: muted-foreground (zinc-600), warning-foreground (amber-800) and destructive (red-600).
 
 ## Typography
-One system sans at 13 px for everything a person reads, 12 px for meta, 11 px for tags. The name in the band is 14 px. Weight, not size, makes hierarchy: 650 for region headings, 600 for column heads and agent names. Monospace is used only for data: issue keys, log times and log lines. All figures use tabular numerals, so ticking times never shift their column.
+One system sans. 14 px (`text-sm`) for anything a person reads, 12 px (`text-xs`) for meta, 11 px (`text-2xs`) for tags. Weight makes hierarchy: 600 for headings and column heads, 500 for buttons and active nav. Monospace only for data: issue keys, check ids, log lines and tool actions. All figures are tabular.
 
 ## Layout
-A fixed viewport app: band (44 px), then the board (three fifths), then a split of agents (left) and log (right). Each region scrolls inside itself; the page never scrolls sideways. The board has six columns of at least 208 px: Needs you, Backlog, Ready, In Progress, In Review, Done. Below 900 px the regions stack and the page scrolls; below 560 px each column takes most of the width and snaps.
+- **App shell:** a 224 px sidebar on the left (Board, Agents, Logs, Settings, then Commands at the foot). Below 768 px it becomes a 48 px icon rail with tooltips and status dots.
+- **Header:** 52 px, across the content. The view title, the connection, the last poll, the Needs you button and the pause control at the right edge. While paused it turns amber.
+- **Board:** six columns that share the width, at least 176 px each, then scroll sideways. Needs you is first. Each column scrolls inside itself.
+- **Agents:** one table in a card, fixed columns.
+- **Logs:** one card, mono lines, time and source in fixed columns.
+- Spacing is Tailwind's 4 px scale. Views have 16 px gutters.
 
-Spacing steps: 4, 8, 12, 16 px. Rows sit 6 px apart in a column; regions have 16 px side gutters.
-
-## Elevation & Depth
-None. Depth is a 1 px line and a change of ground (`ground` behind the board, `surface` for rows and panels). No shadows, no blur.
+## Elevation and depth
+After T3 Code: a 1 px border and a change of surface first. Controls take a faint `shadow-xs/5`. Overlays (dialog, popover, select, toast, tooltip) take a soft drop shadow with a real offset. No glass, no backdrop blur, no glow.
 
 ## Shapes
-4 px radius on rows, buttons and the alert pill; 3 px on tags; 2 px (`xs`) on the budget bar. No pills wider than their text.
+8 px radius on controls and inputs, 12 px on cards and board columns, 16 px on dialogs and the command palette, 4 px on badges.
 
 ## Components
-- **Issue row**: a link to Linear. Line one: key, priority (Urgent in bold, High plain; never red), size, and the running agent at the right. Line two: the title, two lines at most. Line three, when it applies: the Needs-you reason, what it waits on, or its parent.
-- **Agent table**: a real table with fixed columns: agent, task (key, title, latest action), elapsed, budget used (bar, percent, budget; the percent passes 100 when a run is over), tokens. Idle agents say Idle.
-- **Log**: time, source, text in monospace. It follows the end until the reader scrolls up; then it holds still and offers a button with the count of new lines.
-- **Pause control**: always in the band at the right. The label and the band change on the click, before the API answers. The notice to its left says what happened (runs stopped, worktrees kept) and is a live region.
-- **Held updates**: while the pointer or focus is in the board or the agent table, live changes wait. A "Show N updates" button in the region head applies them; leaving the region applies them too.
-- **Skip links**: the first two tab stops jump to Agents and Log, past the board's links.
-- **States**: every region has a skeleton for loading, a sentence for empty that says what fills it, and an error sentence with Retry.
+- **Button** (CVA): default (primary), outline, secondary, ghost, ghost-muted, destructive, warning-outline, link. Sizes default 32 px, sm 28 px, xs 24 px, icon 32 px. Press scales to 0.97.
+- **Pause control:** always in the header at the right. Outline with a pause icon while running; primary "Resume" while paused. The click changes the header and the label at once (optimistic). The daemon's answer confirms it. A failure rolls back and shows an error toast. Never a confirmation.
+- **Command palette:** Cmd+K or Ctrl+K, or Commands in the sidebar. It lists every action: pause or resume, each view, run the checks again, read the board again, load the log again, and the three themes. Up, Down, Home, End, Enter, Esc.
+- **Toasts:** bottom right, at most four, 5 s. Every async result gets one: pause, resume, check again.
+- **Held updates:** while the pointer or focus is in the board or the agent table, live changes wait. A "Show N updates" button applies them.
+- **States:** every view has a skeleton for loading, a sentence for empty that says what fills it, and an error card with Retry.
+
+## UX checklist
+Each item is met where it says. Check it again on every UI change.
+
+| Rule | Where it is met |
+|---|---|
+| Nielsen 1, visibility of system status | Header: connection dot, last poll, paused band. Sidebar counts. Toasts for each result. Skeletons while loading. |
+| Nielsen 2, match with the real world | The words of the domain (GLOSSARY.md): Needs you, Blocked, run, budget used, check. |
+| Nielsen 3, user control and freedom | Resume undoes Pause. Esc closes the palette and dialogs. Back and Forward move between views (hash routes). |
+| Nielsen 4, consistency and standards | One set of primitives; T3 Code's controls, keys and density. |
+| Nielsen 5, error prevention | Pause never needs a confirm, but a second click while a call is in flight does nothing (`aria-disabled`). Disabled palette items do not run. |
+| Nielsen 6, recognition over recall | Sidebar with labels; palette lists every action with its group; key hints at the foot of the palette. |
+| Nielsen 7, flexibility and efficiency | Cmd+K palette; skip link; every control works by keyboard. |
+| Nielsen 8, aesthetic and minimal design | One loud color for Needs you; no decoration; meta in muted text. |
+| Nielsen 9, help users recover from errors | Error cards name the problem and offer Retry. Failed checks show their fix. Failed pause says the agents still run. |
+| Nielsen 10, help and documentation | Tooltips on the icon rail and the connection dot; the Settings view states it runs the doctor checks. |
+| Jakob's law | T3 Code's sidebar, header height, palette, buttons, badges and tokens. |
+| Fitts's law | The pause control is a 32 px button at the header's right edge, at least 112 px wide. The Needs you button sits next to it. Sidebar rows span the full rail width. On coarse pointers every control has a 44 px hit area. |
+| Hick's law | Four views. The palette narrows by typed words. Each view shows one primary action at most. |
+| Gestalt grouping | Board columns are bounded cards; agent rows share one table; palette items sit under group headings. |
+| Progressive disclosure | Issue rows show key, title and one status line; Linear holds the rest (opens on click). The external-link icon shows only on hover. |
+| All interaction states | Hover, active (scale 0.97 on buttons, row tint on nav), focus-visible (2 px ring), disabled (64 percent opacity), loading (skeletons and spinners), empty, error: in every primitive and view. |
+| Motion at 200 ms or less | Durations are 100, 150 and 200 ms (see motion tokens). `prefers-reduced-motion` stops them all (`index.css`). |
+| Optimistic pause with rollback | `lib/pause.ts` and `hooks/usePause.ts`; tested in `lib/pause.test.ts`. |
+| Toasts for async results | `components/ui/toast.tsx`; pause, resume and check again. |
+| Live updates never move content under the cursor | Held updates in Board and Agents; the log holds still while scrolled up or under the pointer. |
+| WCAG AA | The contrast table above; focus is always visible; skip link; landmarks and labels. |
 
 ## Do's and Don'ts
-- Do keep red for Needs you. Do keep amber for budget, stopping and paused.
-- Do give every number tabular figures and a fixed column.
-- Do use authored 16 px SVG icons with a 1.5 px stroke, always next to a text label.
-- Don't add gradients, shadows, glass, emoji, eyebrow labels or decorative illustration.
+- Do keep red for Needs you, Blocked and failures. Do keep amber for budget, stopping, warn and paused.
+- Do use lucide icons at 16 px, next to a text label or with a tooltip. Inside 12 px meta lines (issue reasons, the external-link hint) they shrink to 12 px.
+- Do build every new control from `components/ui`. Add a variant with CVA before a one-off class list.
+- Don't add gradients, glass, backdrop blur, emoji, eyebrow labels or decorative illustration.
 - Don't move content under the cursor: hold it, or append below the visible area.
 - Don't add a modal or a confirmation to pause; it is the kill switch and must act at once.
+- Don't use T3 Code's name, logo or brand.

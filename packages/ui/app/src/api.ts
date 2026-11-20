@@ -3,11 +3,9 @@ import type { AgentsSnapshot, BoardSnapshot, LogLine, LogSnapshot } from "@harne
 import { useCallback, useEffect, useState } from "react";
 import { appendLines } from "./lib/log.ts";
 
-export interface PauseState {
-  paused: boolean;
-  since?: string;
-  reason?: string;
-}
+import type { PauseState } from "./lib/pause.ts";
+
+export type { PauseState };
 
 export type Load<T> =
   | { status: "loading" }
@@ -123,3 +121,9 @@ export interface PauseResult extends PauseState {
 
 export const pauseAll = () => post<PauseResult>("/api/pause", {});
 export const resumeAll = () => post<PauseState>("/api/resume", {});
+
+import type { Check } from "./lib/checks.ts";
+
+export type { Check };
+
+export const readStatus = () => request<{ checks: Check[] }>("/api/status");

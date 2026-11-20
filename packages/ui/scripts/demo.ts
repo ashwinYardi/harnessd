@@ -1,10 +1,12 @@
 // Serves the built UI with synthetic data, so the UI can be checked without Linear or a
 // harness. The data is made up. Usage, after `pnpm build`:
-//   node scripts/demo.ts [--port 4848] [--empty] [--broken] [--slow]
+//   node scripts/demo.ts [--port 4848] [--empty] [--broken] [--slow] [--setup]
+// --setup makes the harness checks fail, as on a fresh machine.
 
 import { fileURLToPath } from "node:url";
 import {
   agentsView,
+  type Check,
   createBoardSource,
   createLogBuffer,
   createUiApi,
@@ -14,6 +16,7 @@ import {
   type PauseState,
   startDaemon,
   staticRoutes,
+  statusRoutes,
 } from "@harnessd/daemon";
 import type { BoardIssue } from "@harnessd/shared";
 
@@ -24,6 +27,7 @@ const port = Number(args[args.indexOf("--port") + 1]) || 4848;
 const empty = flag("empty");
 const broken = flag("broken");
 const slow = flag("slow");
+const setup = flag("setup");
 
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -193,9 +197,54 @@ const ui = createUiApi({
   pause,
 });
 
+const ok = (id: string, detail: string): Check => ({ id, state: "ok", detail, fix: "" });
+const CHECKS = (): Check[] => [
+  ok("node", "v24.11.0 (/opt/homebrew/bin/node)"),
+  ok("config", "4 agents"),
+  setup
+    ? {
+        id: "harness.claude-code.cli",
+        state: "missing",
+        detail: "claude is not on PATH",
+        fix: "Install it: npm i -g @anthropic-ai/claude-code",
+      }
+    : ok("harness.claude-code.cli", "2.1.4 (Claude Code) (/opt/homebrew/bin/claude)"),
+  setup
+    ? {
+        id: "harness.claude-code.auth",
+        state: "missing",
+        detail: "not checked",
+        fix: "Fix harness.claude-code.cli first.",
+      }
+    : ok("harness.claude-code.auth", "signed in (claude.ai)"),
+  ok("github.cli", "gh 2.83.0"),
+  ok("github.auth", "signed in as demo-owner"),
+  ok("github.push", "demo/harnessd: WRITE"),
+  ok("github.ci", "main requires: ci"),
+  ok("linear.key", "HARNESSD_LINEAR_API_KEY is set"),
+  ok("linear.team", "MET"),
+  ok("linear.states", "Ready, In Progress, In Review, Done, Needs input"),
+  {
+    id: "slack.webhook",
+    state: "warn",
+    detail: "HARNESSD_SLACK_WEBHOOK_URL is not set",
+    fix: "Set HARNESSD_SLACK_WEBHOOK_URL in ~/.zprofile to post merges and blocks.",
+  },
+  ok("git.worktrees", "3 worktrees in /Users/demo/harnessd"),
+  ok("daemon.port", "4848 is served by this daemon"),
+  ok("skills.pack", "16 of 16 skills in place"),
+];
+
 const daemon = await startDaemon({
   port,
   pause,
-  routes: [...ui.routes, ...(await staticRoutes(UI_DIR))],
+  routes: [
+    ...ui.routes,
+    ...statusRoutes(async () => {
+      await sleep(400);
+      return CHECKS();
+    }),
+    ...(await staticRoutes(UI_DIR)),
+  ],
 });
 console.log(`harnessd demo: ${daemon.url} (synthetic data)`);

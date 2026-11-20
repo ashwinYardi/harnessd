@@ -1,6 +1,6 @@
 // Holds live updates while the pointer or focus is inside a region (PRODUCT.md UX rules).
 import { type FocusEvent, useCallback, useEffect, useRef, useState } from "react";
-import { type Held, held, release, start } from "./lib/hold.ts";
+import { type Held, held, release, start } from "../lib/hold.ts";
 
 export function useHold<T>(value: T) {
   const [state, setState] = useState<Held<T>>(() => start(value));

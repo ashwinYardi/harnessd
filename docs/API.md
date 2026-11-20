@@ -62,6 +62,6 @@ The UI's read models are typed in `packages/shared/src/ui.ts`.
   event: log
   data: {"seq":42,"at":"…","source":"backend","issueKey":"MET-41","level":"info","text":"Edit src/app.ts"}
   ```
-- **The UI's files** are read once at start from `packages/ui/dist/app`, the Vite build. Each file is its own exact route, so no other path is served. The HTML carries a strict `content-security-policy` (only its own scripts, styles and connections; no framing). Hashed assets are cached for a year. If the UI is not built, `harnessd run` says so and serves the API alone.
+- **The UI's files** are read once at start from `packages/ui/dist/app`, the Vite build. Each file is its own exact route, so no other path is served. The HTML carries a strict `content-security-policy` (only its own scripts, styles and connections; no framing). One inline style is allowed by its hash: the fixed scrollbar rule that Base UI renders (D-025). Hashed assets are cached for a year. If the UI is not built, `harnessd run` says so and serves the API alone.
 
 New routes are added as `Route` values (`{ method, path, handler }`) through `startDaemon({ routes })`. The handler returns the JSON body of a 200, a `RawBody` (a file), or an `EventStream`, or throws `HttpError(status, code)`.
