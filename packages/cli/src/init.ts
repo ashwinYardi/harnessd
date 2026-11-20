@@ -15,6 +15,8 @@ import {
   type ExecResult,
   findOnPath,
   isTransientDir,
+  LAUNCHD_LABEL,
+  launchdPlistPath,
   PACK_MARKER,
   parseConfigText,
   pathDirs,
@@ -27,8 +29,8 @@ import { PACK_MANIFEST, type PackSkill } from "./pack.ts";
 
 export const INIT_USAGE = "Usage: harnessd init [--yes] [--no-service] [--workspace <dir>]";
 
-/** The launchd label, also the plist's file name. */
-export const LAUNCHD_LABEL = "dev.harnessd.daemon";
+/** The launchd label, also the plist's file name; the status engine reads the same plist. */
+export { LAUNCHD_LABEL };
 
 /** The CLIs init checks, in order. `harnessd` itself must be installed for the service. */
 export const TOOLS = [
@@ -208,7 +210,7 @@ export function globalDirFor(sys: InitSystem): string {
 }
 
 export function plistPathFor(sys: InitSystem): string {
-  return join(sys.homedir, "Library", "LaunchAgents", `${LAUNCHD_LABEL}.plist`);
+  return launchdPlistPath(sys.homedir);
 }
 
 interface Step {

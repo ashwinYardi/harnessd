@@ -177,6 +177,110 @@ test("Node older than 24 fails, with the nvm fix", async () => {
   assert.match(node.fix, /nvm install 24 && nvm alias default 24/);
 });
 
+/** A launchd plist like the one `harnessd init` writes. */
+function plist(harnessd: string, path: string): string {
+  return [
+    "<plist><dict>",
+    "<key>Label</key><string>dev.harnessd.daemon</string>",
+    "<key>ProgramArguments</key>",
+    `<array><string>${harnessd}</string><string>run</string></array>`,
+    "<key>EnvironmentVariables</key>",
+    `<dict><key>PATH</key><string>${path}</string></dict>`,
+    "</dict></plist>",
+  ].join("\n");
+}
+
+/** A world on macOS whose service runs the harnessd command at `harnessd`. */
+async function serviceWorld(harnessd: string, wrapper?: string, path = "/svc/bin:/usr/bin") {
+  const w = await world();
+  const servicePlist = join(w.root, "dev.harnessd.daemon.plist");
+  await writeFile(servicePlist, plist(harnessd, path));
+  if (wrapper !== undefined) await writeFile(harnessd, wrapper);
+  return { ...w, options: { ...w.options, platform: "darwin" as const, servicePlist } };
+}
+
+test("the node check is unchanged when there is no service plist", async () => {
+  const w = await world();
+  const options = { ...w.options, platform: "darwin" as const, servicePlist: join(w.root, "none") };
+  const node = byId(await runStatus(options), "node");
+  assert.deepEqual(node, { id: "node", state: "ok", detail: "v24.11.0 (/bin/node)", fix: "" });
+});
+
+test("the node check is unchanged when the wrapper runs the same Node", async () => {
+  const w0 = await world();
+  const w = await serviceWorld(
+    join(w0.root, "harnessd"),
+    '#!/bin/sh\nexec "/bin/node" "/src/packages/cli/dist/bin.js" "$@"\n',
+  );
+  const node = byId(await runStatus(w.options), "node");
+  assert.deepEqual(node, { id: "node", state: "ok", detail: "v24.11.0 (/bin/node)", fix: "" });
+  assert.ok(!w.calls.some((c) => c.startsWith("/bin/node")));
+});
+
+test("a wrapper with another Node 24 is ok, and the detail names that Node", async () => {
+  const w0 = await world();
+  const w = await serviceWorld(
+    join(w0.root, "harnessd"),
+    '#!/bin/sh\nexec /opt/node24/bin/node /src/packages/cli/dist/bin.js "$@"\n',
+  );
+  w.bins.add("/opt/node24/bin/node");
+  w.replies.set("/opt/node24/bin/node --version", ok("v24.2.0\n"));
+  const node = byId(await runStatus(w.options), "node");
+  assert.equal(node.state, "ok");
+  assert.equal(
+    node.detail,
+    "v24.11.0 (/bin/node); the service uses v24.2.0 (/opt/node24/bin/node)",
+  );
+  assert.equal(node.fix, "");
+});
+
+test("a wrapper with a Node older than 24 fails, with the Install block fix", async () => {
+  const w0 = await world();
+  const w = await serviceWorld(
+    join(w0.root, "harnessd"),
+    "#!/bin/sh\nexec '/nvm/v22/bin/node' /src/packages/cli/dist/bin.js \"$@\"\n",
+  );
+  w.bins.add("/nvm/v22/bin/node");
+  w.replies.set("/nvm/v22/bin/node --version", ok("v22.3.0\n"));
+  const node = byId(await runStatus(w.options), "node");
+  assert.equal(node.state, "fail");
+  assert.equal(
+    node.detail,
+    "v24.11.0 (/bin/node); the service uses v22.3.0 (/nvm/v22/bin/node); harnessd needs 24 or newer",
+  );
+  assert.equal(node.fix, "Run the Install block with Node 24 active, then harnessd init.");
+});
+
+test("a harnessd that is not a wrapper uses the node on the service PATH", async () => {
+  const w0 = await world();
+  const w = await serviceWorld(
+    join(w0.root, "bin.js"),
+    "#!/usr/bin/env node\nimport './cli.js';\n",
+    "/svc/bin:/usr/bin",
+  );
+  w.bins.add("/svc/bin/node");
+  w.replies.set("/svc/bin/node --version", ok("v25.0.0\n"));
+  const node = byId(await runStatus(w.options), "node");
+  assert.equal(node.state, "ok");
+  assert.equal(node.detail, "v24.11.0 (/bin/node); the service uses v25.0.0 (/svc/bin/node)");
+});
+
+test("a service Node that cannot be found fails, with the Install block fix", async () => {
+  const w0 = await world();
+  const w = await serviceWorld(join(w0.root, "bin.js"), "#!/usr/bin/env node\n", "/svc/bin");
+  const node = byId(await runStatus(w.options), "node");
+  assert.equal(node.state, "fail");
+  assert.equal(node.detail, "v24.11.0 (/bin/node); the service Node is not on its PATH");
+  assert.equal(node.fix, "Run the Install block with Node 24 active, then harnessd init.");
+});
+
+test("the service Node is not checked outside macOS", async () => {
+  const w0 = await world();
+  const w = await serviceWorld(join(w0.root, "bin.js"), "#!/usr/bin/env node\n", "/svc/bin");
+  const node = byId(await runStatus({ ...w.options, platform: "linux" }), "node");
+  assert.deepEqual(node, { id: "node", state: "ok", detail: "v24.11.0 (/bin/node)", fix: "" });
+});
+
 test("a missing harness CLI is missing, and its later checks are not run", async () => {
   const w = await world();
   w.bins.delete("/bin/claude");
