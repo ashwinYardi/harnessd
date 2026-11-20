@@ -8,7 +8,7 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Pack marker**: the `.harnessd-pack` file in a skill folder that init installed. A folder without it belongs to the user.
 
-**Native folder**: the `.harnessd-native/` folder in a skill. It holds the skill's hooks (`hooks.json`) and Claude Code subagents (`claude-agents/`). Sync merges them into the harness files; it does not copy the folder (D-027).
+**Native folder**: the `.harnessd-native/` folder in a skill. It holds the skill's hooks (`hooks.json`) and Claude Code subagents (`claude-agents/`). Sync merges them into the harness files; it does not copy the folder (D-028).
 
 **Subagent**: a harness's own agent file, such as `.claude/agents/impeccable-finish-reviewer.md`. It is not a harnessd agent (coordinator, backend, frontend, qa). _Avoid_: agent, when you mean a subagent.
 

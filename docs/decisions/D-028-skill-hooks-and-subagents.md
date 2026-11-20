@@ -1,4 +1,4 @@
-# D-027 Skills ship hooks and subagents; sync merges settings
+# D-028 Skills ship hooks and subagents; sync merges settings
 Status: accepted 2026-11-20. Extends D-004, D-016 and D-020.
 
 - A skill can have a native folder, `.harnessd-native/`. It holds `hooks.json` (Claude Code and Codex hooks) and `claude-agents/<name>.md` (Claude Code subagents).

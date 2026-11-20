@@ -101,7 +101,7 @@ Optional frontmatter with `name` (defaults to the folder name) and `description`
 
 The commits are in `.claude/skills/VENDORED.md`. Each folder is the whole upstream skill: SKILL.md, reference files, scripts and `agents/`. Each folder has its upstream licence as `LICENSE` (impeccable also has `NOTICE.md`). Each folder also has a `.harnessd-pack` marker with the upstream, the commit and the pack format. Sync does not copy the marker.
 
-**Hooks and subagents.** impeccable also has a `.harnessd-native/` folder, from the same upstream commit (D-027):
+**Hooks and subagents.** impeccable also has a `.harnessd-native/` folder, from the same upstream commit (D-028):
 - `hooks.json`: the design hook for Claude Code and Codex.
 - `claude-agents/`: the five Impeccable subagents, such as `impeccable-finish-reviewer.md`.
 
