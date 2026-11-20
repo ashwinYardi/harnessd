@@ -117,7 +117,7 @@ function BinaryPath({ card, onSaved }: { card: HarnessCard; onSaved: () => void 
           font="mono"
           id={id}
           onChange={(e) => setValue(e.target.value)}
-          placeholder={found ?? `Found on PATH`}
+          placeholder={found ?? `/usr/local/bin/${card.id === "claude-code" ? "claude" : card.id}`}
           size="sm"
           spellCheck={false}
           value={value}
@@ -204,28 +204,33 @@ function HarnessCardView({
           <dt className="text-muted-foreground text-xs leading-5">Signed in</dt>
           <dd>
             {s.signedIn ? (
-              s.signIn
+              `Yes, ${s.signIn.replace(/^signed in ?/, "").replace(/^\((.*)\)$/, "$1") || "with the CLI"}`
             ) : (
               <span className="text-destructive-foreground">
-                {s.found ? s.signIn : "Install first"}
+                {s.found ? "No" : "Install first"}
               </span>
             )}
           </dd>
         </dl>
         {s.warning && (
           <p
-            className="rounded-lg border border-warning/32 bg-warning-surface px-3 py-2 text-warning-foreground text-xs"
+            className="rounded-lg bg-warning-surface px-3 py-2 text-warning-foreground text-xs"
             role="note"
           >
             {s.warning}. Update now to fix it.
           </p>
         )}
         <BinaryPath card={card} onSaved={onRecheck} />
-        {job && <JobOutput job={job} />}
       </CardPanel>
       <CardFooter className="flex-wrap">
         {(["install", "update", "signin"] as const).map((action) => {
-          const show = action === "install" ? !s.found : s.found;
+          // Each button shows only when it can help: Sign in only while signed out.
+          const show =
+            action === "install"
+              ? !s.found
+              : action === "signin"
+                ? s.found && !s.signedIn
+                : s.found;
           if (!show) return null;
           const Icon =
             action === "install" ? DownloadIcon : action === "update" ? RefreshCwIcon : LogInIcon;
@@ -249,6 +254,11 @@ function HarnessCardView({
           </code>
         </span>
       </CardFooter>
+      {job && (
+        <div className="px-4 pb-3">
+          <JobOutput job={job} />
+        </div>
+      )}
     </Card>
   );
 }

@@ -5,10 +5,9 @@ import { Button } from "../../components/ui/button.tsx";
 import { Spinner } from "../../components/ui/spinner.tsx";
 import type { Loop } from "../../hooks/useLoop.ts";
 import type { Status } from "../../hooks/useStatus.ts";
-import { isBlocking } from "../../lib/checks.ts";
 import { cn } from "../../lib/cn.ts";
 import { hrefFor, type SettingsPage } from "../../lib/route.ts";
-import { worst } from "../../lib/setup.ts";
+import { blockingAreas, worst } from "../../lib/setup.ts";
 import { Connections } from "./Connections.tsx";
 import { Harnesses } from "./Harnesses.tsx";
 import { Team } from "./Team.tsx";
@@ -23,9 +22,9 @@ const PAGES: ReadonlyArray<{ page: SettingsPage; title: string; about: string }>
   { page: "team", title: "Team", about: "Each agent's role, harness and model." },
 ];
 
-function StartBanner({ loop, blocking }: { loop: Loop; blocking: number }) {
+function StartBanner({ loop, areas }: { loop: Loop; areas: string[] }) {
   if (loop.loop?.state !== "setup") return null;
-  const ready = blocking === 0;
+  const ready = areas.length === 0;
   return (
     <div
       className={cn(
@@ -43,7 +42,7 @@ function StartBanner({ loop, blocking }: { loop: Loop; blocking: number }) {
       <p className="min-w-0 flex-1 text-sm">
         {ready
           ? "Every required check passes. Start the loop to pick up Ready issues."
-          : `The loop waits. ${blocking} required ${blocking === 1 ? "check fails" : "checks fail"}; fix ${blocking === 1 ? "it" : "them"} below.`}
+          : `The loop waits. Fix ${areas.length === 1 ? "one thing" : `${areas.length} things`}: ${areas.join(", ")}.`}
       </p>
       <Button disabled={!ready || loop.starting} onClick={() => void loop.start()}>
         {loop.starting ? <Spinner /> : <PlayIcon aria-hidden="true" />}
@@ -118,7 +117,7 @@ export function Settings({
               </a>
             ))}
           </nav>
-          <StartBanner blocking={checks.filter(isBlocking).length} loop={loop} />
+          <StartBanner areas={blockingAreas(checks)} loop={loop} />
           <header className="mb-3">
             <h2 className="font-semibold text-base">{current?.title}</h2>
             <p className="text-muted-foreground text-sm">{current?.about}</p>

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Check } from "./checks.ts";
-import { connectionCards, envFix, harnessSummary } from "./setup.ts";
+import { blockingAreas, connectionCards, envFix, harnessSummary, isWaiting } from "./setup.ts";
 
 const c = (id: string, state: Check["state"], detail = "", fix = ""): Check => ({
   id,
@@ -81,4 +81,28 @@ test("envFix says where to set a secret's variable, and never asks for its value
     "Set HARNESSD_SLACK_WEBHOOK_URL in your shell profile (for example ~/.zprofile), then restart harnessd.",
   );
   assert.equal(envFix(c("github.auth", "fail")), undefined);
+});
+
+test("blockingAreas counts things to fix, not checks: a harness or a connection each count once", () => {
+  assert.deepEqual(
+    blockingAreas([
+      c("node", "ok"),
+      c("harness.claude-code.cli", "missing", "claude is not on PATH"),
+      c("harness.claude-code.auth", "missing", "not checked"),
+      c("harness.codex.auth", "fail"),
+      c("linear.key", "missing"),
+      c("linear.team", "missing", "not checked"),
+      c("slack.webhook", "warn"),
+    ]),
+    ["Claude Code", "Codex", "Linear"],
+  );
+  assert.deepEqual(blockingAreas([c("config", "fail"), c("node", "fail")]), ["Config", "Node"]);
+});
+
+test("isWaiting marks a check that only waits on another one", () => {
+  assert.equal(
+    isWaiting(c("linear.team", "missing", "not checked", "Fix linear.key first.")),
+    true,
+  );
+  assert.equal(isWaiting(c("linear.key", "missing", "LINEAR_API_KEY is not set")), false);
 });

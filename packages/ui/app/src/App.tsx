@@ -13,6 +13,7 @@ import { needsYou } from "./lib/board.ts";
 import type { Command } from "./lib/commands.ts";
 import type { View } from "./lib/route.ts";
 import { firstRoute, type SettingsPage } from "./lib/route.ts";
+import { blockingAreas } from "./lib/setup.ts";
 import { goToView, isPaletteShortcut, isTypingTarget } from "./lib/shortcut.ts";
 import { AppHeader } from "./shell/AppHeader.tsx";
 import { AppSidebar } from "./shell/AppSidebar.tsx";
@@ -72,10 +73,9 @@ export function App() {
     api.agents.status === "ready"
       ? api.agents.data.agents.reduce((n, a) => n + a.runs.length, 0)
       : undefined;
+  // Things to fix, not checks: a harness or a connection counts once (MET-28).
   const failingChecks =
-    status.status.status === "ready"
-      ? status.status.data.filter((c) => c.state === "fail" || c.state === "missing").length
-      : 0;
+    status.status.status === "ready" ? blockingAreas(status.status.data).length : 0;
 
   const title = NAV.find((n) => n.view === route.view)?.title ?? "Board";
   useEffect(() => {
@@ -264,7 +264,8 @@ export function App() {
           now={now}
           onShowNeedsYou={() => goTo("board")}
           setup={
-            loop.loop?.state === "setup"
+            // On Settings the banner carries Start, so the header does not repeat it.
+            loop.loop?.state === "setup" && route.view !== "settings"
               ? {
                   ready: failingChecks === 0,
                   starting: loop.starting,

@@ -117,7 +117,7 @@ export function AppHeader({
       )}
       {setup && (
         <>
-          <Badge variant="warning" size="lg">
+          <Badge className="hidden sm:inline-flex" variant="warning" size="lg">
             Not started
           </Badge>
           {setup.ready ? (
@@ -126,7 +126,7 @@ export function AppHeader({
               Start
             </Button>
           ) : (
-            <Button onClick={setup.onFinish} variant="outline">
+            <Button className="hidden sm:inline-flex" onClick={setup.onFinish} variant="outline">
               Finish setup
             </Button>
           )}

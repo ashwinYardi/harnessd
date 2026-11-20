@@ -8,7 +8,7 @@ import {
 import { Badge } from "../../components/ui/badge.tsx";
 import type { Check } from "../../lib/checks.ts";
 import { cn } from "../../lib/cn.ts";
-import { envFix } from "../../lib/setup.ts";
+import { envFix, isWaiting } from "../../lib/setup.ts";
 
 const ICON: Record<Check["state"], React.ReactNode> = {
   ok: <CircleCheckIcon className="text-success-foreground" />,
@@ -53,11 +53,17 @@ export function CheckLine({ check }: { check: Check }) {
           <span className="font-mono text-xs">{check.id}</span>
           <span className="sr-only">{check.state}</span>
         </p>
-        <p className="wrap-anywhere text-muted-foreground text-xs">{check.detail}</p>
-        {check.state !== "ok" && (
+        {isWaiting(check) ? (
+          <p className="text-pretty text-muted-foreground text-xs">
+            Not checked yet. {check.fix.replace(/^Fix (\S+) first\.$/, "It waits on $1.")}
+          </p>
+        ) : (
+          <p className="wrap-anywhere text-pretty text-muted-foreground text-xs">{check.detail}</p>
+        )}
+        {check.state !== "ok" && !isWaiting(check) && (
           <p
             className={cn(
-              "wrap-anywhere mt-0.5 text-xs",
+              "wrap-anywhere mt-0.5 text-pretty text-xs",
               check.state === "warn" ? "text-warning-foreground" : "text-destructive-foreground",
             )}
           >

@@ -34,42 +34,46 @@ export function Connections({ status }: { status: Status }) {
   }
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      {connectionCards(s.data).map((card) => (
-        <Card key={card.id}>
-          <CardHeader className="pb-1">
-            <div className="min-w-0 flex-1">
-              <CardTitle className="flex items-center gap-2">
-                {card.title}
-                <StateBadge state={card.state}>{LABEL[card.state]}</StateBadge>
-              </CardTitle>
-              <CardDescription>{card.about}</CardDescription>
-            </div>
-            <Button
-              aria-label={`Check ${card.title} again`}
-              disabled={status.checking}
-              onClick={() => void status.recheck()}
-              size="sm"
-              variant="ghost-muted"
-            >
-              {status.checking ? <Spinner /> : <RotateCwIcon aria-hidden="true" />}
-              Check again
-            </Button>
-          </CardHeader>
-          <CardPanel>
-            {card.checks.length === 0 ? (
-              <p className="py-2 text-muted-foreground text-xs">
-                No check ran for this connection.
-              </p>
-            ) : (
-              <ul className="divide-y">
-                {card.checks.map((c) => (
-                  <CheckLine check={c} key={c.id} />
-                ))}
-              </ul>
-            )}
-          </CardPanel>
-        </Card>
-      ))}
+      {connectionCards(s.data)
+        .sort((a, b) => Number(a.state === "ok") - Number(b.state === "ok"))
+        .map((card) => (
+          <Card key={card.id}>
+            <CardHeader className="pb-1">
+              <div className="min-w-0 flex-1">
+                <CardTitle className="flex items-center gap-2">
+                  {card.title}
+                  <StateBadge state={card.state}>{LABEL[card.state]}</StateBadge>
+                </CardTitle>
+                <CardDescription>{card.about}</CardDescription>
+              </div>
+              {card.state !== "ok" && (
+                <Button
+                  aria-label={`Check ${card.title} again`}
+                  disabled={status.checking}
+                  onClick={() => void status.recheck()}
+                  size="sm"
+                  variant="ghost-muted"
+                >
+                  {status.checking ? <Spinner /> : <RotateCwIcon aria-hidden="true" />}
+                  Check again
+                </Button>
+              )}
+            </CardHeader>
+            <CardPanel>
+              {card.checks.length === 0 ? (
+                <p className="py-2 text-muted-foreground text-xs">
+                  No check ran for this connection.
+                </p>
+              ) : (
+                <ul className="divide-y">
+                  {card.checks.map((c) => (
+                    <CheckLine check={c} key={c.id} />
+                  ))}
+                </ul>
+              )}
+            </CardPanel>
+          </Card>
+        ))}
     </div>
   );
 }

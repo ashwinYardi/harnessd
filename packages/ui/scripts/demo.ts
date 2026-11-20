@@ -244,8 +244,9 @@ const harnessChecks = (): Check[] => [
 ];
 const CHECKS = (): Check[] => [
   ok("node", "v24.11.0 (/opt/homebrew/bin/node)"),
-  ok("config", "4 agents"),
-  ...harnessChecks().filter((c) => c.id.startsWith("harness.claude-code.")),
+  ok("config", "5 agents"),
+  // The demo team has qa on Codex, so the real engine would check both harnesses.
+  ...harnessChecks(),
   ok("github.cli", "gh 2.83.0"),
   ok("github.auth", "signed in as demo-owner"),
   ok("github.push", "demo/harnessd: WRITE"),

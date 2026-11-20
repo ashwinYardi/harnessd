@@ -52,7 +52,7 @@ export function AppSidebar({
     settings: failingChecks > 0 && (
       <Badge variant="error">
         {failingChecks}
-        <span className="sr-only"> checks fail</span>
+        <span className="sr-only"> to fix</span>
       </Badge>
     ),
   };

@@ -89,3 +89,31 @@ export function envFix(check: Check): string | undefined {
   if (!name) return undefined;
   return `Set ${name} in your shell profile (for example ~/.zprofile), then restart harnessd.`;
 }
+
+/** A check that was not run because another one blocks (D-023: detail "not checked"). */
+export function isWaiting(check: Check): boolean {
+  return check.state === "missing" && check.detail === "not checked";
+}
+
+const AREA: ReadonlyArray<[string, string]> = [
+  ["harness.claude-code.", "Claude Code"],
+  ["harness.codex.", "Codex"],
+  ["github.", "GitHub"],
+  ["linear.", "Linear"],
+  ["slack.", "Slack"],
+  ["git.", "Git"],
+  ["daemon.port", "Port"],
+  ["skills.", "Skills"],
+  ["config", "Config"],
+  ["node", "Node"],
+];
+
+/** The areas with a blocking check, each named once, in the order the Settings pages show them. */
+export function blockingAreas(checks: readonly Check[]): string[] {
+  const bad = checks.filter((c) => c.state === "fail" || c.state === "missing");
+  const out: string[] = [];
+  for (const [prefix, name] of AREA) {
+    if (bad.some((c) => c.id.startsWith(prefix))) out.push(name);
+  }
+  return out;
+}
