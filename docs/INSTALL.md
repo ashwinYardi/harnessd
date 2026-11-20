@@ -62,7 +62,7 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 
 | Check | How | Not ok |
 |---|---|---|
-| `node` | the running Node | `fail` below 24. Fix: `nvm install 24 && nvm alias default 24`, or `brew install node@24` |
+| `node` | the running Node; when the service uses a different Node, the detail names that Node too | `fail` below 24, or when the Node the service uses is below 24 or not found. Fix: `nvm install 24 && nvm alias default 24`, or `brew install node@24` |
 | `config` | loads global and workspace config.toml | `fail` with the file and key |
 | `harness.<id>.cli` | `[harnesses.<id>] bin` in the config, else `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, on PATH; then `--version` | `missing` when not found |
 | `harness.<id>.auth` | `claude auth status --json`; `codex login status` | `fail` when signed out; `warn` when the status cannot be read |
@@ -92,6 +92,8 @@ Harnesses are checked once for each harness an agent uses. Checks run in paralle
 | Restarts | at login (`RunAtLoad`), and after a non-zero exit, at most every 30 s |
 
 `HARNESSD_HOME` is passed on when it was set for `init`.
+
+launchd does not load nvm or your shell profile. The service sees only the PATH in the plist, and `harnessd init` writes that PATH. The from-source wrapper in the README names its Node by an absolute path, so the service always runs that Node, whatever Node is first on PATH. After you change Node, run the README Install block again with the new Node active, then run `harnessd init` again.
 
 ## Secrets
 harnessd needs a Linear personal API key, and a Slack webhook url if you want Slack. Set both in the app. No shell profile edit and no restart is needed (D-030).

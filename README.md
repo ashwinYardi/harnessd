@@ -81,13 +81,14 @@ Settings, rules, skills, agents and MCP servers merge in order: defaults, global
 ## Install
 You need macOS (or Linux, without the background service), Node 24 or newer, the `gh` CLI signed in to GitHub, and a Linear API key.
 
-Until `@harnessd/cli` is on npm, build it from source with pnpm 10, and put a `harnessd` command on your PATH:
+Until `@harnessd/cli` is on npm, build it from source with pnpm 10, and put a `harnessd` command on your PATH. Run the block with Node 24 active, for example `nvm use 24`. The wrapper names that Node by its full path, so the launchd service runs it too:
 
 ```bash
+node -e 'process.exit(+process.versions.node.split(".")[0] < 24 ? 1 : 0)' || { echo 'harnessd needs Node 24 or newer'; exit 1; }
 git clone https://github.com/ashwinYardi/harnessd.git && cd harnessd
 corepack enable && pnpm install && pnpm build
 mkdir -p ~/.local/bin
-printf '#!/bin/sh\nexec node "%s/packages/cli/dist/bin.js" "$@"\n' "$PWD" > ~/.local/bin/harnessd
+printf '#!/bin/sh\nexec "%s" "%s/packages/cli/dist/bin.js" "$@"\n' "$(command -v node)" "$PWD" > ~/.local/bin/harnessd
 chmod +x ~/.local/bin/harnessd   # ~/.local/bin must be on your PATH
 ```
 
