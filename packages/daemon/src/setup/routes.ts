@@ -70,7 +70,12 @@ const JOB_TIMEOUT_MS = 10 * 60_000;
 export const spawnRunner: SetupRunner = (cmd, args, onLine) =>
   new Promise((resolve) => {
     const child = spawn(cmd, [...args], { stdio: ["ignore", "pipe", "pipe"], shell: false });
-    const timer = setTimeout(() => child.kill("SIGTERM"), JOB_TIMEOUT_MS);
+    // At the deadline: SIGTERM, then SIGKILL 5 s later if it still runs.
+    let hard: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      hard = setTimeout(() => child.kill("SIGKILL"), 5_000);
+    }, JOB_TIMEOUT_MS);
     for (const stream of [child.stdout, child.stderr]) {
       let rest = "";
       stream.setEncoding("utf8");
@@ -90,6 +95,7 @@ export const spawnRunner: SetupRunner = (cmd, args, onLine) =>
     });
     child.on("close", (code) => {
       clearTimeout(timer);
+      clearTimeout(hard);
       resolve(code ?? 1);
     });
   });
@@ -155,9 +161,19 @@ async function readText(path: string): Promise<string> {
 
 /** Writes through a temp file and a rename, so a reader never sees half a file. */
 async function writeAtomic(path: string, text: string): Promise<void> {
-  const tmp = `${path}.${process.pid}.tmp`;
+  const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   await writeFile(tmp, text);
   await rename(tmp, path);
+}
+
+/** Runs config edits one at a time, so two saves never read and write over each other. */
+function serial() {
+  let last: Promise<unknown> = Promise.resolve();
+  return <T>(task: () => Promise<T>): Promise<T> => {
+    const next = last.then(task, task);
+    last = next.catch(() => undefined);
+    return next;
+  };
 }
 
 /** Checks a whole config file before it is written; a problem is a 400 that names it. */
@@ -222,6 +238,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
   const workspaceFile = join(options.repoDir, ".harnessd", "config.toml");
   const globalFile = join(options.globalDir, "config.toml");
   const jobs = new Map<SetupHarness, JobView>();
+  const queue = serial();
   const listeners = new Set<SendEvent>();
   const emit = (job: JobView) => {
     for (const send of listeners) send("job", job);
@@ -313,6 +330,11 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
       if (!(await isExec(bin))) {
         throw new HttpError(400, "invalid_body", `${bin} is not an executable file.`);
       }
+      // The status engine and the loop run this file, so it must be the harness's own CLI.
+      const name = harnessSetupSpec(harness)?.bin ?? harness;
+      if (bin.split("/").at(-1) !== name) {
+        throw new HttpError(400, "invalid_body", `The path must end in /${name}.`);
+      }
     }
     const text = applyHarnessBin(await readText(globalFile), harness, bin);
     validateConfigText(text, "~/.harnessd/config.toml");
@@ -321,6 +343,15 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
   }
 
   async function team(): Promise<{ agents: TeamAgentView[] }> {
+    try {
+      return await readTeam();
+    } catch (e) {
+      if (e instanceof ConfigError) throw new HttpError(400, "invalid_config", e.message);
+      throw e;
+    }
+  }
+
+  async function readTeam(): Promise<{ agents: TeamAgentView[] }> {
     const [merged, base, file] = await Promise.all([
       loadConfig({
         globalDir: options.globalDir,
@@ -443,7 +474,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
   const routes: Route[] = [
     { method: "GET", path: "/api/harnesses", handler: harnesses },
     { method: "GET", path: "/api/team", handler: team },
-    { method: "POST", path: "/api/team", handler: ({ body }) => saveTeam(body) },
+    { method: "POST", path: "/api/team", handler: ({ body }) => queue(() => saveTeam(body)) },
     {
       method: "GET",
       path: "/api/setup/events",
@@ -469,7 +500,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     routes.push({
       method: "POST",
       path: `/api/harnesses/${harness}/path`,
-      handler: ({ body }) => setBin(harness, body),
+      handler: ({ body }) => queue(() => setBin(harness, body)),
     });
   }
   return { routes };

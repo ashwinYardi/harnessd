@@ -6,7 +6,7 @@ Status: accepted 2026-11-20. Amends D-023 for `harnessd run` without `--once`. I
 - `harnessd run --once` keeps D-023 as it was: any blocker stops it with exit 1 before anything is served.
 - The app opens Settings → Harnesses on first launch when a harness check blocks, and Settings → Connections when only another check blocks.
 - The app runs a fixed command per harness and action: `npm install -g <package>`, `npm install -g <package>@latest`, and on macOS Terminal with the CLI's own login command. The request body names nothing; the command comes from the route. Output streams to the card. Keys go in only through each CLI's own sign-in or as environment variables. The app never shows or takes a secret.
-- `[harnesses.<id>] bin` in `~/.harnessd/config.toml` names a harness CLI. It wins over the `HARNESSD_*_BIN` variables and PATH.
+- `[harnesses.<id>] bin` in `~/.harnessd/config.toml` names a harness CLI. It wins over the `HARNESSD_*_BIN` variables and PATH. The app accepts only an absolute path to an executable whose name is the CLI's own (`claude`, `codex`), because the status engine and the loop run that file.
 - The Team page writes only the `[agents.<name>]` tables of the workspace `.harnessd/config.toml`, as text. Every comment and every other table stays. The result is checked with the config validator before it is written; then `harnessd sync` runs.
 
 Why:

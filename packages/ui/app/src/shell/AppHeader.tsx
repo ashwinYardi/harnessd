@@ -70,7 +70,7 @@ export function AppHeader({
             render={
               <button
                 type="button"
-                className="inline-flex cursor-default items-center gap-1.5 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="inline-flex min-h-6 min-w-6 cursor-default items-center justify-center gap-1.5 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             }
             aria-label={`Connection: ${c.text}. ${c.hint}`}
@@ -106,6 +106,7 @@ export function AppHeader({
       )}
       {needsYou > 0 && (
         <Button
+          aria-label={`${needsYou} ${needsYou === 1 ? "issue needs" : "issues need"} you`}
           className="whitespace-nowrap"
           onClick={onShowNeedsYou}
           size="sm"

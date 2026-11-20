@@ -11,7 +11,7 @@
 
 | Status | Code |
 |---|---|
-| 400 | `invalid_json`, `invalid_body` (a form error adds `"fields": { "<row>.<field>": "…" }`), `unsupported` |
+| 400 | `invalid_json`, `invalid_body` (a form error adds `"fields": { "<row>.<field>": "…" }`), `invalid_config` (a config.toml the validator rejects), `unsupported` |
 | 403 | `forbidden_host` |
 | 404 | `not_found` |
 | 409 | `busy`, `setup_incomplete` |
@@ -82,9 +82,9 @@ The Settings pages use these routes (code: `packages/daemon/src/setup/routes.ts`
 | POST | `/api/team` | `{ "agents": [{ "name", "role", "harness", "model"? }] }` | the new team, plus `synced` (files `harnessd sync` wrote) or `syncError` |
 
 - **HarnessCard** is `{ id, name, required, bin, checks, commands, job }`. `checks` are the status engine's `harness.<id>.*` checks, run for this harness whether an agent uses it or not. `required` is true when an agent uses it. `commands` are the setup commands as text, for a person to run by hand.
-- **Setup commands are fixed.** Each action route runs one argv known in code: `npm install -g <package>`, `npm install -g <package>@latest`, and on macOS `osascript` that opens Terminal with `claude auth login` or `codex login`. The body must be `{}`; any key is a 400. No shell runs. One command runs per harness at a time (409 `busy`). A command is killed after 10 minutes.
+- **Setup commands are fixed.** Each action route runs one argv known in code: `npm install -g <package>`, `npm install -g <package>@latest`, and on macOS `osascript` that opens Terminal with `claude auth login` or `codex login`. The body must be `{}`; any key is a 400. No shell runs. One command runs per harness at a time (409 `busy`). A command gets SIGTERM after 10 minutes, and SIGKILL 5 s later. Config writes run one at a time.
 - **Job** is `{ id, harness, action, command, state, exitCode?, lines, startedAt }`. `state` is `running`, `ok` or `failed`. `lines` holds the last 200 output lines. Each change goes out as a `job` event on `/api/setup/events`; a new stream gets the current jobs first.
-- **Binary path** must be absolute and an executable file. It is written to `[harnesses.<id>] bin` in `~/.harnessd/config.toml`. `null` removes it. Other lines of the file stay.
+- **Binary path** must be absolute, an executable file, and end in the CLI's own name (`/claude`, `/codex`), because the status engine and the loop run it. It is written to `[harnesses.<id>] bin` in `~/.harnessd/config.toml`. `null` removes it. Other lines of the file stay.
 - **Team.** The rows are checked by `validateTeam` (`packages/shared/src/team.ts`): names are lowercase letters, digits, `-` and `_`; roles and harnesses come from the config schema; the team has exactly one coordinator. A default agent, or one set outside the workspace config.toml, cannot be removed. Only changed agents are written, to `[agents.<name>]` tables of `<repo>/.harnessd/config.toml`. The new file is checked with the config validator before it is written; an invalid team writes nothing. Then `harnessd sync` runs.
 - **Secrets.** No route takes or returns a secret. Keys go in through each CLI's own sign-in, or as environment variables that Connections names.
 

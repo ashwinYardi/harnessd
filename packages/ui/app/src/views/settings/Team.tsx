@@ -321,7 +321,11 @@ export function Team() {
           </span>
           <Button
             disabled={!dirty || saving}
-            onClick={() => setRows(toRows(saved.data))}
+            onClick={() => {
+              setRows(toRows(saved.data));
+              setTried(false);
+              setServerErrors({});
+            }}
             size="sm"
             variant="ghost-muted"
           >

@@ -17,7 +17,7 @@ export function PauseButton({ view, onToggle }: { view: PauseView; onToggle: () 
   return (
     <Button
       aria-disabled={busy !== null || undefined}
-      className="min-w-28"
+      className="min-w-28 shrink-0"
       data-pause-control
       onClick={onToggle}
       variant={shown.paused ? "default" : "outline"}

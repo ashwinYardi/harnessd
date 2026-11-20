@@ -38,11 +38,11 @@ function copy(text: string) {
 
 function JobOutput({ job }: { job: Job }) {
   return (
-    <div className="mt-3 rounded-lg border bg-muted/50" aria-live="polite">
+    <div className="rounded-lg border bg-muted/50">
       <p className="flex items-center gap-2 border-b px-3 py-1.5 text-xs">
         {job.state === "running" && <Spinner className="size-3.5" />}
         <span className="font-mono">{job.command}</span>
-        <span className="ms-auto text-muted-foreground">
+        <span className="ms-auto text-muted-foreground" role="status">
           {job.state === "running"
             ? "Running"
             : job.state === "ok"

@@ -321,3 +321,30 @@ test("an invalid team writes nothing and names each bad field", async () => {
     await s.close();
   }
 });
+
+test("the binary path must name the harness's own CLI", async () => {
+  const s = await serve({ isExecutable: async () => true });
+  try {
+    const other = await s.post("/api/harnesses/claude-code/path", { path: "/usr/bin/python3" });
+    assert.equal(other.status, 400);
+    assert.match(((await other.json()) as { message: string }).message, /must end in \/claude/);
+    assert.equal((await s.post("/api/harnesses/codex/path", { path: "/opt/codex" })).status, 200);
+  } finally {
+    await s.close();
+  }
+});
+
+test("a broken workspace config is a 400 that names the key, not an internal error", async () => {
+  const s = await serve();
+  try {
+    await writeFile(
+      join(s.repoDir, ".harnessd", "config.toml"),
+      '[limits]\nmax_concurrent = "x"\n',
+    );
+    const body = (await s.get("/api/team")) as { error: string; message: string };
+    assert.equal(body.error, "invalid_config");
+    assert.match(body.message, /max_concurrent/);
+  } finally {
+    await s.close();
+  }
+});

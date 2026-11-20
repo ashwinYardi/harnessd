@@ -240,9 +240,13 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
  * The npm package and the sign-in command of a harness, for the fixed setup commands the
  * app runs (MET-28). Undefined for a harness harnessd has no checks for yet.
  */
-export function harnessSetupSpec(harness: HarnessId): { pkg: string; login: string } | undefined {
+export function harnessSetupSpec(
+  harness: HarnessId,
+): { pkg: string; login: string; bin: string } | undefined {
   const spec = HARNESS_SPECS[harness];
-  return spec ? { pkg: spec.pkg, login: spec.login.replace(/^Run: /, "") } : undefined;
+  return spec
+    ? { pkg: spec.pkg, login: spec.login.replace(/^Run: /, ""), bin: spec.bin }
+    : undefined;
 }
 
 function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
