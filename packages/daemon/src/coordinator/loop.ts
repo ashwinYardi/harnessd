@@ -649,7 +649,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             },
             ...(globalDir === undefined
               ? {}
-              : { prepare: async (path, runId) => (await prepareWorktree(path, runId)) ?? {} }),
+              : {
+                  // runQa wraps a throw in the same "sync failed" message as a part run.
+                  prepare: async (worktree, runId) =>
+                    (await syncWorktree({ repoDir, globalDir, worktree, runId })).env,
+                }),
             ...(memory ? { memory } : {}),
             log,
           },
