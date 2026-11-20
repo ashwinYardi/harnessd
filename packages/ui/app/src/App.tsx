@@ -278,7 +278,12 @@ export function App() {
           pauseUnknown={pause.unknown}
           title={title}
         />
-        <main className="flex min-h-0 flex-1 flex-col" id="main" aria-label={title} tabIndex={-1}>
+        <main
+          aria-label={title}
+          className="flex min-h-0 flex-1 flex-col outline-none"
+          id="main"
+          tabIndex={-1}
+        >
           {route.view === "board" && (
             <Board
               board={api.board}
