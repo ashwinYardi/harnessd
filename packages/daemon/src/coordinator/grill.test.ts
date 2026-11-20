@@ -393,7 +393,7 @@ test("terms and precedents go to the vault sink and the comment", async () => {
     },
     async draft(d) {
       drafts.push(d);
-      return undefined;
+      return "decision-drafts/MET-40-terms.md";
     },
   };
   const result = await grillIssue(issues.clear, s.deps);
@@ -423,7 +423,7 @@ test("terms and precedents go to the vault sink and the comment", async () => {
   const body = s.comments[0]?.body ?? "";
   assert.match(
     body,
-    /\*\*New terms\*\* \(workspace vault glossary\):\n- Work part: A sub-issue the split creates\./,
+    /\*\*New terms\*\* \(workspace glossary\):\n- Work part: A sub-issue the split creates\./,
   );
   assert.match(
     body,
@@ -475,4 +475,23 @@ test("parseGrillReply validates terms and precedents", () => {
     bad('{"calls":[],"escalation":null,"precedents":[{"title":"T","decision":"D"}]}'),
     /precedents\[0\]\.why/,
   );
+});
+
+test("a term or draft that already exists is not announced as new", async () => {
+  const s = setup([
+    reply({
+      calls: [],
+      escalation: null,
+      terms: [{ term: "Pin", definition: "A commit." }],
+      precedents: [{ title: "Old", decision: "D.", why: "W." }],
+    }),
+  ]);
+  s.deps.decisions = {
+    write: s.decisions.write,
+    term: async () => undefined,
+    draft: async () => undefined,
+  };
+  const result = await grillIssue(issues.clear, s.deps);
+  assert.equal(result.outcome, "proceed");
+  assert.doesNotMatch(s.comments[0]?.body ?? "", /New terms|Draft decision records/);
 });

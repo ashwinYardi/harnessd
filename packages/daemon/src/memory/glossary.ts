@@ -3,7 +3,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { GlossaryTerm, Precedent } from "@harnessd/shared";
-import { slugify } from "./decisions.ts";
+import { ISSUE_KEY, slugify } from "./decisions.ts";
 import {
   type FrontmatterValue,
   listNotes,
@@ -33,6 +33,13 @@ function required(value: string, what: string): string {
   return v;
 }
 
+function issueKey(value: string, what: string): string {
+  const issue = required(value, what).toUpperCase();
+  if (!ISSUE_KEY.test(issue))
+    throw new VaultError(`${what} must be a key like MET-11, got ${JSON.stringify(value)}`);
+  return issue;
+}
+
 async function exists(vault: string, path: string): Promise<boolean> {
   const { file } = await resolveNote(vault, path);
   return stat(file).then(
@@ -60,7 +67,7 @@ export async function writeGlossaryTerm(
   vault: string,
   note: TermNote,
 ): Promise<string | undefined> {
-  const issue = required(note.issue, "glossary term: issue").toUpperCase();
+  const issue = issueKey(note.issue, "glossary term: issue");
   const term = required(note.term, "glossary term: term");
   const definition = required(note.definition, "glossary term: definition");
   const avoid = (note.avoid ?? []).map((a) => a.trim()).filter((a) => a !== "");
@@ -92,7 +99,7 @@ export async function writeDraftDecision(
   note: DraftNote,
   now: Date = new Date(),
 ): Promise<string | undefined> {
-  const issue = required(note.issue, "draft decision: issue").toUpperCase();
+  const issue = issueKey(note.issue, "draft decision: issue");
   const title = required(note.title, "draft decision: title");
   const decision = required(note.decision, "draft decision: decision");
   const why = required(note.why, "draft decision: why");

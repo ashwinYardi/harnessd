@@ -15,7 +15,7 @@ import {
  */
 export interface DecisionSink {
   write(note: DecisionNote): Promise<string>;
-  /** A new term for the workspace vault glossary. */
+  /** A new term for the workspace glossary. */
   term?(note: TermNote): Promise<string | undefined>;
   /** A draft decision record for a docs PR. */
   draft?(note: DraftNote): Promise<string | undefined>;

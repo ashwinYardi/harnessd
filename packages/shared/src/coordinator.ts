@@ -40,7 +40,7 @@ export interface Escalation {
   why: string;
 }
 
-/** A new domain term the grill found. It goes to the workspace vault glossary, never GLOSSARY.md. */
+/** A new domain term the grill found. It goes to the workspace glossary, never GLOSSARY.md. */
 export interface GlossaryTerm {
   term: string;
   /** One or two sentences: what the term is. */
@@ -62,7 +62,7 @@ export interface GrillResult {
   calls: Call[];
   escalation: Escalation | null;
   outcome: GrillOutcome;
-  /** New terms, written to the workspace vault glossary. Set when the grill ran. */
+  /** New terms, written to the workspace glossary. Set when the grill ran. */
   terms?: GlossaryTerm[];
   /** Calls that set new precedent, written as draft decision records. Set when the grill ran. */
   precedents?: Precedent[];

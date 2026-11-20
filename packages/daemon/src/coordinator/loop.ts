@@ -180,8 +180,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   const clock = options.clock ?? systemClock;
   const notifier = options.notifier ?? new NullNotifier();
   const decisions = options.decisions ?? createFileDecisionSink(workspaceVaultDir(repoDir));
-  const skillsDir = options.skillsDir;
-  const loadContext = options.context ?? (() => loadGrillContext(repoDir, { skillsDir }));
+  const loadContext =
+    options.context ?? (() => loadGrillContext(repoDir, { skillsDir: options.skillsDir }));
   const log = options.log ?? (() => {});
   const pid = options.pid ?? process.pid;
   const intervalMs = options.intervalMs ?? DEFAULT_LOOP_INTERVAL_MS;

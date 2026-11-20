@@ -19,7 +19,7 @@ export interface GrillContext {
   decisions: DecisionRecord[];
   /** GLOSSARY.md at the repo root, when present. Human-reviewed; the loop never writes it. */
   glossary?: string;
-  /** Term notes from `<repo>/.harnessd/vault/glossary/`, when there are any. */
+  /** The workspace glossary: term notes from `<repo>/.harnessd/vault/glossary/`, when there are any. */
   vaultGlossary?: string[];
   /** The grill-with-docs method. The prompt uses BUILT_IN_GRILL_METHOD when it is missing. */
   method?: GrillMethod;
@@ -66,7 +66,7 @@ async function readIfPresent(path: string): Promise<string | undefined> {
  * empty, or there is no skillsDir, it is the built-in method.
  */
 export async function loadGrillMethod(skillsDir: string | undefined): Promise<GrillMethod> {
-  const builtIn: GrillMethod = { source: "built-in", text: BUILT_IN_GRILL_METHOD };
+  const builtIn = BUILT_IN_METHOD;
   if (skillsDir === undefined) return builtIn;
   const parts: string[] = [];
   for (const name of GRILL_WITH_DOCS_SKILLS) {
@@ -77,6 +77,8 @@ export async function loadGrillMethod(skillsDir: string | undefined): Promise<Gr
   }
   return { source: "skill pack", text: parts.join("\n\n") };
 }
+
+const BUILT_IN_METHOD: GrillMethod = { source: "built-in", text: BUILT_IN_GRILL_METHOD };
 
 export interface LoadGrillContextOptions {
   /** Where the skill pack is installed, e.g. `~/.harnessd/skills`. Without it the method is not loaded. */
@@ -164,7 +166,7 @@ export function buildGrillPrompt({ issue, context, instructions }: GrillPromptIn
     `Reply with strict JSON only, no prose and no code fence, in exactly this shape:\n${GRILL_REPLY_SHAPE}\n` +
       'Each "basis" names its source (spec section, decision id, file path or vault note).',
   ];
-  const method = context.method ?? { source: "built-in", text: BUILT_IN_GRILL_METHOD };
+  const method = context.method ?? BUILT_IN_METHOD;
   parts.push(`## Method: grill-with-docs (${method.source})\n${HEADLESS_RULES}\n\n${method.text}`);
   if (instructions?.trim()) parts.push(`## Coordinator instructions\n${instructions.trim()}`);
   parts.push(

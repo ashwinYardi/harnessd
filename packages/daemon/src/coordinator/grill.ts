@@ -196,7 +196,7 @@ export function formatGrillComment(
     lines.push(`- ${oneLine(c.question)} → ${oneLine(c.answer)} (basis: ${oneLine(c.basis)})`);
   }
   if (docs.terms && docs.terms.length > 0) {
-    lines.push("", "**New terms** (workspace vault glossary):");
+    lines.push("", "**New terms** (workspace glossary):");
     for (const t of docs.terms) lines.push(`- ${oneLine(t.term)}: ${oneLine(t.definition)}`);
   }
   if (docs.precedents && docs.precedents.length > 0) {
@@ -342,18 +342,23 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
         basis: call.basis,
       });
     }
+    // The comment lists only what is new: a sink skips a term or draft that already exists.
     step = "write glossary terms";
-    if (deps.decisions.term) {
-      for (const t of terms) await deps.decisions.term({ issue: issue.key, ...t });
+    const newTerms: GlossaryTerm[] = [];
+    for (const t of terms) {
+      const term = deps.decisions.term;
+      if (!term || (await term({ issue: issue.key, ...t })) !== undefined) newTerms.push(t);
     }
     step = "write draft decision records";
-    if (deps.decisions.draft) {
-      for (const p of precedents) await deps.decisions.draft({ issue: issue.key, ...p });
+    const newDrafts: Precedent[] = [];
+    for (const p of precedents) {
+      const draft = deps.decisions.draft;
+      if (!draft || (await draft({ issue: issue.key, ...p })) !== undefined) newDrafts.push(p);
     }
     step = "post the Linear comment";
     await deps.linear.comment(
       issue.id,
-      formatGrillComment(calls, escalation, { terms, precedents }),
+      formatGrillComment(calls, escalation, { terms: newTerms, precedents: newDrafts }),
     );
     if (escalation) {
       step = "move the issue to Needs input";
