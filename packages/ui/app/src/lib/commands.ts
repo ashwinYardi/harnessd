@@ -30,3 +30,13 @@ export function matchCommands<T extends Command>(commands: readonly T[], query: 
   });
   return scored.sort((a, b) => a[1] - b[1] || a[2] - b[2]).map(([c]) => c);
 }
+
+/** The index of the next command that is not disabled, in direction `step`; -1 if none. */
+export function nextEnabled(commands: readonly Command[], from: number, step: 1 | -1): number {
+  const n = commands.length;
+  for (let i = 1; i <= n; i++) {
+    const at = (((from + step * i) % n) + n) % n;
+    if (!commands[at]?.disabled) return at;
+  }
+  return -1;
+}

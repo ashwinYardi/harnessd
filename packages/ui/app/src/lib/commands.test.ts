@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type Command, matchCommands } from "./commands.ts";
+import { type Command, matchCommands, nextEnabled } from "./commands.ts";
 
 const cmd = (id: string, title: string, keywords: string[] = []): Command => ({
   id,
@@ -54,4 +54,12 @@ test("matchCommands puts a title that starts with the query first", () => {
     ),
     ["b", "a"],
   );
+});
+
+test("nextEnabled skips disabled commands and wraps", () => {
+  const list = [cmd("a", "A"), { ...cmd("b", "B"), disabled: true }, cmd("c", "C")];
+  assert.equal(nextEnabled(list, 0, 1), 2);
+  assert.equal(nextEnabled(list, 2, 1), 0);
+  assert.equal(nextEnabled(list, 0, -1), 2);
+  assert.equal(nextEnabled([{ ...cmd("x", "X"), disabled: true }], 0, 1), -1);
 });

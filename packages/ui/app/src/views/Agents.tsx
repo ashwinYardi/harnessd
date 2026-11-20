@@ -41,7 +41,7 @@ function Budget({ run, now }: { run: RunView; now: Date }) {
 function AgentName({ agent }: { agent: AgentView }) {
   return (
     <th
-      className="px-4 py-2.5 text-left align-top font-medium"
+      className="px-3 py-2.5 text-left align-top font-medium md:px-4"
       rowSpan={Math.max(1, agent.runs.length)}
       scope="row"
     >
@@ -89,10 +89,12 @@ function AgentRows({ agent, now }: { agent: AgentView; now: Date }) {
           <td className="px-4 py-2.5 text-right align-top tabular-nums">
             {duration(now.getTime() - Date.parse(run.startedAt))}
           </td>
-          <td className="px-4 py-2.5 align-top text-xs">
+          <td className="hidden px-4 py-2.5 align-top text-xs md:table-cell">
             <Budget now={now} run={run} />
           </td>
-          <td className="px-4 py-2.5 text-right align-top tabular-nums">{tokens(run.tokens)}</td>
+          <td className="hidden px-4 py-2.5 text-right align-top tabular-nums md:table-cell">
+            {tokens(run.tokens)}
+          </td>
         </tr>
       ))}
     </>
@@ -148,11 +150,11 @@ export function Agents({
             <Card className="overflow-hidden">
               <table className="w-full table-fixed border-collapse text-sm">
                 <colgroup>
-                  <col className="w-44" />
+                  <col className="w-28 md:w-44" />
                   <col />
-                  <col className="w-24" />
-                  <col className="w-56" />
-                  <col className="w-20" />
+                  <col className="w-20 md:w-24" />
+                  <col className="hidden md:table-column md:w-56" />
+                  <col className="hidden md:table-column md:w-20" />
                 </colgroup>
                 <thead className="bg-muted/72 text-muted-foreground text-xs">
                   <tr>

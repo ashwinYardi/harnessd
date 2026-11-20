@@ -8,7 +8,7 @@ import {
   TriangleAlertIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import { type Check, type Load, readStatus } from "../api.ts";
+import { type Load, readStatus } from "../api.ts";
 import { Badge } from "../components/ui/badge.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Card } from "../components/ui/card.tsx";
@@ -16,6 +16,7 @@ import { ScrollArea } from "../components/ui/scroll-area.tsx";
 import { Skeleton } from "../components/ui/skeleton.tsx";
 import { Spinner } from "../components/ui/spinner.tsx";
 import { toast } from "../components/ui/toast.tsx";
+import { type Check, isBlocking, sortChecks } from "../lib/checks.ts";
 import { cn } from "../lib/cn.ts";
 import { EmptyState, ErrorState, ViewToolbar } from "./common.tsx";
 
@@ -54,7 +55,7 @@ export function useStatus() {
       const { checks } = await readStatus();
       setStatus({ status: "ready", data: checks });
       if (announce) {
-        const bad = checks.filter((c) => c.state === "fail" || c.state === "missing").length;
+        const bad = checks.filter(isBlocking).length;
         toast.add(
           bad === 0
             ? { type: "success", title: "All checks pass" }
@@ -115,7 +116,7 @@ export function Settings({ status }: { status: ReturnType<typeof useStatus> }) {
         <ScrollArea className="min-h-0 flex-1">
           <div className="mx-auto max-w-3xl px-4 pb-6">
             <Card className="divide-y overflow-hidden">
-              {s.data.map((c) => {
+              {sortChecks(s.data).map((c) => {
                 const st = STATE[c.state];
                 return (
                   <div className="flex items-start gap-3 px-4 py-3" key={c.id}>
@@ -125,9 +126,12 @@ export function Settings({ status }: { status: ReturnType<typeof useStatus> }) {
                     <div className="min-w-0 flex-1">
                       <p className="flex items-center gap-2">
                         <span className="font-medium font-mono text-sm">{c.id}</span>
-                        <Badge size="sm" variant={st.badge}>
-                          {st.label}
-                        </Badge>
+                        {c.state === "ok" && <span className="sr-only">OK</span>}
+                        {c.state !== "ok" && (
+                          <Badge size="sm" variant={st.badge}>
+                            {st.label}
+                          </Badge>
+                        )}
                       </p>
                       <p className="wrap-anywhere text-muted-foreground text-xs">{c.detail}</p>
                       {c.state !== "ok" && c.fix && (

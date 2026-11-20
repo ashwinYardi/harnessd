@@ -23,7 +23,7 @@ const EMPTY: Record<ColumnId, string> = {
 
 const PRIORITY: Record<number, string> = { 1: "Urgent", 2: "High" };
 
-function IssueRow({ issue }: { issue: BoardIssue }) {
+function IssueRow({ issue, paused }: { issue: BoardIssue; paused: boolean }) {
   const loud = needsYou(issue);
   return (
     <li>
@@ -39,7 +39,11 @@ function IssueRow({ issue }: { issue: BoardIssue }) {
         <span className="flex items-center gap-1.5 text-muted-foreground text-xs">
           <span className="shrink-0 whitespace-nowrap font-mono">{issue.key}</span>
           {PRIORITY[issue.priority] && (
-            <Badge size="sm" variant={issue.priority === 1 ? "warning" : "secondary"}>
+            <Badge
+              size="sm"
+              variant={issue.priority === 1 ? "outline" : "secondary"}
+              className={issue.priority === 1 ? "font-semibold" : undefined}
+            >
               {PRIORITY[issue.priority]}
             </Badge>
           )}
@@ -56,9 +60,15 @@ function IssueRow({ issue }: { issue: BoardIssue }) {
         <span className="line-clamp-2 text-foreground leading-snug">{issue.title}</span>
         {issue.agent && (
           <span className="flex min-w-0 items-center gap-1.5 text-xs">
-            <span aria-hidden="true" className="size-1.5 shrink-0 rounded-full bg-success" />
-            <span className="truncate">
-              <span className="sr-only">Run by </span>
+            <span
+              aria-hidden="true"
+              className={cn(
+                "size-1.5 shrink-0 rounded-full",
+                paused ? "bg-muted-foreground" : "bg-success",
+              )}
+            />
+            <span className={cn("truncate", paused && "text-muted-foreground")}>
+              <span className="sr-only">{paused ? "Stopped by pause: " : "Run by "}</span>
               {issue.agent}
             </span>
           </span>
@@ -83,7 +93,7 @@ function IssueRow({ issue }: { issue: BoardIssue }) {
   );
 }
 
-function BoardColumn({ column }: { column: Column }) {
+function BoardColumn({ column, paused }: { column: Column; paused: boolean }) {
   const id = `col-${column.id}`;
   const loud = column.id === "needs-you";
   const hasIssues = column.issues.length > 0;
@@ -91,7 +101,7 @@ function BoardColumn({ column }: { column: Column }) {
     <section
       aria-labelledby={id}
       className={cn(
-        "flex min-w-44 flex-1 basis-0 flex-col rounded-xl border bg-muted/50 dark:bg-card",
+        "flex max-h-full min-w-44 flex-1 basis-0 flex-col self-start rounded-xl border bg-muted/50 dark:bg-card",
         loud && hasIssues && "border-destructive/40 bg-error-surface dark:bg-error-surface",
       )}
       data-col={column.id}
@@ -112,7 +122,7 @@ function BoardColumn({ column }: { column: Column }) {
       {hasIssues ? (
         <ul className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-2 pb-2">
           {column.issues.map((issue) => (
-            <IssueRow issue={issue} key={issue.id} />
+            <IssueRow issue={issue} key={issue.id} paused={paused} />
           ))}
         </ul>
       ) : (
@@ -153,10 +163,12 @@ export function Board({
   board,
   retry,
   now,
+  paused,
 }: {
   board: Load<BoardSnapshot>;
   retry: () => void;
   now: Date;
+  paused: boolean;
 }) {
   const snapshot = board.status === "ready" ? board.data : undefined;
   const { shown, pending, apply, regionProps } = useHold(snapshot);
@@ -199,9 +211,9 @@ export function Board({
       )}
       {shown && !neverRead && shown.issues.length > 0 && (
         <ScrollArea className="min-h-0 flex-1">
-          <div className="flex h-full gap-3 px-4 pb-4">
+          <div className="flex h-full items-start gap-3 px-4 pb-4">
             {groupBoard(shown.issues).map((column) => (
-              <BoardColumn column={column} key={column.id} />
+              <BoardColumn column={column} key={column.id} paused={paused} />
             ))}
           </div>
         </ScrollArea>

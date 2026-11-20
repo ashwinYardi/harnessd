@@ -51,7 +51,7 @@ export function AppHeader({
     <header
       className={cn(
         "flex h-13 shrink-0 items-center gap-3 border-b px-4 transition-colors duration-150",
-        paused && "border-warning/40 bg-warning-surface",
+        paused && "border-warning/50 bg-warning/16 dark:bg-warning/20",
       )}
       data-paused={paused || undefined}
     >

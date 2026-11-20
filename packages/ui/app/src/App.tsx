@@ -10,7 +10,7 @@ import { type Theme, useTheme } from "./hooks/useTheme.ts";
 import { needsYou } from "./lib/board.ts";
 import type { Command } from "./lib/commands.ts";
 import type { View } from "./lib/route.ts";
-import { isPaletteShortcut } from "./lib/shortcut.ts";
+import { goToView, isPaletteShortcut, isTypingTarget } from "./lib/shortcut.ts";
 import { AppHeader } from "./shell/AppHeader.tsx";
 import { AppSidebar } from "./shell/AppSidebar.tsx";
 import { NAV } from "./shell/nav.ts";
@@ -60,18 +60,35 @@ export function App() {
     document.title = waiting > 0 ? `(${waiting}) harnessd` : "harnessd";
   }, [waiting]);
 
+  const goTo = useCallback((view: View) => go({ view }), [go]);
+
   useEffect(() => {
+    let prev: { key: string; at: number } | undefined;
     const onKey = (e: KeyboardEvent) => {
       if (isPaletteShortcut(e)) {
         e.preventDefault();
         setPaletteOpen((o) => !o);
+        return;
+      }
+      if (
+        isTypingTarget(e.target as HTMLElement | null) ||
+        document.querySelector("[role=dialog]")
+      ) {
+        return;
+      }
+      // "G then B" within a second goes to Board; likewise A, L and S.
+      const fresh = prev && Date.now() - prev.at < 1000 ? prev.key : undefined;
+      const view = goToView(e, fresh);
+      prev = { key: e.key.toLowerCase(), at: Date.now() };
+      if (view) {
+        e.preventDefault();
+        goTo(view);
+        prev = undefined;
       }
     };
     addEventListener("keydown", onKey);
     return () => removeEventListener("keydown", onKey);
-  }, []);
-
-  const goTo = useCallback((view: View) => go({ view }), [go]);
+  }, [goTo]);
 
   const commands = useMemo<AppCommand[]>(() => {
     const themeCmd = (t: Theme, title: string): AppCommand => ({
@@ -82,7 +99,23 @@ export function App() {
       disabled: theme === t,
       run: () => setTheme(t),
     });
+    const GO_KEYS: Record<View, string> = {
+      board: "G B",
+      agents: "G A",
+      logs: "G L",
+      settings: "G S",
+    };
     return [
+      ...NAV.map(
+        ({ view, title }): AppCommand => ({
+          id: `go-${view}`,
+          title: `Go to ${title}`,
+          group: "Go to",
+          shortcut: GO_KEYS[view],
+          disabled: route.view === view,
+          run: () => goTo(view),
+        }),
+      ),
       pause.view.shown.paused
         ? {
             id: "resume",
@@ -98,15 +131,6 @@ export function App() {
             keywords: ["stop", "kill"],
             run: pause.toggle,
           },
-      ...NAV.map(
-        ({ view, title }): AppCommand => ({
-          id: `go-${view}`,
-          title: `Go to ${title}`,
-          group: "Go to",
-          disabled: route.view === view,
-          run: () => goTo(view),
-        }),
-      ),
       {
         id: "recheck",
         title: "Run the checks again",
@@ -149,6 +173,7 @@ export function App() {
         modKey={IS_MAC ? "⌘" : "Ctrl"}
         needsYou={waiting}
         onOpenPalette={() => setPaletteOpen(true)}
+        paused={pause.view.shown.paused}
         running={running}
         view={route.view}
       />
@@ -166,7 +191,14 @@ export function App() {
           title={title}
         />
         <main className="flex min-h-0 flex-1 flex-col" id="main" tabIndex={-1}>
-          {route.view === "board" && <Board board={api.board} now={now} retry={api.retry.board} />}
+          {route.view === "board" && (
+            <Board
+              board={api.board}
+              now={now}
+              paused={pause.view.shown.paused}
+              retry={api.retry.board}
+            />
+          )}
           {route.view === "agents" && (
             <Agents agents={api.agents} now={now} retry={api.retry.agents} />
           )}

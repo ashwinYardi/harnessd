@@ -4,9 +4,9 @@
 // primitive; matching is lib/commands.ts. Keys: Up, Down, Home, End, Enter, Esc.
 import { Dialog as CommandDialogPrimitive } from "@base-ui/react/dialog";
 import { ArrowDownIcon, ArrowUpIcon, SearchIcon } from "lucide-react";
-import { type KeyboardEvent, useId, useMemo, useState } from "react";
+import { type KeyboardEvent, useId, useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/cn.ts";
-import { type Command, matchCommands } from "../../lib/commands.ts";
+import { type Command, matchCommands, nextEnabled } from "../../lib/commands.ts";
 import { DIALOG_BACKDROP_CLASS, DIALOG_POPUP_CLASS } from "./dialog.tsx";
 import { Kbd, KbdGroup } from "./kbd.tsx";
 
@@ -25,8 +25,23 @@ function CommandPalette<T extends Command>({
   onRun,
   placeholder = "Type a command",
 }: CommandPaletteProps<T>) {
+  // Opened by a shortcut, the palette has no trigger; focus goes back where it was.
+  const returnTo = useRef<HTMLElement | null>(null);
+  if (open && returnTo.current === null && typeof document !== "undefined") {
+    returnTo.current = document.activeElement as HTMLElement | null;
+  }
   return (
-    <CommandDialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+    <CommandDialogPrimitive.Root
+      open={open}
+      onOpenChange={onOpenChange}
+      onOpenChangeComplete={(isOpen) => {
+        if (isOpen) return;
+        const el = returnTo.current;
+        returnTo.current = null;
+        if (el && el !== document.body && el.isConnected) el.focus();
+        else document.getElementById("main")?.focus();
+      }}
+    >
       <CommandDialogPrimitive.Portal>
         <CommandDialogPrimitive.Backdrop
           className={DIALOG_BACKDROP_CLASS}
@@ -69,23 +84,23 @@ function CommandBody<T extends Command>({
 }) {
   const id = useId();
   const [query, setQuery] = useState("");
-  const [active, setActive] = useState(0);
+  const [active, setActive] = useState(-2);
   const items = useMemo(() => matchCommands(commands, query), [commands, query]);
-  const index = Math.min(active, Math.max(0, items.length - 1));
-  const current = items[index];
+  // Nothing is chosen until the reader types or moves, so Enter alone never runs a command.
+  const index = active === -2 || active >= items.length ? -1 : active;
+  const current = index >= 0 ? items[index] : undefined;
 
-  function move(to: number) {
-    if (items.length === 0) return;
-    const next = (to + items.length) % items.length;
+  function move(next: number) {
+    if (next < 0) return;
     setActive(next);
     document.getElementById(`${id}-${next}`)?.scrollIntoView({ block: "nearest" });
   }
 
   function onKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "ArrowDown") move(index + 1);
-    else if (e.key === "ArrowUp") move(index - 1);
-    else if (e.key === "Home") move(0);
-    else if (e.key === "End") move(items.length - 1);
+    if (e.key === "ArrowDown") move(nextEnabled(items, index, 1));
+    else if (e.key === "ArrowUp") move(nextEnabled(items, Math.max(index, 0), -1));
+    else if (e.key === "Home") move(nextEnabled(items, -1, 1));
+    else if (e.key === "End") move(nextEnabled(items, 0, -1));
     else if (e.key === "Enter" && current && !current.disabled) onRun(current);
     else return;
     e.preventDefault();
@@ -106,7 +121,8 @@ function CommandBody<T extends Command>({
           className="h-11 w-full bg-transparent text-sm outline-none placeholder:text-placeholder"
           onChange={(e) => {
             setQuery(e.target.value);
-            setActive(0);
+            const found = matchCommands(commands, e.target.value);
+            setActive(e.target.value.trim() ? nextEnabled(found, -1, 1) : -2);
           }}
           onKeyDown={onKeyDown}
           placeholder={placeholder}
@@ -149,7 +165,7 @@ function CommandBody<T extends Command>({
                 )}
                 id={`${id}-${i}`}
                 onClick={() => !c.disabled && onRun(c)}
-                onPointerMove={() => i !== index && setActive(i)}
+                onPointerMove={() => i !== index && !c.disabled && setActive(i)}
                 role="option"
                 tabIndex={-1}
               >

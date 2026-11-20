@@ -123,12 +123,8 @@ export interface PauseResult extends PauseState {
 export const pauseAll = () => post<PauseResult>("/api/pause", {});
 export const resumeAll = () => post<PauseState>("/api/resume", {});
 
-/** One line of `harnessd doctor` (D-023). */
-export interface Check {
-  id: string;
-  state: "ok" | "warn" | "fail" | "missing";
-  detail: string;
-  fix: string;
-}
+import type { Check } from "./lib/checks.ts";
+
+export type { Check };
 
 export const readStatus = () => request<{ checks: Check[] }>("/api/status");

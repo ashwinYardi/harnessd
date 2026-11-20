@@ -24,6 +24,7 @@ interface AppSidebarProps {
   failingChecks: number;
   onOpenPalette: () => void;
   modKey: string;
+  paused: boolean;
 }
 
 export function AppSidebar({
@@ -33,6 +34,7 @@ export function AppSidebar({
   failingChecks,
   onOpenPalette,
   modKey,
+  paused,
 }: AppSidebarProps) {
   const badge: Partial<Record<View, React.ReactNode>> = {
     board: needsYou > 0 && (
@@ -48,7 +50,7 @@ export function AppSidebar({
       </span>
     ),
     settings: failingChecks > 0 && (
-      <Badge variant="warning">
+      <Badge variant="error">
         {failingChecks}
         <span className="sr-only"> checks fail</span>
       </Badge>
@@ -56,12 +58,15 @@ export function AppSidebar({
   };
   const dot: Partial<Record<View, string>> = {
     board: needsYou > 0 ? "bg-destructive" : "",
-    settings: failingChecks > 0 ? "bg-warning" : "",
+    settings: failingChecks > 0 ? "bg-destructive" : "",
   };
   return (
     <Sidebar aria-label="Views">
       <SidebarHeader className="h-13 justify-center border-sidebar-border border-b px-2 md:px-4">
-        <span className="hidden font-semibold text-sm tracking-tight md:inline">harnessd</span>
+        <span className="hidden items-center justify-between md:flex">
+          <span className="font-semibold text-sm tracking-tight">harnessd</span>
+          {paused && <Badge variant="warning">Paused</Badge>}
+        </span>
         <span
           aria-hidden="true"
           className="mx-auto inline-flex size-6 items-center justify-center rounded-md bg-foreground font-semibold text-background text-xs md:hidden"
@@ -106,20 +111,27 @@ export function AppSidebar({
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter>
-        <SidebarMenuButton
-          render={<button type="button" />}
-          onClick={onOpenPalette}
-          aria-label="Open the command palette"
-        >
-          <SearchIcon aria-hidden="true" />
-          <span className="hidden md:inline">Commands</span>
-          <SidebarMenuBadge>
-            <KbdGroup>
-              <Kbd>{modKey}</Kbd>
-              <Kbd>K</Kbd>
-            </KbdGroup>
-          </SidebarMenuBadge>
-        </SidebarMenuButton>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <SidebarMenuButton
+                render={<button type="button" />}
+                onClick={onOpenPalette}
+                aria-label="Open the command palette"
+              />
+            }
+          >
+            <SearchIcon aria-hidden="true" />
+            <span className="hidden md:inline">Commands</span>
+            <SidebarMenuBadge>
+              <KbdGroup>
+                <Kbd>{modKey}</Kbd>
+                <Kbd>K</Kbd>
+              </KbdGroup>
+            </SidebarMenuBadge>
+          </TooltipTrigger>
+          <TooltipPopup side="right">Commands ({modKey}+K)</TooltipPopup>
+        </Tooltip>
       </SidebarFooter>
     </Sidebar>
   );

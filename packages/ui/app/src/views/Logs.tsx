@@ -96,7 +96,7 @@ export function Logs({ logs, retry }: { logs: Load<LogLine[]>; retry: () => void
                 {shown.map((line) => (
                   <li
                     className={cn(
-                      "grid grid-cols-[4.5rem_6rem_1fr] gap-3 px-4 hover:bg-accent/50",
+                      "grid grid-cols-[4.5rem_1fr] gap-3 px-4 hover:bg-accent/50 sm:grid-cols-[4.5rem_6rem_1fr]",
                       line.level === "warn" && "bg-warning-surface text-warning-foreground",
                     )}
                     key={line.seq}
@@ -104,8 +104,13 @@ export function Logs({ logs, retry }: { logs: Load<LogLine[]>; retry: () => void
                     <time className="text-muted-foreground" dateTime={line.at}>
                       {clockTime(line.at)}
                     </time>
-                    <span className="truncate text-muted-foreground">{line.source}</span>
-                    <span className="wrap-anywhere">{line.text}</span>
+                    <span className="hidden truncate text-muted-foreground sm:inline">
+                      {line.source}
+                    </span>
+                    <span className="wrap-anywhere">
+                      <span className="text-muted-foreground sm:hidden">{line.source} </span>
+                      {line.text}
+                    </span>
                   </li>
                 ))}
               </ol>
