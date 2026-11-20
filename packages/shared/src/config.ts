@@ -30,8 +30,17 @@ export interface LinearConfig {
   project?: string;
 }
 
+/**
+ * Slack #harnessd (D-015, D-020). The webhook url is a secret: it comes only from
+ * HARNESSD_SLACK_WEBHOOK_URL, never from a config file.
+ */
 export interface SlackConfig {
+  /** A label for the start line; the webhook fixes the real channel. */
   channel: string;
+  /** When the daily summary goes out, "HH:MM" in `time_zone`. */
+  summary_time: string;
+  /** An IANA time zone. */
+  time_zone: string;
 }
 
 /** How harnessd itself checks a PR before QA approves it (D-013). */
@@ -207,7 +216,7 @@ export interface ResolvedAgentConfig {
 export const DEFAULT_SETTINGS: Settings = {
   limits: { max_concurrent: 3, budget_minutes: { S: 30, M: 120 }, qa_max_failures: 2 },
   linear: {},
-  slack: { channel: "#harnessd" },
+  slack: { channel: "#harnessd", summary_time: "21:00", time_zone: "Asia/Kolkata" },
   merge: {
     protected_paths: [
       // auth
@@ -286,6 +295,15 @@ function keyPath(path: string, key: string): string {
   return path === "" ? key : `${path}.${key}`;
 }
 
+function isTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 class Checker {
   readonly file: string;
 
@@ -318,6 +336,21 @@ class Checker {
   string(value: unknown, path: string): string {
     if (typeof value !== "string") this.fail(path, `expected a string, got ${describe(value)}`);
     if (value.trim() === "") this.fail(path, "expected a non-empty string");
+    return value;
+  }
+
+  /** "HH:MM", 24-hour. */
+  clockTime(value: unknown, path: string): string {
+    if (typeof value !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+      this.fail(path, `expected a 24-hour time "HH:MM", got ${describe(value)}`);
+    }
+    return value;
+  }
+
+  timeZone(value: unknown, path: string): string {
+    if (typeof value !== "string" || !isTimeZone(value)) {
+      this.fail(path, `expected an IANA time zone such as "Asia/Kolkata", got ${describe(value)}`);
+    }
     return value;
   }
 
@@ -458,8 +491,14 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
   }
 
   if (root.slack !== undefined) {
-    const t = c.table(root.slack, "slack", ["channel"]);
-    out.slack = t.channel === undefined ? {} : { channel: c.string(t.channel, "slack.channel") };
+    const t = c.table(root.slack, "slack", ["channel", "summary_time", "time_zone"]);
+    const slack: Partial<SlackConfig> = {};
+    if (t.channel !== undefined) slack.channel = c.string(t.channel, "slack.channel");
+    if (t.summary_time !== undefined) {
+      slack.summary_time = c.clockTime(t.summary_time, "slack.summary_time");
+    }
+    if (t.time_zone !== undefined) slack.time_zone = c.timeZone(t.time_zone, "slack.time_zone");
+    out.slack = slack;
   }
 
   if (root.merge !== undefined) {

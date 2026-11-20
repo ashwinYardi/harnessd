@@ -52,7 +52,7 @@ A PR auto-merges when **all** of these hold: CI is green, QA approves every "Don
 - A global kill switch: `harnessd pause`, plus a UI button.
 
 ## Visibility
-Slack **#harnessd**: one line per merge or block, and a 9 PM IST summary. The app shows the live board and per-agent activity. The canvas with personas and avatars comes in v0.2.
+Slack **#harnessd**: one line per merge or block, and a 9 PM IST summary. It uses an incoming webhook from `HARNESSD_SLACK_WEBHOOK_URL`; the summary time and zone are configurable (D-020, docs/INSTALL.md "Slack"). The app shows the live board and per-agent activity. The canvas with personas and avatars comes in v0.2.
 
 ## Linear filing rules
 - Title is the outcome ("Agents run in isolated worktrees"), not the task.

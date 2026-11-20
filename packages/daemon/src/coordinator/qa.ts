@@ -724,11 +724,16 @@ export async function settleQa(
     await safely(`move ${parent.key} to Needs input`, () =>
       deps.linear.moveTo(parent.id, "Needs input"),
     );
-    const failing = result.reviews.filter((r) => r.decision !== "approve").map((r) => r.part.key);
+    const failing = result.reviews.filter((r) => r.decision !== "approve");
+    const keys = failing.map((r) => r.part.key);
     await safely("send the ping", () =>
-      deps.notifier.notify(
-        `${parent.key} needs input (QA failed ${times(failures)}): ${qa.key} could not approve ${failing.join(", ") || "the parts"} ${parent.url}`,
-      ),
+      deps.notifier.notify({
+        kind: "needs_input",
+        issue: { key: parent.key, url: parent.url },
+        prs: failing.flatMap((r) => (r.pr ? [{ number: r.pr.number, url: r.pr.url }] : [])),
+        reason: `QA failed ${times(failures)}`,
+        detail: `${qa.key} could not approve ${keys.join(", ") || "the parts"}`,
+      }),
     );
     return "escalated";
   }

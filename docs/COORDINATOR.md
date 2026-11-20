@@ -14,7 +14,7 @@ Before any work starts, the coordinator grills each picked issue itself (SPEC "A
 | `context` | `loadGrillContext(repo)`: `docs/SPEC.md` and `docs/decisions/*.md`. |
 | `cwd` | The repo. The model may read code and `.harnessd/vault/`; it must not edit. |
 | `linear` | `comment(issueId, body)` and `moveTo(issueId, state)`. `LinearClient` fits. |
-| `notifier` | `Notifier { notify(text) }`. `NullNotifier` until Slack lands (MET-16). |
+| `notifier` | `Notifier { notify(notice) }`: Slack #harnessd, or `NullNotifier` without a webhook (D-020). |
 | `decisions` | `DecisionSink { write(note) }`. `createFileDecisionSink(vault)` is the default. |
 
 ## Model reply
@@ -38,6 +38,6 @@ These run in this order. If one fails, the steps after it are skipped and the ou
 1. One decision note per call: `<repo>/.harnessd/vault/decisions/<ISSUE>-<slug>.md`, with YAML frontmatter (`issue`, `question`, `decision`, `basis`) and a body. Existing notes are never overwritten.
 2. One Linear comment. It has a header, then one bullet per call (`question → answer (basis: …)`). When escalating, it also has the question for the human and the D-011 trigger.
 3. On escalation only, the issue moves to **Needs input**.
-4. On escalation only, exactly one ping is sent: `<KEY> needs input (<trigger>): <question> <url>`.
+4. On escalation only, exactly one notice is sent: `<KEY> needs input (<trigger>): <question> <url>`.
 
 On `proceed`, the issue's state is left alone; the loop goes on to split and assign the issue (docs/LOOP.md).

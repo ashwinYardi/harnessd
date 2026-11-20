@@ -12,7 +12,8 @@ LINEAR_API_KEY=lin_api_... harnessd run [dir] [--once] [--interval <seconds>] [-
 - The loop ticks every 30 s by default. `--once` runs one tick and waits for its runs to finish.
 - Agents run with `--permission-mode auto` by default: nobody is there to approve prompts, and auto mode still screens risky actions. Each agent works in its own worktree (D-012), which keeps branches apart but is not a sandbox. `--permission-mode` overrides the default.
 - The local API (docs/API.md) starts with the loop on `127.0.0.1:<daemon.port>` (default 4747). Its url goes to `~/.harnessd/state/daemon.json`, which is removed on a clean stop. A port already in use stops the command with an error; give a second loop its own `daemon.port`.
-- SIGINT or SIGTERM stops the polling. Runs already started are allowed to finish.
+- Slack goes through `HARNESSD_SLACK_WEBHOOK_URL` (docs/INSTALL.md "Slack"). Without it, the start lines include one warning and nothing is posted. A due daily summary is checked at start and every minute.
+- SIGINT or SIGTERM stops the polling. Runs already started are allowed to finish. Queued Slack posts get up to 5 s.
 
 ## One tick
 1. **Re-queue.** Any run recorded in `loop.json` that this process does not own was left by a previous process. Its worktree is removed and its sub-issue goes back to Ready, with no attempt counted. A run a pause had already marked keeps its worktree (see Pause).
@@ -145,7 +146,7 @@ The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR m
 | GitHub listed fewer files than `changedFiles` | Needs a human: the paths could not all be checked. |
 | a check failed, or the PR conflicts with its base | Sent back (below). |
 | a check is pending, there are no checks yet, or mergeability is still UNKNOWN | Nothing happens. The next tick looks again. |
-| every check passed | `gh pr merge <n> --squash --match-head-commit <approved sha>`. The part moves to Done, with a comment and a line to the notifier (D-015). |
+| every check passed | `gh pr merge <n> --squash --match-head-commit <approved sha>`. The part moves to Done, with a comment and a notice to the notifier (D-015). |
 
 - **CI green** means at least one check, and every check passed: a check run that completed with SUCCESS, NEUTRAL or SKIPPED, or a commit status of SUCCESS. When a check was re-run, only its latest run counts. Any other conclusion fails. A PR with no checks waits, because D-013 needs CI green.
 - **Needs a human.** The PR gets the `merge.label` label (default `needs-human`; the label is created when the repo lacks it). The parent moves to Needs input with one comment, and one ping is sent. The ping is recorded under `humanPings` in `loop.json`, keyed by the PR URL, before it is sent. So a PR is pinged once, across ticks, restarts and new QA rounds. harnessd never merges that PR. It keeps reading it, and once a human merges it, the part moves to Done. A merge GitHub refuses (branch protection, a draft) goes the same way, with gh's error in the comment.

@@ -36,6 +36,7 @@ import {
   type LoopLinear,
   RESUMED_RUN_NOTE,
 } from "./loop.ts";
+import { formatNotice } from "./notifier.ts";
 import { partMarker, readPartMarker } from "./split.ts";
 import { createFileLoopStore, emptyLoopState, type LoopState, type LoopStore } from "./state.ts";
 
@@ -400,8 +401,8 @@ function setup(
       },
     },
     notifier: {
-      async notify(text) {
-        pings.push(text);
+      async notify(notice) {
+        pings.push(formatNotice(notice));
       },
     },
     log: (line) => logs.push(line),
@@ -682,7 +683,7 @@ test("a failed run goes back to Ready once; the second failure goes to Needs inp
   assert.equal(part.state, "Needs input");
   assert.match(t.linear.comments.at(-1)?.body ?? "", /failed twice \(timeout: over budget\)/);
   assert.deepEqual(t.pings, [
-    `${part.key} needs input (run failed): the backend run failed twice (timeout: over budget)`,
+    `${part.key} needs input (run failed): the backend run failed twice (timeout: over budget) https://linear.test/${part.key}`,
   ]);
   assert.equal(t.memory.state.attempts[part.id], undefined);
 
@@ -827,7 +828,7 @@ test("a failed QA sends the part back with the review; the second failure escala
   assert.equal(t.linear.comments.filter((c) => c.key === parent.key).length, 1);
   assert.match(t.linear.comments.at(-1)?.body ?? "", /QA failed twice for MET-100/);
   assert.deepEqual(t.pings, [
-    `${parent.key} needs input (QA failed twice): ${qa.key} could not approve ${backend.key} https://linear.test/${parent.key}`,
+    `${parent.key} needs input (QA failed twice): ${qa.key} could not approve ${backend.key} PR #7 https://github.test/o/r/pull/7 https://linear.test/${parent.key}`,
   ]);
 
   const runs = t.adapter.runs().length;
@@ -869,7 +870,9 @@ test("green CI, QA approved, nothing protected: squash-merged at the approved he
   assert.equal(qa.state, "Done");
   assert.equal(parent.state, "Done");
   assert.match(t.linear.comments.at(-1)?.body ?? "", /every part is merged \(\[PR #7\]/);
-  assert.deepEqual(t.pings, [`${backend.key} merged: PR #7 https://github.test/o/r/pull/7`]);
+  assert.deepEqual(t.pings, [
+    `${backend.key} merged: PR #7 https://github.test/o/r/pull/7 (${parent.key} https://linear.test/${parent.key})`,
+  ]);
   assert.deepEqual(t.memory.state.merges, []);
   assert.deepEqual(t.gh.labels, []);
 
@@ -950,7 +953,7 @@ test("failed CI sends the part back once with the failing checks; the second fai
   assert.equal(backend.state, "In Review", "not sent back a second time");
   assert.deepEqual(t.memory.state.gateFailures, {});
   assert.deepEqual(t.pings, [
-    `${parent.key} needs input (merge gate failed twice): PR #7 https://linear.test/${parent.key}`,
+    `${parent.key} needs input (merge gate failed twice): PR #7 https://github.test/o/r/pull/7 https://linear.test/${parent.key}`,
   ]);
   assert.deepEqual(t.gh.merges, []);
   await t.loop.tick();
@@ -978,7 +981,7 @@ test("a protected PR gets the needs-human label and one ping, ever; a human merg
     /needs a human \(D-013\): touches protected paths.*\n\n- `packages\/daemon\/src\/auth\/token\.ts`/s,
   );
   assert.deepEqual(humanPings(t), [
-    `${backend.key} needs a human (touches protected paths): PR #7 https://github.test/o/r/pull/7`,
+    `${backend.key} needs a human (touches protected paths): PR #7 https://github.test/o/r/pull/7 (${parent.key} https://linear.test/${parent.key})`,
   ]);
   assert.ok(t.memory.state.humanPings["https://github.test/o/r/pull/7"]);
 
@@ -1092,7 +1095,7 @@ test("a refused merge waits for a human; the merge method and label come from [m
   assert.equal(parent.state, "Needs input");
   assert.equal(backend.state, "In Review");
   assert.deepEqual(humanPings(t), [
-    `${backend.key} needs a human (GitHub refused the merge): PR #7 https://github.test/o/r/pull/7`,
+    `${backend.key} needs a human (GitHub refused the merge): PR #7 https://github.test/o/r/pull/7 (${parent.key} https://linear.test/${parent.key})`,
   ]);
   await t.loop.tick();
   assert.equal(t.gh.merges.length, 1, "not retried");

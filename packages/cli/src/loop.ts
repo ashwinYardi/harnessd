@@ -9,6 +9,7 @@ import {
   createGhCli,
   createGitWorktrees,
   createPauseController,
+  createVisibility,
   type Daemon,
   type DaemonInfo,
   DEFAULT_LOOP_INTERVAL_MS,
@@ -17,7 +18,9 @@ import {
   type ListReadyOptions,
   loadConfig,
   removeDaemonInfo,
+  type SlackFetch,
   startDaemon,
+  type Visibility,
   writeDaemonInfo,
 } from "@harnessd/daemon";
 import { ConfigError } from "@harnessd/shared";
@@ -75,7 +78,15 @@ export interface LoopIO {
   env?: NodeJS.ProcessEnv;
   /** Resolves when the loop should stop. Default: SIGINT or SIGTERM. */
   stopSignal?: () => Promise<string>;
+  /** Slack posts go through it. Default globalThis.fetch. */
+  fetch?: SlackFetch;
 }
+
+/** How often a due daily summary is looked for. */
+const SUMMARY_CHECK_MS = 60_000;
+
+/** How long a stop waits for queued Slack posts. */
+const SLACK_FLUSH_MS = 5_000;
 
 function untilSignal(): Promise<string> {
   return new Promise((resolve) => {
@@ -113,6 +124,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
 
   const pauseStore = createFilePauseStore(globalDir);
   let loop: CoordinatorLoop;
+  let visibility: Visibility;
   let teamId: string | undefined;
   let port: number;
   try {
@@ -131,6 +143,15 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       if (UUID.test(project)) team.projectId = project;
       else team.projectName = project;
     }
+    const log = (line: string) => io.out(`${new Date().toISOString()} ${line}`);
+    visibility = createVisibility({
+      env,
+      slack: config.slack,
+      repoDir,
+      inProgress: () => loop.running().map((key) => ({ key })),
+      log,
+      ...(io.fetch ? { fetch: io.fetch } : {}),
+    });
     loop = createCoordinatorLoop({
       config,
       linear: new LinearClient({ apiKey: async () => apiKey }),
@@ -144,7 +165,8 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       team,
       intervalMs: parsed.intervalMs,
       paused: async () => (await pauseStore.read()).paused,
-      log: (line) => io.out(`${new Date().toISOString()} ${line}`),
+      notifier: visibility.notifier,
+      log,
     });
   } catch (e) {
     io.err(`harnessd run: ${e instanceof ConfigError ? e.message : (e as Error).message}`);
@@ -177,12 +199,23 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     io.out(`harnessd run: API at ${daemon.url}`);
     const pause = await pauseStore.read();
     if (pause.paused) io.out(pausedLine(pause.since, pause.reason));
-    return await drive(
-      loop,
-      parsed,
-      io,
-      `polling ${teamId} every ${parsed.intervalMs / 1000}s in ${repoDir}`,
-    );
+    io.out(`harnessd run: ${visibility.status}`);
+    // A summary missed while the daemon was off goes out now, once (D-020).
+    await visibility.checkSummary();
+    const summaries = parsed.once
+      ? undefined
+      : setInterval(() => void visibility.checkSummary(), SUMMARY_CHECK_MS);
+    try {
+      return await drive(
+        loop,
+        parsed,
+        io,
+        `polling ${teamId} every ${parsed.intervalMs / 1000}s in ${repoDir}`,
+      );
+    } finally {
+      clearInterval(summaries);
+      await visibility.flush(SLACK_FLUSH_MS);
+    }
   } finally {
     await daemon.close();
     await removeDaemonInfo(globalDir, info).catch(() => undefined);
