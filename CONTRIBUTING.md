@@ -20,6 +20,7 @@ packages/shared   types and contracts shared by everything else
 packages/daemon   the harnessd daemon
 packages/cli      the harnessd command (published as @harnessd/cli)
 packages/ui       the web UI served by the daemon
+scripts/          install.sh, the hosted installer (docs/INSTALL.md)
 docs/             SPEC.md, decisions/, RELEASING.md
 ```
 

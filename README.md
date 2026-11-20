@@ -11,11 +11,16 @@ harnessd runs a coordinator and a team of persistent agents (Backend, Frontend, 
 - **Autopilot.** It ships non-stop within budgets and a merge gate.
 - **CLIs, not SDKs.** You keep your own subscriptions and auth.
 
-## Install (planned)
+## Install
+On a Mac, one line installs Node 24 if needed, then runs `harnessd init`:
 ```sh
-npx @harnessd/cli            # or
-curl -fsSL https://raw.githubusercontent.com/ashwinYardi/harnessd/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ashwinYardi/harnessd/main/scripts/install.sh | sh
 ```
+With Node 24 already installed:
+```sh
+npx @harnessd/cli init
+```
+`init` finds or installs the Claude Code and Codex CLIs, writes `~/.harnessd/config.toml` if it is absent, and loads the launchd service `dev.harnessd.daemon`. It asks before installing anything; `--yes` skips the question (`curl ... | sh -s -- --yes`). Re-running is safe. Flags, paths and uninstall: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Develop
 ```sh

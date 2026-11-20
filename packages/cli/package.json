@@ -3,7 +3,15 @@
   "version": "0.0.0",
   "description": "The harnessd command line.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashwinYardi/harnessd.git",
+    "directory": "packages/cli"
+  },
   "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
