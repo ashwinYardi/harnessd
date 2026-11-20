@@ -1,14 +1,18 @@
 // `harnessd run`: the autonomy loop in the foreground. See docs/LOOP.md.
 import { join, resolve } from "node:path";
 import {
+  agentsView,
   type CoordinatorLoop,
+  createBoardSource,
   createClaudeCodeAdapter,
   createCoordinatorLoop,
   createFileLoopStore,
   createFilePauseStore,
   createGhCli,
   createGitWorktrees,
+  createLogBuffer,
   createPauseController,
+  createUiApi,
   type Daemon,
   type DaemonInfo,
   DEFAULT_LOOP_INTERVAL_MS,
@@ -18,9 +22,11 @@ import {
   loadConfig,
   removeDaemonInfo,
   startDaemon,
+  staticRoutes,
   writeDaemonInfo,
 } from "@harnessd/daemon";
-import { ConfigError } from "@harnessd/shared";
+import { ConfigError, type MergedConfig } from "@harnessd/shared";
+import { UI_DIR } from "@harnessd/ui";
 
 /** Read at the edge only; never written to disk or logs. */
 export const LINEAR_API_KEY_ENV = "LINEAR_API_KEY";
@@ -75,6 +81,8 @@ export interface LoopIO {
   env?: NodeJS.ProcessEnv;
   /** Resolves when the loop should stop. Default: SIGINT or SIGTERM. */
   stopSignal?: () => Promise<string>;
+  /** The built UI. Default: the one in @harnessd/ui. */
+  uiDir?: string;
 }
 
 function untilSignal(): Promise<string> {
@@ -112,11 +120,15 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   const globalDir = defaultGlobalDir(env);
 
   const pauseStore = createFilePauseStore(globalDir);
+  const logs = createLogBuffer();
   let loop: CoordinatorLoop;
+  let linear: LinearClient;
+  let config: MergedConfig;
+  let team: ListReadyOptions;
   let teamId: string | undefined;
   let port: number;
   try {
-    const config = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
+    config = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
     teamId = config.linear.team_id?.trim();
     if (!teamId) {
       io.err(
@@ -125,15 +137,16 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       return 1;
     }
     port = config.daemon.port;
-    const team: ListReadyOptions = { teamId };
+    team = { teamId };
     const project = config.linear.project?.trim();
     if (project) {
       if (UUID.test(project)) team.projectId = project;
       else team.projectName = project;
     }
+    linear = new LinearClient({ apiKey: async () => apiKey });
     loop = createCoordinatorLoop({
       config,
-      linear: new LinearClient({ apiKey: async () => apiKey }),
+      linear,
       adapters: {
         "claude-code": createClaudeCodeAdapter({ permissionMode: parsed.permissionMode }),
       },
@@ -144,7 +157,19 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       team,
       intervalMs: parsed.intervalMs,
       paused: async () => (await pauseStore.read()).paused,
-      log: (line) => io.out(`${new Date().toISOString()} ${line}`),
+      log: (line) => {
+        io.out(`${new Date().toISOString()} ${line}`);
+        logs.push(line);
+      },
+      // The UI's live log shows each tool call (MET-18); stdout stays one line per step.
+      onAgentEvent: (run, event) => {
+        if (event.type === "tool") {
+          logs.push(`${event.name} ${event.summary}`, {
+            source: run.agent,
+            issueKey: run.issueKey,
+          });
+        }
+      },
     });
   } catch (e) {
     io.err(`harnessd run: ${e instanceof ConfigError ? e.message : (e as Error).message}`);
@@ -152,12 +177,18 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   }
 
   // The local API (docs/API.md), so `harnessd pause` and the UI reach this loop at once.
+  const pause = createPauseController({ store: pauseStore, loops: [loop] });
+  const ui = createUiApi({
+    board: createBoardSource({ read: () => linear.listBoard(team), loop: () => loop.snapshot() }),
+    agents: () => agentsView(config, loop.snapshot()),
+    logs,
+    pause,
+  });
   let daemon: Daemon;
+  let page: Awaited<ReturnType<typeof staticRoutes>>;
   try {
-    daemon = await startDaemon({
-      port,
-      pause: createPauseController({ store: pauseStore, loops: [loop] }),
-    });
+    page = await staticRoutes(io.uiDir ?? UI_DIR);
+    daemon = await startDaemon({ port, pause, routes: [...ui.routes, ...page] });
   } catch (e) {
     const busy = (e as NodeJS.ErrnoException).code === "EADDRINUSE";
     io.err(
@@ -174,7 +205,11 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   };
   try {
     await writeDaemonInfo(globalDir, info);
-    io.out(`harnessd run: API at ${daemon.url}`);
+    io.out(
+      page.length > 0
+        ? `harnessd run: UI and API at ${daemon.url}`
+        : `harnessd run: API at ${daemon.url} (UI not built)`,
+    );
     const pause = await pauseStore.read();
     if (pause.paused) io.out(pausedLine(pause.since, pause.reason));
     return await drive(
@@ -184,6 +219,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       `polling ${teamId} every ${parsed.intervalMs / 1000}s in ${repoDir}`,
     );
   } finally {
+    ui.close();
     await daemon.close();
     await removeDaemonInfo(globalDir, info).catch(() => undefined);
   }

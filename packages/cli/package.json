@@ -31,6 +31,7 @@
   },
   "dependencies": {
     "@harnessd/daemon": "workspace:*",
-    "@harnessd/shared": "workspace:*"
+    "@harnessd/shared": "workspace:*",
+    "@harnessd/ui": "workspace:*"
   }
 }

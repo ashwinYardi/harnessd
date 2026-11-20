@@ -29,7 +29,7 @@ async function setup(env: NodeJS.ProcessEnv, config?: string) {
     cwd: repo,
     env: { HARNESSD_HOME: home, ...env },
   };
-  return { repo, home, out, err, io };
+  return { root, repo, home, out, err, io };
 }
 
 test("run fails clearly without LINEAR_API_KEY and never prints a key", async () => {
@@ -89,7 +89,7 @@ test("run while paused starts the API, says it is paused and dispatches nothing"
   const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
   await createFilePauseStore(s.home).pause("deploy");
   assert.equal(await run(["run", "--once"], s.io), 0);
-  assert.match(s.out[0] ?? "", /^harnessd run: API at http:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(s.out[0] ?? "", /^harnessd run: (UI and )?API at http:\/\/127\.0\.0\.1:\d+/);
   assert.match(
     s.out[1] ?? "",
     /^harnessd run: paused since \S+ \(deploy\)\. Run "harnessd resume"/,
@@ -133,4 +133,41 @@ test("run fails clearly when the API port is taken", async () => {
   } finally {
     await busy.close();
   }
+});
+
+test("run serves the UI and its read routes next to the pause API", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  const uiDir = join(s.root, "ui");
+  await mkdir(uiDir);
+  await writeFile(join(uiDir, "index.html"), "<!doctype html><title>harnessd</title>");
+  let page = "";
+  let agents: unknown;
+  let logs: unknown;
+  const code = await runLoop([], {
+    ...s.io,
+    uiDir,
+    stopSignal: async () => {
+      const url = (await readDaemonInfo(s.home))?.url ?? "";
+      page = await (await fetch(`${url}/`)).text();
+      agents = await (await fetch(`${url}/api/agents`)).json();
+      logs = await (await fetch(`${url}/api/logs`)).json();
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.match(s.out[0] ?? "", /^harnessd run: UI and API at http:\/\/127\.0\.0\.1:\d+$/);
+  assert.equal(page, "<!doctype html><title>harnessd</title>");
+  assert.deepEqual(
+    (agents as { agents: { name: string }[] }).agents.map((a) => a.name),
+    ["coordinator", "backend", "frontend", "qa"],
+  );
+  assert.deepEqual(logs, { lines: [] });
+});
+
+test("run without a built UI still serves the API and says so", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  assert.equal(await runLoop(["--once"], { ...s.io, uiDir: join(s.root, "none") }), 0);
+  assert.match(s.out[0] ?? "", /^harnessd run: API at http:\/\/\S+ \(UI not built\)$/);
 });

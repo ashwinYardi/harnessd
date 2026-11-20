@@ -1,5 +1,5 @@
 // The daemon's local HTTP server: /health and the JSON API. See docs/API.md.
-import { createServer, type Server } from "node:http";
+import { createServer, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { VERSION } from "@harnessd/shared";
 import { cleanReason, type PauseControl } from "../control/pause.ts";
@@ -13,7 +13,7 @@ export interface DaemonOptions {
   port?: number;
   /** Serves the pause routes. Without it they are 404. */
   pause?: PauseControl;
-  /** More routes, such as the UI's (MET-18). */
+  /** More routes, such as the UI's (MET-18, `uiRoutes` and `staticRoutes`). */
   routes?: Route[];
 }
 
@@ -57,7 +57,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     ...(options.pause ? pauseRoutes(options.pause) : []),
     ...(options.routes ?? []),
   ];
-  const server: Server = createServer(createRouter(routes));
+  const streams = new Set<ServerResponse>();
+  const server: Server = createServer(createRouter(routes, { streams }));
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(options.port ?? 0, DAEMON_HOST, () => {
@@ -71,6 +72,8 @@ export async function startDaemon(options: DaemonOptions = {}): Promise<Daemon> 
     close: () =>
       new Promise((resolve, reject) => {
         server.close((e) => (e ? reject(e) : resolve()));
+        // Event streams never go idle: end them, or the close waits forever.
+        for (const res of streams) res.end();
         server.closeIdleConnections();
       }),
   };

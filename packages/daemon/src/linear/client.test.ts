@@ -530,3 +530,80 @@ test("parseRetryAfter reads seconds and HTTP dates", () => {
   assert.equal(parseRetryAfter(null, now), undefined);
   assert.equal(parseRetryAfter("soon", now), undefined);
 });
+
+const boardNode = (fields: Record<string, unknown>) => ({
+  id: `id-${fields.identifier}`,
+  title: "Work",
+  description: "**Size**: S",
+  priority: 3,
+  url: `https://linear.app/met/issue/${fields.identifier}`,
+  createdAt: "2026-11-01T10:00:00.000Z",
+  updatedAt: "2026-11-20T09:00:00.000Z",
+  state: { name: "Ready" },
+  team: { id: TEAM_ID, key: "MET" },
+  labels: { nodes: [{ name: "ui" }] },
+  projectMilestone: null,
+  parent: null,
+  inverseRelations: { nodes: [] },
+  ...fields,
+});
+
+test("listBoard reads open issues and recent Done ones, sorted by priority then key", async () => {
+  const { linear, sent } = client([
+    {
+      body: {
+        data: {
+          issues: {
+            nodes: [
+              boardNode({ identifier: "MET-9", priority: 0 }),
+              boardNode({
+                identifier: "MET-41",
+                priority: 2,
+                state: { name: "In Progress" },
+                parent: { id: "id-MET-40", identifier: "MET-40" },
+                inverseRelations: {
+                  nodes: [
+                    {
+                      type: "blocks",
+                      issue: { id: "b", identifier: "MET-39", state: { type: "started" } },
+                    },
+                  ],
+                },
+              }),
+              boardNode({ identifier: "MET-12", priority: 2, description: "" }),
+            ],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      },
+    },
+  ]);
+  const issues = await linear.listBoard({ teamId: "MET", projectName: "harnessd" });
+  assert.deepEqual(
+    issues.map((i) => i.key),
+    ["MET-12", "MET-41", "MET-9"],
+    "no priority sorts last; keys sort by number",
+  );
+  assert.deepEqual(issues[1], {
+    id: "id-MET-41",
+    key: "MET-41",
+    title: "Work",
+    state: "In Progress",
+    priority: 2,
+    labels: ["ui"],
+    size: "S",
+    url: "https://linear.app/met/issue/MET-41",
+    parentKey: "MET-40",
+    blockedBy: ["MET-39"],
+    updatedAt: "2026-11-20T09:00:00.000Z",
+  });
+  assert.equal(issues[0]?.size, undefined);
+  assert.match(sent[0]?.query ?? "", /query BoardIssues\(/);
+  assert.match(sent[0]?.query ?? "", /updatedAt/);
+  assert.deepEqual(sent[0]?.variables.filter, {
+    team: { key: { eqIgnoreCase: "MET" } },
+    project: { name: { eqIgnoreCase: "harnessd" } },
+    state: { type: { neq: "canceled" } },
+    or: [{ state: { type: { neq: "completed" } } }, { completedAt: { gt: "-P7D" } }],
+  });
+});

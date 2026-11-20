@@ -1,5 +1,8 @@
-/**
- * The harnessd web UI. The React + Vite app lands with MET-18; until then this
- * package only reserves its place in the workspace and its public name.
- */
+// The harnessd web UI (MET-18). The React app in `app/` is built by Vite into `dist/app`,
+// and the daemon serves that folder (D-020). This entry only says where it is.
+import { fileURLToPath } from "node:url";
+
 export const UI_PACKAGE = "@harnessd/ui";
+
+/** The built app. It exists once `pnpm build` has run. */
+export const UI_DIR = fileURLToPath(new URL("./app/", import.meta.url));
