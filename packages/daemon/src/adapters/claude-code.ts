@@ -112,7 +112,7 @@ function startClaudeRun(task: Task, worktree: string, options: ClaudeCodeOptions
       cwd: worktree,
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, ...options.env },
+      env: { ...process.env, ...options.env, ...task.env },
     });
   } catch (error) {
     spawnError = errorMessage(error);

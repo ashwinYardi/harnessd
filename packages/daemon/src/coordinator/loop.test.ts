@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -1711,4 +1711,103 @@ test("snapshot lists the PRs that wait for a human at the merge gate", async () 
   t.gh.statuses[7] = { ...t.gh.statuses[7], state: "MERGED" };
   await t.loop.tick();
   assert.deepEqual(t.loop.snapshot().blocked, [], "a human merged it");
+});
+
+// --- what a run sees (MET-55) ----------------------------------------------
+
+test("a run in a repo with no committed skills sees the pack, the memory vault and a clean git status", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-sees-"));
+  roots.push(root);
+  const origin = join(root, "origin.git");
+  const repo = join(root, "repo");
+  const home = join(root, "home");
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+  execFileSync("git", ["clone", "-q", origin, repo]);
+  await writeFile(join(repo, "README.md"), "hi\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+  git(repo, "push", "-q", "origin", "main");
+  // The workspace layer lives only in the main checkout: nothing harnessd is committed.
+  await mkdir(join(repo, ".harnessd"), { recursive: true });
+  await writeFile(join(repo, ".harnessd", "AGENTS.md"), "Workspace rules.\n");
+  await mkdir(join(home, "skills", "pack-skill"), { recursive: true });
+  await writeFile(
+    join(home, "skills", "pack-skill", "SKILL.md"),
+    "---\nname: pack-skill\ndescription: From the pack.\n---\nDo it well.\n",
+  );
+  const worktrees = createGitWorktrees({
+    repoDir: repo,
+    root: join(root, "worktrees"),
+    base: "origin/main",
+  });
+
+  const fake = join(import.meta.dirname, "../../test/fixtures/fake-claude.mjs");
+  const record = join(root, "record.json");
+  const adapter = createClaudeCodeAdapter({
+    bin: fake,
+    env: { FAKE_CLAUDE_MODE: "ok", FAKE_CLAUDE_RECORD: record, FAKE_CLAUDE_INSPECT: "1" },
+  });
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress" });
+  const part = linear.add({
+    title: "Uses the pack",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const t = setup({
+    linear,
+    worktrees,
+    extra: { adapters: { "claude-code": adapter }, repoDir: repo, globalDir: home },
+  });
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+  await t.loop.idle();
+  assert.equal(part.state, "In Review", t.logs.join("\n"));
+
+  const seen = JSON.parse(await readFile(record, "utf8"));
+  assert.deepEqual(seen.inspect.skills, ["pack-skill"], "the pack skill was there at run time");
+  assert.deepEqual(seen.inspect.mcp.mcpServers["harnessd-memory"], {
+    command: "harnessd",
+    args: ["mcp", "memory", "--workspace", repo],
+  });
+  assert.equal(seen.inspect.gitStatus, "", "no generated path shows in git status");
+  const prompt: string = seen.argv[seen.argv.indexOf("-p") + 1];
+  assert.ok(prompt.includes(`${join(repo, ".harnessd", "vault")}/`), "the prompt names the vault");
+  assert.ok(prompt.includes(`${join(home, "vault")}/`));
+  // Nothing shared was changed to hide the files.
+  assert.doesNotMatch(await readFile(join(repo, ".git", "config"), "utf8"), /excludesFile/i);
+  assert.doesNotMatch(
+    await readFile(join(repo, ".git", "info", "exclude"), "utf8").catch(() => ""),
+    /harnessd|\.mcp\.json/,
+  );
+});
+
+test("a sync failure fails the run before the agent starts: one retry, then Needs input", async () => {
+  const home = await mkdtemp(join(tmpdir(), "harnessd-syncfail-"));
+  roots.push(home);
+  // "/repo" has no .harnessd/, so the sync into the worktree fails.
+  const t = setup({ extra: { globalDir: home } });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const part = t.linear.add({
+    title: "Sync breaks",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+
+  // The tick dispatches twice, so the retry comes in the same tick.
+  await t.loop.tick();
+  await t.loop.idle();
+  assert.deepEqual(t.adapter.runs(), [], "the agent never started");
+  const bodies = t.linear.comments.filter((c) => c.key === part.key).map((c) => c.body);
+  assert.equal(bodies.length, 2);
+  assert.match(
+    bodies[0] ?? "",
+    /failed \(error: harnessd sync into the worktree failed: .*no \.harnessd\/ folder.*\)\. Back to Ready/,
+  );
+  assert.deepEqual(t.wt.removed, [`/wt/${part.key}`, `/wt/${part.key}`]);
+  assert.deepEqual(
+    t.linear.moves.filter((m) => m.key === part.key).map((m) => m.state),
+    ["In Progress", "Ready", "In Progress", "Needs input"],
+  );
+  assert.equal(part.state, "Needs input");
+  assert.match(t.linear.comments.at(-1)?.body ?? "", /failed twice \(error: harnessd sync/);
 });

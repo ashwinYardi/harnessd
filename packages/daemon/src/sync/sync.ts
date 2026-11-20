@@ -1,5 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadConfig } from "../config/load.ts";
 import {
   CLAUDE_AGENTS_DIR,
@@ -12,8 +12,14 @@ import { mergeSettings } from "./settings.ts";
 import { type WritableFile, writeSyncFiles } from "./write.ts";
 
 export interface SyncOptions {
-  /** Repo root; its `.harnessd/` is the workspace layer and native files land here. */
+  /** Where the native files land: the repo root, or a worktree of it. */
   repoDir: string;
+  /**
+   * The workspace layer, a `.harnessd/` folder. Default `<repoDir>/.harnessd`. The loop
+   * sets it to the main repo's folder when it syncs into a worktree (MET-55); the
+   * memory server then reads the vault of the repo that holds it.
+   */
+  workspaceDir?: string;
   /** The global folder (see `defaultGlobalDir`). Read only: sync never writes to it. */
   globalDir: string;
   /** Only used to print paths as `~/...` in errors. */
@@ -28,6 +34,8 @@ export interface SyncResult {
    * `.claude/skills/tdd` or `.claude/agents/impeccable-finish-reviewer.md`.
    */
   skipped: string[];
+  /** Every repo-relative path sync owns in `repoDir`, written or already up to date. */
+  paths: string[];
 }
 
 /** The skill folder a path belongs to, such as `.claude/skills/tdd`, or undefined. */
@@ -109,14 +117,15 @@ async function dropForeign(repoDir: string, files: SyncFile[]) {
 
 /** Loads global + workspace config, generates every native file and writes what changed. */
 export async function syncRepo(options: SyncOptions): Promise<SyncResult> {
-  const workspaceDir = join(options.repoDir, ".harnessd");
+  const ownLayer = join(options.repoDir, ".harnessd");
+  const workspaceDir = options.workspaceDir ?? ownLayer;
   const isDir = await stat(workspaceDir).then(
     (s) => s.isDirectory(),
     () => false,
   );
   if (!isDir) {
     throw new Error(
-      `harnessd sync: no .harnessd/ folder in ${options.repoDir}. Create it (it may be empty) to let harnessd own AGENTS.md and the harness files here.`,
+      `harnessd sync: no .harnessd/ folder in ${dirname(workspaceDir)}. Create it (it may be empty) to let harnessd own AGENTS.md and the harness files here.`,
     );
   }
   const config = await loadConfig({
@@ -124,7 +133,13 @@ export async function syncRepo(options: SyncOptions): Promise<SyncResult> {
     workspaceDir,
     ...(options.home === undefined ? {} : { home: options.home }),
   });
-  const { files, skipped } = await dropForeign(options.repoDir, generateSyncFiles(config));
+  // Another repo's layer: point the memory server at that repo's vault.
+  const elsewhere = resolve(workspaceDir) !== resolve(ownLayer);
+  const generated = generateSyncFiles(
+    config,
+    elsewhere ? { memoryWorkspace: dirname(resolve(workspaceDir)) } : {},
+  );
+  const { files, skipped } = await dropForeign(options.repoDir, generated);
   // Read every settings file before writing any, so a bad one stops sync with nothing written.
   const writable: WritableFile[] = [];
   for (const file of files) {
@@ -135,5 +150,6 @@ export async function syncRepo(options: SyncOptions): Promise<SyncResult> {
     const existing = await readOptional(join(options.repoDir, file.path));
     writable.push({ path: file.path, content: mergeSettings(existing, file.settings, file.path) });
   }
-  return { changed: await writeSyncFiles(options.repoDir, writable), skipped };
+  const changed = await writeSyncFiles(options.repoDir, writable);
+  return { changed, skipped, paths: writable.map((f) => f.path) };
 }

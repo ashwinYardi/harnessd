@@ -11,6 +11,7 @@ import {
   buildGrillPrompt,
   loadGrillContext,
   loadGrillMethod,
+  memorySection,
 } from "./prompt.ts";
 
 const issues = JSON.parse(
@@ -144,4 +145,19 @@ test("prompt runs grill-with-docs headless and asks for terms and precedents", (
   assert.match(bare, /## Method: grill-with-docs \(built-in\)/);
   assert.ok(bare.includes(BUILT_IN_GRILL_METHOD));
   assert.match(bare, /## Glossary \(GLOSSARY\.md\)\n\(none\)/);
+});
+
+test("memorySection names the memory tools, both vaults and how to commit a generated file", () => {
+  const text = memorySection({
+    workspaceVault: "/repo/.harnessd/vault",
+    globalVault: "/home/.harnessd/vault",
+  });
+  assert.match(text, /^## Memory\n/);
+  for (const tool of ["search_notes", "read_note", "write_note"]) assert.ok(text.includes(tool));
+  assert.ok(text.includes("harnessd-memory"));
+  assert.ok(text.includes("/repo/.harnessd/vault/"));
+  assert.ok(text.includes("/home/.harnessd/vault/ ($HARNESSD_HOME/vault/)"));
+  assert.match(text, /not part of your change unless the issue asks/);
+  assert.match(text, /git add -f/);
+  assert.match(text, /--no-skip-worktree/);
 });

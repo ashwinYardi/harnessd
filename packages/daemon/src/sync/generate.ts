@@ -37,9 +37,27 @@ export const MEMORY_SERVER: { name: string; server: McpServerConfig } = {
   server: { command: "harnessd", args: ["mcp", "memory"] },
 };
 
+export interface GenerateOptions {
+  /**
+   * The main repo when the files go into a worktree of it. The built-in memory server
+   * then runs `harnessd mcp memory --workspace <dir>`, so agents read the main repo's
+   * vault. Unset for a plain `harnessd sync`: the server finds the repo from its cwd.
+   */
+  memoryWorkspace?: string;
+}
+
+function memoryServer(options: GenerateOptions): McpServerConfig {
+  const { memoryWorkspace } = options;
+  if (memoryWorkspace === undefined) return MEMORY_SERVER.server;
+  return { ...MEMORY_SERVER.server, args: ["mcp", "memory", "--workspace", memoryWorkspace] };
+}
+
 /** Configured MCP servers plus the built-in memory server, sorted by name. */
-export function syncedMcpServers(config: MergedConfig): Record<string, McpServerConfig> {
-  const all = { [MEMORY_SERVER.name]: MEMORY_SERVER.server, ...config.mcp };
+export function syncedMcpServers(
+  config: MergedConfig,
+  options: GenerateOptions = {},
+): Record<string, McpServerConfig> {
+  const all = { [MEMORY_SERVER.name]: memoryServer(options), ...config.mcp };
   return Object.fromEntries(Object.entries(all).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
@@ -70,9 +88,12 @@ export function skillMd(skill: Skill): string {
   return `---\n${front.join("\n")}\n---\n<!-- ${GENERATED_NOTE} -->\n${body === "" ? "" : `\n${body}\n`}`;
 }
 
-function mcpServers(config: MergedConfig): Record<string, Record<string, unknown>> {
+function mcpServers(
+  config: MergedConfig,
+  options: GenerateOptions,
+): Record<string, Record<string, unknown>> {
   const out: Record<string, Record<string, unknown>> = {};
-  for (const [name, server] of Object.entries(syncedMcpServers(config))) {
+  for (const [name, server] of Object.entries(syncedMcpServers(config, options))) {
     const entry: Record<string, unknown> = { command: server.command };
     if (server.args !== undefined) entry.args = server.args;
     if (server.env !== undefined) entry.env = server.env;
@@ -121,14 +142,14 @@ export function agentMd(text: string): string {
 }
 
 /** `.mcp.json`, the project MCP file Claude Code reads. */
-export function mcpJson(config: MergedConfig): string {
-  return jsonFile({ mcpServers: mcpServers(config) });
+export function mcpJson(config: MergedConfig, options: GenerateOptions = {}): string {
+  return jsonFile({ mcpServers: mcpServers(config, options) });
 }
 
 /** `.codex/config.toml` with one `[mcp_servers.<name>]` table per server. */
-export function codexConfig(config: MergedConfig): string {
+export function codexConfig(config: MergedConfig, options: GenerateOptions = {}): string {
   const lines = [`# ${GENERATED_NOTE}`];
-  for (const [name, server] of Object.entries(syncedMcpServers(config))) {
+  for (const [name, server] of Object.entries(syncedMcpServers(config, options))) {
     lines.push("", `[mcp_servers.${tomlKey(name)}]`, `command = ${tomlString(server.command)}`);
     if (server.args !== undefined) lines.push(`args = ${tomlStringArray(server.args)}`);
     if (server.env !== undefined) {
@@ -144,7 +165,7 @@ export function codexConfig(config: MergedConfig): string {
  * Codex reads AGENTS.md natively; it gets its config.toml, the skills in `.agents/skills/`
  * and, when a skill has Codex hooks, `.codex/hooks.json`.
  */
-export function generateSyncFiles(config: MergedConfig): SyncFile[] {
+export function generateSyncFiles(config: MergedConfig, options: GenerateOptions = {}): SyncFile[] {
   const files: SyncFile[] = [
     { path: "AGENTS.md", content: agentsMd(config) },
     { path: "CLAUDE.md", symlinkTarget: "AGENTS.md" },
@@ -182,8 +203,8 @@ export function generateSyncFiles(config: MergedConfig): SyncFile[] {
       }
     }
   }
-  files.push({ path: ".mcp.json", content: mcpJson(config) });
-  files.push({ path: ".codex/config.toml", content: codexConfig(config) });
+  files.push({ path: ".mcp.json", content: mcpJson(config, options) });
+  files.push({ path: ".codex/config.toml", content: codexConfig(config, options) });
   const codexHooks = skillHooks(config, "codex");
   if (Object.keys(codexHooks).length > 0) {
     files.push({ path: ".codex/hooks.json", settings: { keys: {}, hooks: codexHooks } });

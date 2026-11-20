@@ -1,0 +1,133 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import { excludeLine, syncWorktree } from "./worktree-sync.ts";
+
+const roots: string[] = [];
+after(async () => {
+  for (const root of roots) await rm(root, { recursive: true, force: true });
+});
+
+function git(cwd: string, args: string[], env: Record<string, string> = {}): string {
+  return execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+}
+
+/**
+ * A main repo with a `.harnessd/` layer, a worktree of it that tracks AGENTS.md, a
+ * global folder with one skill, and an owner's global excludes file.
+ */
+async function fixture() {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-wtsync-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  const globalDir = join(root, "global");
+  await mkdir(join(repo, ".harnessd"), { recursive: true });
+  await writeFile(join(repo, ".harnessd", "AGENTS.md"), "Workspace rules.\n");
+  await writeFile(join(repo, "AGENTS.md"), "Committed by hand.\n");
+  await writeFile(join(repo, ".gitignore"), ".harnessd/\n");
+  git(repo, ["init", "-q", "-b", "main"]);
+  git(repo, ["add", "AGENTS.md", ".gitignore"]);
+  git(repo, ["commit", "-q", "-m", "init"]);
+  await mkdir(join(globalDir, "skills", "tdd"), { recursive: true });
+  await writeFile(
+    join(globalDir, "skills", "tdd", "SKILL.md"),
+    "---\nname: tdd\n---\nRed first.\n",
+  );
+  const worktree = join(root, "wt");
+  git(repo, ["worktree", "add", "-q", "-b", "met-1", worktree]);
+  const ownerIgnore = join(root, "owner-ignore");
+  await writeFile(ownerIgnore, "*.swp\n");
+  git(worktree, ["config", "core.excludesFile", ownerIgnore]);
+  return { root, repo, globalDir, worktree, ownerIgnore };
+}
+
+test("sync writes the pack into the worktree and git status stays clean", async () => {
+  const f = await fixture();
+  const { env, changed, excludesFile } = await syncWorktree({
+    repoDir: f.repo,
+    globalDir: f.globalDir,
+    worktree: f.worktree,
+    runId: "MET-1-1",
+  });
+  assert.ok(changed.includes(".claude/skills/tdd/SKILL.md"));
+  assert.ok(changed.includes("AGENTS.md"));
+  assert.match(await readFile(join(f.worktree, "AGENTS.md"), "utf8"), /Workspace rules/);
+  // Outside the worktree, under the global state folder.
+  assert.ok(excludesFile.startsWith(join(f.globalDir, "state")));
+  assert.equal(git(f.worktree, ["status", "--porcelain", "--untracked-files=all"], env), "");
+  // The owner's own excludes still apply.
+  await writeFile(join(f.worktree, "x.swp"), "");
+  assert.equal(git(f.worktree, ["status", "--porcelain", "--untracked-files=all"], env), "");
+  // A real change still shows.
+  await writeFile(join(f.worktree, "src.ts"), "x\n");
+  assert.equal(git(f.worktree, ["status", "--porcelain"], env), "?? src.ts\n");
+  // `git add -A` does not pick the generated files up.
+  git(f.worktree, ["add", "-A"], env);
+  assert.equal(git(f.worktree, ["diff", "--cached", "--name-only"], env), "src.ts\n");
+});
+
+test("nothing shared changes: not .git/info/exclude, not the repo config", async () => {
+  const f = await fixture();
+  const commonDir = git(f.repo, ["rev-parse", "--git-common-dir"]).trim();
+  const exclude = join(f.repo, commonDir, "info", "exclude");
+  const before = await readFile(exclude, "utf8").catch(() => "");
+  const config = await readFile(join(f.repo, commonDir, "config"), "utf8");
+  await syncWorktree({ repoDir: f.repo, globalDir: f.globalDir, worktree: f.worktree, runId: "r" });
+  assert.equal(await readFile(exclude, "utf8").catch(() => ""), before);
+  assert.equal(await readFile(join(f.repo, commonDir, "config"), "utf8"), config);
+  // The main checkout still sees its own AGENTS.md as tracked and unflagged.
+  assert.equal(git(f.repo, ["ls-files", "-v", "AGENTS.md"]), "H AGENTS.md\n");
+  assert.equal(git(f.worktree, ["ls-files", "-v", "AGENTS.md"]), "S AGENTS.md\n");
+});
+
+test("a second sync of a resumed worktree still lists every generated path", async () => {
+  const f = await fixture();
+  const input = { repoDir: f.repo, globalDir: f.globalDir, worktree: f.worktree, runId: "a" };
+  await syncWorktree(input);
+  const again = await syncWorktree({ ...input, runId: "b" });
+  assert.deepEqual(again.changed, []);
+  assert.equal(git(f.worktree, ["status", "--porcelain", "--untracked-files=all"], again.env), "");
+});
+
+test("the env sets core.excludesFile after any git config the daemon already has", async () => {
+  const f = await fixture();
+  const { env, excludesFile } = await syncWorktree({
+    repoDir: f.repo,
+    globalDir: f.globalDir,
+    worktree: f.worktree,
+    runId: "r",
+    env: {
+      ...process.env,
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "color.ui",
+      GIT_CONFIG_VALUE_0: "never",
+    },
+  });
+  assert.deepEqual(env, {
+    GIT_CONFIG_COUNT: "2",
+    GIT_CONFIG_KEY_1: "core.excludesFile",
+    GIT_CONFIG_VALUE_1: excludesFile,
+  });
+});
+
+test("a sync error throws before anything is written", async () => {
+  const f = await fixture();
+  await rm(join(f.repo, ".harnessd"), { recursive: true });
+  await assert.rejects(
+    syncWorktree({ repoDir: f.repo, globalDir: f.globalDir, worktree: f.worktree, runId: "r" }),
+    /no \.harnessd\/ folder/,
+  );
+  assert.equal(await readFile(join(f.worktree, "AGENTS.md"), "utf8"), "Committed by hand.\n");
+});
+
+test("excludeLine anchors a path and escapes gitignore syntax", () => {
+  assert.equal(excludeLine(".mcp.json"), "/.mcp.json");
+  assert.equal(excludeLine(".claude/skills/a*b/#x!.md"), "/.claude/skills/a\\*b/\\#x\\!.md");
+  assert.equal(excludeLine("a/b "), "/a/b\\ ");
+});

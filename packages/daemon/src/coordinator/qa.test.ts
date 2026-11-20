@@ -527,3 +527,44 @@ test("runShellCommand stops when its signal aborts, and never starts once aborte
   assert.equal(never.error, "cancelled");
   assert.equal(never.output, "");
 });
+
+test("prepare runs after the tests and before the agent; its env and the memory reach the run", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  const order: string[] = [];
+  const runCommand = h.deps.runCommand;
+  const result = await runQa(h.input, {
+    ...h.deps,
+    runCommand: async (command, cwd, timeoutMs) => {
+      order.push(`test ${cwd}`);
+      return runCommand(command, cwd, timeoutMs);
+    },
+    prepare: async (path, runId) => {
+      order.push(`prepare ${path} ${runId}`);
+      return { GIT_CONFIG_COUNT: "1" };
+    },
+    memory: { workspaceVault: "/repo/.harnessd/vault", globalVault: "/home/.harnessd/vault" },
+  });
+  assert.equal(result.outcome, "approved");
+  assert.deepEqual(order, ["test /wt/qa-sha7", "prepare /wt/qa-sha7 MET-53-qa-1-pr7"]);
+  assert.deepEqual(h.tasks[0]?.env, { GIT_CONFIG_COUNT: "1" });
+  assert.match(h.tasks[0]?.prompt ?? "", /## Memory\n/);
+  assert.match(h.tasks[0]?.prompt ?? "", /\/repo\/\.harnessd\/vault/);
+});
+
+test("a failed prepare is an error review: no agent runs, nothing is posted", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  const result = await runQa(h.input, {
+    ...h.deps,
+    prepare: async () => {
+      throw new Error("bad config.toml");
+    },
+  });
+  assert.equal(result.outcome, "error");
+  assert.match(
+    result.reviews[0]?.error ?? "",
+    /harnessd sync into the worktree failed: bad config\.toml/,
+  );
+  assert.equal(h.tasks.length, 0);
+  assert.equal(h.reviews.length, 0);
+  assert.deepEqual(h.removed, ["/wt/qa-sha7"]);
+});

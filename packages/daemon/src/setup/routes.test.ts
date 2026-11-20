@@ -85,7 +85,7 @@ async function serve(extra: Partial<SetupOptions> = {}) {
     },
     sync: async (o) => {
       syncs.push(o.repoDir);
-      return { changed: ["AGENTS.md"], skipped: [] };
+      return { changed: ["AGENTS.md"], skipped: [], paths: ["AGENTS.md"] };
     },
     ...extra,
   });

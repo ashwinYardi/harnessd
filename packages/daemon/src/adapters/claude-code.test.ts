@@ -30,7 +30,12 @@ async function collect(r: AdapterRun): Promise<AdapterEvent[]> {
   return events;
 }
 
-function readRecord(path: string): { argv: string[]; cwd: string; grandchildPid?: number } {
+function readRecord(path: string): {
+  argv: string[];
+  cwd: string;
+  grandchildPid?: number;
+  probe?: string;
+} {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
@@ -243,4 +248,12 @@ test("summarizeInput prefers a descriptive key and stays short", () => {
   const long = summarizeInput({ command: "x".repeat(500) });
   assert.equal(long.length, 120);
   assert.ok(long.endsWith("…"));
+});
+
+test("a task's env reaches the child over the adapter's env", async () => {
+  const { run: r, record } = run("ok", task({ env: { FAKE_CLAUDE_PROBE: "from-task" } }), {
+    env: { FAKE_CLAUDE_PROBE: "from-adapter" },
+  });
+  assert.equal((await r.result).status, "ok");
+  assert.equal(readRecord(record).probe, "from-task");
 });

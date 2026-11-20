@@ -4,6 +4,8 @@
 // the merge gate, dispatch eligible sub-issues, grill and split Ready issues, then dispatch
 // again. Linear is the source of truth; loop.json only remembers in-flight runs, paused
 // runs, failure counts and QA approvals waiting to merge.
+
+import { join } from "node:path";
 import {
   type AdapterEvent,
   type AdapterRun,
@@ -27,7 +29,7 @@ import { grillIssue } from "./grill.ts";
 import { advanceMerges, pendingMerge } from "./merge.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
 import { planIssue, type SplitPlan } from "./plan.ts";
-import { type GrillContext, loadGrillContext } from "./prompt.ts";
+import { type AgentMemory, type GrillContext, loadGrillContext } from "./prompt.ts";
 import { type CommandRunner, type QaRunResult, runQa, settleQa } from "./qa.ts";
 import {
   formatSplitComment,
@@ -38,6 +40,7 @@ import {
   splitIssue,
 } from "./split.ts";
 import type { InFlightRun, LoopState, LoopStore } from "./state.ts";
+import { syncWorktree } from "./worktree-sync.ts";
 
 /** The Linear calls the loop makes. A LinearClient satisfies it. */
 export type LoopLinear = Pick<
@@ -100,6 +103,12 @@ export interface CoordinatorLoopOptions {
   context?: () => Promise<GrillContext>;
   /** The installed skill pack (`~/.harnessd/skills`). The grill reads its method from it (D-022). */
   skillsDir?: string;
+  /**
+   * The global folder (`~/.harnessd` or `$HARNESSD_HOME`). When set, every part and QA
+   * run first gets `harnessd sync` into its worktree, from this folder and the repo's
+   * `.harnessd/`, and its prompt names the memory vaults (MET-55, docs/LOOP.md).
+   */
+  globalDir?: string;
   intervalMs?: number;
   /**
    * The pause flag (MET-15), read at the start of every tick and, while runs are in
@@ -226,6 +235,24 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   const pid = options.pid ?? process.pid;
   const intervalMs = options.intervalMs ?? DEFAULT_LOOP_INTERVAL_MS;
   const watchMs = options.pauseWatchMs ?? DEFAULT_PAUSE_WATCH_MS;
+  const { globalDir } = options;
+  const memory: AgentMemory | undefined =
+    globalDir === undefined
+      ? undefined
+      : { workspaceVault: workspaceVaultDir(repoDir), globalVault: join(globalDir, "vault") };
+
+  /** Syncs the harness files into a run's worktree; returns the run's env. Throws on failure. */
+  async function prepareWorktree(
+    worktree: string,
+    runId: string,
+  ): Promise<Record<string, string> | undefined> {
+    if (globalDir === undefined) return undefined;
+    try {
+      return (await syncWorktree({ repoDir, globalDir, worktree, runId })).env;
+    } catch (error) {
+      throw new Error(`harnessd sync into the worktree failed: ${message(error)}`);
+    }
+  }
 
   let state: LoopState | undefined;
   let ready: Promise<LoopState> | undefined;
@@ -512,15 +539,20 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         issue,
         branch: worktree.branch,
         ...(review ? { review } : {}),
+        ...(memory ? { memory } : {}),
       });
       if (kept?.worktree === worktree.path) prompt += `\n\n${RESUMED_RUN_NOTE}`;
+      const id = `${issue.key}-${(s.attempts[issue.id] ?? 0) + 1}`;
+      // Before the agent starts, never in the adapter (D-002). A failure fails the run.
+      const env = await prepareWorktree(worktree.path, id);
       const task: Task = {
-        id: `${issue.key}-${(s.attempts[issue.id] ?? 0) + 1}`,
+        id,
         title: `${issue.key}: ${issue.title}`,
         prompt,
         budgetMs: budget,
       };
       if (agent.model !== undefined) task.model = agent.model;
+      if (env !== undefined) task.env = env;
       run = adapter.start(task, worktree.path);
     } catch (error) {
       await fail(error);
@@ -615,6 +647,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
               entry.worktree = path;
               void save();
             },
+            ...(globalDir === undefined
+              ? {}
+              : { prepare: async (path, runId) => (await prepareWorktree(path, runId)) ?? {} }),
+            ...(memory ? { memory } : {}),
             log,
           },
         );
