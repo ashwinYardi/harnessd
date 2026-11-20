@@ -11,7 +11,7 @@ Mode: Operate. Visitor: the owner, a developer who checks in a few times a day a
 
 ## Settings (MET-28)
 <<<<<<< HEAD
-An extension of this surface, after T3 Code's Settings → Providers: a sub-nav (Harnesses, Connections, Team), one card per harness or connection with its state badge, details, fix and actions, a Team table that saves through the validator, and a Start banner while the loop is in setup. Job: get from a fresh machine to a running loop in a few clicks. No secret is ever shown. The Linear and Slack cards take their secret in a write-only field (MET-33, D-029).
+An extension of this surface, after T3 Code's Settings → Providers: a sub-nav (Harnesses, Connections, Team), one card per harness or connection with its state badge, details, fix and actions, a Team table that saves through the validator, and a Start banner while the loop is in setup. Job: get from a fresh machine to a running loop in a few clicks. No secret is ever shown. The Linear and Slack cards take their secret in a write-only field (MET-33, D-030).
 =======
 An extension of this surface: a sub-nav (Harnesses, Connections, Team), one card per harness or connection with its service logo, state badge, details, fix and actions, a Team table that saves through the validator, and a Start banner while the loop is in setup. Job: get from a fresh machine to a running loop in a few clicks. No secret is ever shown or typed.
 >>>>>>> origin/main

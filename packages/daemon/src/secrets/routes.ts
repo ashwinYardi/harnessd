@@ -1,4 +1,4 @@
-// Settings routes for secrets (MET-33, D-029). Write-only: no route returns a value. Each
+// Settings routes for secrets (MET-33, D-030). Write-only: no route returns a value. Each
 // id has its own fixed route, so no request text names a file. Errors, log lines and the
 // re-run checks never hold a value.
 import { ConfigError } from "@harnessd/shared";

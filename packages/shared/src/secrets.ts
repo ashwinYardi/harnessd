@@ -1,4 +1,4 @@
-// Secrets the app saves (MET-33, D-029): the fixed ids, what the API may say about one, and
+// Secrets the app saves (MET-33, D-030): the fixed ids, what the API may say about one, and
 // the reference shapes. Shared by the daemon, which stores them, and the UI, which takes them.
 
 /** Fixed ids. A file name is always one of these, never text from a request. */

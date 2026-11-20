@@ -1,4 +1,4 @@
-// The local secret store (MET-33, D-029). One owner-only file per secret in
+// The local secret store (MET-33, D-030). One owner-only file per secret in
 // `<HARNESSD_HOME>/secrets/`, written through a temp file and a rename. A secret can be a
 // reference instead: `op://…`, read with the 1Password CLI at use time, or `env:NAME`.
 // config.toml holds only the reference. Lookup: saved value or reference, then the

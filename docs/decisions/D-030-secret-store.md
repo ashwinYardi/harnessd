@@ -1,4 +1,4 @@
-# D-029 Settings saves the Linear and Slack secrets in a local secret store
+# D-030 Settings saves the Linear and Slack secrets in a local secret store
 Status: accepted 2026-11-20. Amends D-021 (the webhook came only from the environment) and D-026 (the app never took a secret). Issue: MET-33.
 
 - Settings, Connections takes the Linear key and the Slack webhook url in a write-only field. No route returns a value.

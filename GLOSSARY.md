@@ -57,7 +57,7 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 **Setup command**: one fixed command the app runs for a harness: install, update or sign in. Nothing from the request reaches it (D-026). _Avoid_: script, action.
 
 <<<<<<< HEAD
-**Secret store**: the folder `~/.harnessd/secrets/`, one owner-only file per secret, with fixed ids such as `linear.api_key` (D-029). _Avoid_: vault (the vault is memory), keychain.
+**Secret store**: the folder `~/.harnessd/secrets/`, one owner-only file per secret, with fixed ids such as `linear.api_key` (D-030). _Avoid_: vault (the vault is memory), keychain.
 
 **Secret reference**: an `op://vault/item/field` or `env:NAME` string that stands for a secret. Config holds the reference, never the value. _Avoid_: secret path.
 

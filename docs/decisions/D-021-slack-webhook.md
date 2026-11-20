@@ -1,5 +1,5 @@
 # D-021 Slack goes through an incoming webhook from the environment
-Status: accepted 2026-11-20. Refines D-015. Amended by D-029: Settings can save the webhook. Amends the MET-16 issue text ("bot token from the secret store").
+Status: accepted 2026-11-20. Refines D-015. Amended by D-030: Settings can save the webhook. Amends the MET-16 issue text ("bot token from the secret store").
 - harnessd posts to Slack with an incoming webhook and plain HTTPS. It adds no Slack SDK (D-002 spirit).
 - The webhook URL comes only from `HARNESSD_SLACK_WEBHOOK_URL`, like `LINEAR_API_KEY`. It is never written to config, logs or fixtures. A secret store is a protected path and stays out of scope.
 - The webhook fixes the channel. `slack.channel` is a label for the start line only.

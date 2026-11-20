@@ -89,7 +89,7 @@ The Settings pages use these routes (code: `packages/daemon/src/setup/routes.ts`
 - **Secrets.** Harness keys go in through each CLI's own sign-in. The Linear key and the Slack webhook go in through the secret routes below. No route returns a secret.
 
 ## Secret routes (MET-33)
-Settings, Connections saves the Linear key and the Slack webhook url with these routes (code: `packages/daemon/src/secrets/`, D-029). They are write-only.
+Settings, Connections saves the Linear key and the Slack webhook url with these routes (code: `packages/daemon/src/secrets/`, D-030). They are write-only.
 
 | Method | Path | Body | Response |
 |---|---|---|---|

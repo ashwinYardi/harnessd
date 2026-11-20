@@ -1,4 +1,4 @@
-// A write-only secret field for a connection card (MET-33, D-029). The value goes to the
+// A write-only secret field for a connection card (MET-33, D-030). The value goes to the
 // daemon once and is never shown again: the card shows only "set" and the source.
 import { KeyRoundIcon } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";

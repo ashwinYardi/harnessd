@@ -1,4 +1,4 @@
-// The write-only secret fields of Settings → Connections (MET-33, D-029). The daemon never
+// The write-only secret fields of Settings → Connections (MET-33, D-030). The daemon never
 // returns a value: the UI knows only whether a secret is set and where it comes from.
 import {
   isSecretReference,

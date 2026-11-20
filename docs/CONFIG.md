@@ -34,7 +34,7 @@ port = 4747                 # the local API on 127.0.0.1 (docs/API.md); 0 picks 
 [harnesses.claude-code]     # Settings → Harnesses writes this in ~/.harnessd/config.toml
 bin = "/opt/homebrew/bin/claude"   # absolute path; wins over HARNESSD_CLAUDE_BIN and PATH
 
-[secrets.linear]            # ~/.harnessd/config.toml only; a reference, never a value (D-029)
+[secrets.linear]            # ~/.harnessd/config.toml only; a reference, never a value (D-030)
 api_key = "op://Private/Linear/credential"   # or "env:MY_LINEAR_KEY"
 
 [secrets.slack]
@@ -80,7 +80,7 @@ env = { DOCS_MODE = "ro" }  # optional, string values
 Setting `protected_paths` replaces the whole list, so copy the defaults you want to keep.
 
 ## Secrets
-The Linear key and the Slack webhook url are secrets (D-029). Settings, Connections saves them; docs/INSTALL.md "Secrets" has the steps.
+The Linear key and the Slack webhook url are secrets (D-030). Settings, Connections saves them; docs/INSTALL.md "Secrets" has the steps.
 
 | Id | Reference key | Fallback variable |
 |---|---|---|

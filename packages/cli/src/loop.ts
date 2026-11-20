@@ -44,7 +44,7 @@ import { ConfigError, type MergedConfig } from "@harnessd/shared";
 import { UI_DIR } from "@harnessd/ui";
 import { type RunChecks, refusalLines, statusOptions } from "./doctor.ts";
 
-/** The fallback after the secret store (D-029). Read at the edge only; never logged. */
+/** The fallback after the secret store (D-030). Read at the edge only; never logged. */
 export const LINEAR_API_KEY_ENV = "LINEAR_API_KEY";
 
 export const RUN_USAGE =
@@ -157,7 +157,7 @@ const blocked = (check: Blocker["check"], message: string): Blocker => ({ check,
 /** Builds the loop from the config and the Linear key, or says what blocks it. */
 async function buildLoop(deps: Deps): Promise<Built | Blocker> {
   const { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log } = deps;
-  // Saved value or reference first, then LINEAR_API_KEY (D-029).
+  // Saved value or reference first, then LINEAR_API_KEY (D-030).
   try {
     if ((await secrets.value("linear.api_key")) === undefined) {
       return blocked(
@@ -246,7 +246,7 @@ const isBlocker = (b: Built | Blocker): b is Blocker => "check" in b;
 
 /**
  * Runs the coordinator loop for one repo. The Linear key comes from the secret store,
- * then `LINEAR_API_KEY` (D-029), and the team from `linear.team_id` in the config.
+ * then `LINEAR_API_KEY` (D-030), and the team from `linear.team_id` in the config.
  *
  * With `--once`, a missing key, team or a blocking check stops it with exit 1. Without
  * `--once`, it serves the app anyway, in setup: the loop waits until every required check

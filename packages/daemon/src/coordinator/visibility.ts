@@ -1,4 +1,4 @@
-// Slack #harnessd for one `harnessd run` (D-015, D-021, D-029): the notifier the loop
+// Slack #harnessd for one `harnessd run` (D-015, D-021, D-030): the notifier the loop
 // uses and the daily summary. The webhook is looked up before each post, so one saved in
 // Settings works with no restart. Without one nothing is posted, and `status` says so.
 import type { SlackConfig } from "@harnessd/shared";
