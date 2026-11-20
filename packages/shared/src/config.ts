@@ -5,7 +5,9 @@
 //
 // Note: index.ts re-exports this module and this module imports from index.ts.
 // Only touch imported values inside functions, never at module top level.
+
 import { HARNESSES, type HarnessId, isHarnessId } from "./index.ts";
+import { isSecretReference } from "./secrets.ts";
 
 /** Roles an agent can play (D-010). */
 export const AGENT_ROLES = ["coordinator", "backend", "frontend", "qa"] as const;
@@ -117,18 +119,6 @@ export interface SkillSettings {
 export interface HarnessSettings {
   /** Absolute path to the CLI. When set, the status engine and the loop use it, not PATH. */
   bin?: string;
-}
-
-/**
- * A secret reference (MET-33): `op://vault/item/field` (or `op://vault/item/section/field`),
- * read with the 1Password CLI at use time, or `env:NAME`, read from the environment.
- * config.toml holds only references, never a secret value.
- */
-export const OP_REFERENCE = /^op:\/\/[^/\s]+\/[^/\s]+(\/[^/\s]+){1,2}$/;
-export const ENV_REFERENCE = /^env:[A-Za-z_][A-Za-z0-9_]*$/;
-
-export function isSecretReference(value: string): boolean {
-  return OP_REFERENCE.test(value) || ENV_REFERENCE.test(value);
 }
 
 /** `[secrets.<service>]` tables of the global config.toml: one reference per secret. */

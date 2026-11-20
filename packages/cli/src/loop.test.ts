@@ -390,12 +390,13 @@ test("first launch: a key saved in Settings starts the loop with no restart, and
     id: "linear.api_key",
     set: true,
     source: "saved",
+    stored: true,
   });
   assert.equal((answers.bad as { error: string }).error, "invalid_body");
   assert.deepEqual(answers.list, {
     secrets: [
-      { id: "linear.api_key", set: true, source: "saved" },
-      { id: "slack.webhook_url", set: true, source: "saved" },
+      { id: "linear.api_key", set: true, source: "saved", stored: true },
+      { id: "slack.webhook_url", set: true, source: "saved", stored: true },
     ],
   });
   assert.deepEqual(answers.start, { state: "running", blocking: [] });

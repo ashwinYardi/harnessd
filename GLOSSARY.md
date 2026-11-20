@@ -60,4 +60,4 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Secret reference**: an `op://vault/item/field` or `env:NAME` string that stands for a secret. Config holds the reference, never the value. _Avoid_: secret path.
 
-**Secret source**: where the lookup found a secret: `saved`, `1Password` or `env`. The status engine and the app show the source, never the value.
+**Secret source**: where the lookup found a secret: `saved`, `1Password` or `env`. The status engine and the app show the source, never the value. _Avoid_: origin, provider.

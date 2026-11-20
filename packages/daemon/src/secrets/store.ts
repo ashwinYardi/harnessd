@@ -4,36 +4,30 @@
 // config.toml holds only the reference. Lookup: saved value or reference, then the
 // environment variable. No value ever reaches an error, a state or a log line.
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   hasControlChar,
   isSecretReference,
   OP_REFERENCE,
+  SECRET_ENV,
+  type SecretId,
   type SecretReferences,
+  type SecretSource,
+  type SecretState,
 } from "@harnessd/shared";
-import { applyTableKey } from "../config/edit.ts";
+import { applyTableKey, withFileLock } from "../config/edit.ts";
 import { parseConfigText } from "../config/load.ts";
 import { type Exec, execFile } from "../status/detect.ts";
 
-/** Fixed ids. A file name is always one of these, never text from a request. */
-export const SECRET_IDS = ["linear.api_key", "slack.webhook_url"] as const;
-export type SecretId = (typeof SECRET_IDS)[number];
-
-/** The environment variable each secret falls back to. */
-export const SECRET_ENV: Record<SecretId, string> = {
-  "linear.api_key": "LINEAR_API_KEY",
-  "slack.webhook_url": "HARNESSD_SLACK_WEBHOOK_URL",
-};
-
-export type SecretSource = "saved" | "1Password" | "env";
-
-/** What the API and the status engine may say about a secret: never its value. */
-export interface SecretState {
-  id: SecretId;
-  set: boolean;
-  source: SecretSource | null;
-}
+export {
+  isSecretId,
+  SECRET_ENV,
+  SECRET_IDS,
+  type SecretId,
+  type SecretSource,
+  type SecretState,
+} from "@harnessd/shared";
 
 export interface ResolvedSecret {
   value: string;
@@ -85,10 +79,6 @@ const TABLE: Record<SecretId, { service: "linear" | "slack"; key: string }> = {
   "linear.api_key": { service: "linear", key: "api_key" },
   "slack.webhook_url": { service: "slack", key: "webhook_url" },
 };
-
-export function isSecretId(id: string): id is SecretId {
-  return (SECRET_IDS as readonly string[]).includes(id);
-}
 
 const sourceOf = (reference: string): SecretSource =>
   reference.startsWith("op://") ? "1Password" : "env";
@@ -158,7 +148,39 @@ export function createSecretStore(options: SecretStoreOptions): SecretStore {
     return (await references())[service]?.[key as never];
   }
 
+  /** Refuses a secrets folder that is a link, so a write never lands somewhere else. */
+  async function checkFolder(): Promise<boolean> {
+    try {
+      const info = await lstat(folder);
+      if (!info.isDirectory()) {
+        throw new SecretError("unreadable", `${folder} is not a plain folder; move it away`);
+      }
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw e;
+    }
+  }
+
+  /** A saved value, read only from a plain owner-only file. */
   async function savedOf(id: SecretId): Promise<string | undefined> {
+    if (!(await checkFolder())) return undefined;
+    let info: Awaited<ReturnType<typeof lstat>>;
+    try {
+      info = await lstat(fileOf(id));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw e;
+    }
+    if (!info.isFile()) {
+      throw new SecretError(
+        "unreadable",
+        `the saved ${id} is not a plain file; remove it and save again`,
+      );
+    }
+    if ((info.mode & 0o077) !== 0) {
+      throw new SecretError("unreadable", `the saved ${id} can be read by others; save it again`);
+    }
     const text = (await readOptional(fileOf(id)))?.trim();
     return text === "" ? undefined : text;
   }
@@ -207,11 +229,20 @@ export function createSecretStore(options: SecretStoreOptions): SecretStore {
   }
 
   async function state(id: SecretId): Promise<SecretState> {
-    if ((await savedOf(id)) !== undefined) return { id, set: true, source: "saved" };
+    // A file that cannot be used still counts as saved, so Replace and Remove reach it.
+    const saved = await savedOf(id).catch((e: unknown) => {
+      if (e instanceof SecretError) return "";
+      throw e;
+    });
+    if (saved !== undefined) return { id, set: true, source: "saved", stored: true };
     const reference = await referenceOf(id);
-    if (reference !== undefined) return { id, set: true, source: sourceOf(reference) };
+    if (reference !== undefined) {
+      return { id, set: true, source: sourceOf(reference), stored: true };
+    }
     const fromEnv = env[SECRET_ENV[id]]?.trim();
-    return fromEnv ? { id, set: true, source: "env" } : { id, set: false, source: null };
+    return fromEnv
+      ? { id, set: true, source: "env", stored: false }
+      : { id, set: false, source: null, stored: false };
   }
 
   async function resolve(id: SecretId): Promise<ResolvedSecret | undefined> {
@@ -230,21 +261,30 @@ export function createSecretStore(options: SecretStoreOptions): SecretStore {
     return value ? { value: remember(value), source: "env" } : undefined;
   }
 
-  async function writeReference(id: SecretId, reference: string | null): Promise<void> {
-    const text = (await readOptional(configFile)) ?? "";
-    const { service, key } = TABLE[id];
-    const next = applyTableKey(text, `secrets.${service}`, key, reference);
-    if (next === text) return;
-    // The whole file must still be valid before it is written.
-    parseConfigText(next, "~/.harnessd/config.toml");
-    const tmp = `${configFile}.${process.pid}.${randomUUID()}.tmp`;
-    await mkdir(options.globalDir, { recursive: true });
-    await writeFile(tmp, next);
-    await rename(tmp, configFile);
+  /** Edits config.toml under the lock that Settings → Harnesses also takes. */
+  function writeReference(id: SecretId, reference: string | null): Promise<void> {
+    return withFileLock(configFile, async () => {
+      const text = (await readOptional(configFile)) ?? "";
+      const { service, key } = TABLE[id];
+      const next = applyTableKey(text, `secrets.${service}`, key, reference);
+      if (next === text) return;
+      // The whole file must still be valid before it is written.
+      parseConfigText(next, "~/.harnessd/config.toml");
+      // Keep the file's own mode; a new file gets the default.
+      const mode = await stat(configFile).then(
+        (i) => i.mode & 0o777,
+        () => undefined,
+      );
+      const tmp = `${configFile}.${process.pid}.${randomUUID()}.tmp`;
+      await mkdir(options.globalDir, { recursive: true });
+      await writeFile(tmp, next, mode === undefined ? {} : { mode });
+      if (mode !== undefined) await chmod(tmp, mode);
+      await rename(tmp, configFile);
+    });
   }
 
   async function writeValue(id: SecretId, value: string): Promise<void> {
-    await mkdir(folder, { recursive: true, mode: 0o700 });
+    if (!(await checkFolder())) await mkdir(folder, { recursive: true, mode: 0o700 });
     await chmod(folder, 0o700);
     const tmp = join(folder, `.${id}.${process.pid}.${randomUUID()}.tmp`);
     try {

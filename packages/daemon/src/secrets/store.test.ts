@@ -1,5 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -27,9 +37,10 @@ test("save writes one 0600 file per secret in a 0700 folder, through a temp file
     id: "linear.api_key",
     set: false,
     source: null,
+    stored: false,
   });
   const saved = await store.save("linear.api_key", `  ${KEY}\n`);
-  assert.deepEqual(saved, { id: "linear.api_key", set: true, source: "saved" });
+  assert.deepEqual(saved, { id: "linear.api_key", set: true, source: "saved", stored: true });
   const folder = join(dir, "secrets");
   assert.equal((await stat(folder)).mode & 0o777, 0o700);
   assert.equal((await stat(join(folder, "linear.api_key"))).mode & 0o777, 0o600);
@@ -53,6 +64,7 @@ test("lookup order: saved value, then the environment variable", async () => {
     id: "linear.api_key",
     set: true,
     source: "env",
+    stored: false,
   });
   assert.deepEqual(await store.resolve("linear.api_key"), {
     value: "lin_api_fromenv",
@@ -71,7 +83,8 @@ test("a reference is written to config.toml, never the value, and replaces a sav
   const store = createSecretStore({ globalDir: dir, env: { MY_HOOK: HOOK } });
   await store.save("slack.webhook_url", "https://hooks.slack.com/services/old");
   const state = await store.save("slack.webhook_url", "env:MY_HOOK");
-  assert.deepEqual(state, { id: "slack.webhook_url", set: true, source: "env" });
+  // An env: reference is stored here, so it can be removed, unlike the variable fallback.
+  assert.deepEqual(state, { id: "slack.webhook_url", set: true, source: "env", stored: true });
   assert.equal(
     await readFile(join(dir, "config.toml"), "utf8"),
     '# mine\n[linear]\nteam_id = "MET"\n\n[secrets.slack]\nwebhook_url = "env:MY_HOOK"\n',
@@ -105,6 +118,7 @@ test("an op:// reference is read with the op CLI at use time, argv only, and cac
     id: "linear.api_key",
     set: true,
     source: "1Password",
+    stored: true,
   });
   assert.equal(calls.length, 0, "state never runs op");
   assert.deepEqual(await store.resolve("linear.api_key"), { value: KEY, source: "1Password" });
@@ -188,4 +202,47 @@ test("known() lists every value read, longest first, for redaction", async () =>
   await store.resolve("linear.api_key");
   await store.resolve("slack.webhook_url");
   assert.deepEqual(store.known(), [HOOK, KEY]);
+});
+
+test("a saved file that others can read, or a link, is refused, and Replace still works", async () => {
+  const dir = await home();
+  const store = createSecretStore({ globalDir: dir, env: {} });
+  await store.save("linear.api_key", KEY);
+  await chmod(join(dir, "secrets", "linear.api_key"), 0o644);
+  await assert.rejects(
+    store.resolve("linear.api_key"),
+    (e: unknown) =>
+      e instanceof SecretError &&
+      e.message === "the saved linear.api_key can be read by others; save it again",
+  );
+  assert.deepEqual(await store.state("linear.api_key"), {
+    id: "linear.api_key",
+    set: true,
+    source: "saved",
+    stored: true,
+  });
+  await store.save("linear.api_key", KEY);
+  assert.equal(await store.value("linear.api_key"), KEY);
+
+  await rm(join(dir, "secrets", "linear.api_key"));
+  await writeFile(join(dir, "elsewhere"), KEY, { mode: 0o600 });
+  await symlink(join(dir, "elsewhere"), join(dir, "secrets", "linear.api_key"));
+  await assert.rejects(store.resolve("linear.api_key"), /not a plain file/);
+});
+
+test("a secrets folder that is a link is refused before any write", async () => {
+  const dir = await home();
+  const other = await home();
+  await symlink(other, join(dir, "secrets"));
+  const store = createSecretStore({ globalDir: dir, env: {} });
+  await assert.rejects(store.save("linear.api_key", KEY), /is not a plain folder/);
+  assert.deepEqual(await readdir(other), []);
+});
+
+test("writing a reference keeps config.toml's own mode", async () => {
+  const dir = await home();
+  await writeFile(join(dir, "config.toml"), "[daemon]\nport = 4747\n", { mode: 0o600 });
+  const store = createSecretStore({ globalDir: dir, env: {} });
+  await store.save("linear.api_key", "env:MY_KEY");
+  assert.equal((await stat(join(dir, "config.toml"))).mode & 0o777, 0o600);
 });

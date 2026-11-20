@@ -146,27 +146,43 @@ interface Deps {
   log: (line: string) => void;
 }
 
-/** Builds the loop from the config and the Linear key; a string says what is missing. */
-async function buildLoop(deps: Deps): Promise<Built | string> {
+/** Why the loop cannot be built: the status check it stands for, and the text to print. */
+interface Blocker {
+  check: "linear.key" | "linear.team" | "config";
+  message: string;
+}
+
+const blocked = (check: Blocker["check"], message: string): Blocker => ({ check, message });
+
+/** Builds the loop from the config and the Linear key, or says what blocks it. */
+async function buildLoop(deps: Deps): Promise<Built | Blocker> {
   const { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log } = deps;
   // Saved value or reference first, then LINEAR_API_KEY (D-029).
   try {
     if ((await secrets.value("linear.api_key")) === undefined) {
-      return `No Linear key is saved and ${LINEAR_API_KEY_ENV} is not set. Paste a Linear personal API key in Settings, Connections, Linear.`;
+      return blocked(
+        "linear.key",
+        `No Linear key is saved and ${LINEAR_API_KEY_ENV} is not set. Paste a Linear personal API key in Settings, Connections, Linear.`,
+      );
     }
   } catch (e) {
-    if (e instanceof SecretError || e instanceof ConfigError) return `Linear key: ${e.message}`;
+    if (e instanceof SecretError || e instanceof ConfigError) {
+      return blocked("linear.key", `Linear key: ${e.message}`);
+    }
     throw e;
   }
   let config: MergedConfig;
   try {
     config = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
   } catch (e) {
-    return e instanceof ConfigError ? e.message : (e as Error).message;
+    return blocked("config", e instanceof ConfigError ? e.message : (e as Error).message);
   }
   const teamId = config.linear.team_id?.trim();
   if (!teamId) {
-    return 'linear.team_id is not set. Add it to .harnessd/config.toml under [linear], e.g. team_id = "MET".';
+    return blocked(
+      "linear.team",
+      'linear.team_id is not set. Add it to .harnessd/config.toml under [linear], e.g. team_id = "MET".',
+    );
   }
   const team: ListReadyOptions = { teamId };
   const project = config.linear.project?.trim();
@@ -226,12 +242,7 @@ async function buildLoop(deps: Deps): Promise<Built | string> {
   return { loop, linear, team, teamId, config, visibility };
 }
 
-/** The id of the status check that a missing key or team stands for. */
-function setupBlocker(reason: string): string {
-  if (reason.startsWith("No Linear key") || reason.startsWith("Linear key:")) return "linear.key";
-  if (reason.startsWith("linear.team_id")) return "linear.team";
-  return "config";
-}
+const isBlocker = (b: Built | Blocker): b is Blocker => "check" in b;
 
 /**
  * Runs the coordinator loop for one repo. The Linear key comes from the secret store,
@@ -264,8 +275,8 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   const deps: Deps = { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log };
 
   const built = await buildLoop(deps);
-  if (typeof built === "string" && parsed.once) {
-    io.err(`harnessd run: ${built}`);
+  if (isBlocker(built) && parsed.once) {
+    io.err(`harnessd run: ${built.message}`);
     return 1;
   }
   // The port is read on its own, so a missing key or team still serves the app.
@@ -286,12 +297,12 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   // Every harness and connection, before anything is dispatched (MET-27, D-023).
   const startChecks = await checks(options);
   let blocking = startChecks.filter(isBlocking).map((c) => c.id);
-  if (typeof built === "string") blocking = [...new Set([setupBlocker(built), ...blocking])];
+  if (isBlocker(built)) blocking = [...new Set([built.check, ...blocking])];
   if (blocking.length > 0 && parsed.once) {
     for (const line of refusalLines(startChecks)) io.err(line);
     return 1;
   }
-  if (typeof built === "string") io.err(`harnessd run: ${built}`);
+  if (isBlocker(built)) io.err(`harnessd run: ${built.message}`);
   if (startChecks.some(isBlocking)) {
     for (const line of refusalLines(startChecks, "the loop waits")) io.err(line);
   }
@@ -337,12 +348,12 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
         const now = await checks({ ...options, servingPort: true });
         const next = await buildLoop(deps);
         blocking = now.filter(isBlocking).map((c) => c.id);
-        if (typeof next === "string") blocking = [...new Set([setupBlocker(next), ...blocking])];
-        if (typeof next === "string" || blocking.length > 0) {
+        if (isBlocker(next)) blocking = [...new Set([next.check, ...blocking])];
+        if (isBlocker(next) || blocking.length > 0) {
           throw new HttpError(
             409,
             "setup_incomplete",
-            `Fix these first: ${blocking.join(", ")}.${typeof next === "string" ? ` ${next}` : ""}`,
+            `Fix these first: ${blocking.join(", ")}.${isBlocker(next) ? ` ${next.message}` : ""}`,
           );
         }
         if (active) return { state: "running", blocking: [] };
@@ -399,7 +410,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     );
     const paused = await pauseStore.read();
     if (paused.paused) io.out(pausedLine(paused.since, paused.reason));
-    if (blocking.length === 0 && typeof built !== "string") {
+    if (blocking.length === 0 && !isBlocker(built)) {
       active = built;
       loops.push(built.loop);
       return await drive(active, parsed, io);

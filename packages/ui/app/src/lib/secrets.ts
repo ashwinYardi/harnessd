@@ -1,15 +1,15 @@
 // The write-only secret fields of Settings → Connections (MET-33, D-029). The daemon never
 // returns a value: the UI knows only whether a secret is set and where it comes from.
+import {
+  isSecretReference,
+  SECRET_ENV,
+  type SecretId,
+  type SecretSource,
+  type SecretState,
+} from "@harnessd/shared";
 import type { Check } from "./checks.ts";
 
-export type SecretId = "linear.api_key" | "slack.webhook_url";
-export type SecretSource = "saved" | "1Password" | "env";
-
-export interface SecretState {
-  id: SecretId;
-  set: boolean;
-  source: SecretSource | null;
-}
+export type { SecretId, SecretSource, SecretState };
 
 export interface SecretSpec {
   id: SecretId;
@@ -19,15 +19,23 @@ export interface SecretSpec {
   env: string;
   /** The prefix of the connection's check ids. */
   prefix: string;
+  placeholder: string;
 }
 
 const SPECS: Record<string, SecretSpec> = {
-  linear: { id: "linear.api_key", label: "API key", env: "LINEAR_API_KEY", prefix: "linear." },
+  linear: {
+    id: "linear.api_key",
+    label: "API key",
+    env: SECRET_ENV["linear.api_key"],
+    prefix: "linear.",
+    placeholder: "lin_api_…",
+  },
   slack: {
     id: "slack.webhook_url",
-    label: "Webhook url",
-    env: "HARNESSD_SLACK_WEBHOOK_URL",
+    label: "Webhook URL",
+    env: SECRET_ENV["slack.webhook_url"],
     prefix: "slack.",
+    placeholder: "https://hooks.slack.com/services/…",
   },
 };
 
@@ -48,8 +56,7 @@ export function sourceText(state: SecretState): string {
 
 /** The same shapes the daemon accepts as a reference (docs/CONFIG.md "Secrets"). */
 export function isReference(text: string): boolean {
-  const t = text.trim();
-  return /^op:\/\/\S+/.test(t) || /^env:[A-Za-z_][A-Za-z0-9_]*$/.test(t);
+  return isSecretReference(text.trim());
 }
 
 /** Puts the re-run checks of one connection in place of its old ones. */
@@ -62,4 +69,19 @@ export function mergeChecks(
   const rest = all.filter((c) => !c.id.startsWith(prefix));
   const index = at === -1 ? rest.length : at;
   return [...rest.slice(0, index), ...fresh, ...rest.slice(index)];
+}
+
+/** The toast after a save or remove. It reports the re-run checks, worst first. */
+export function savedToast(
+  title: string,
+  label: string,
+  action: "saved" | "removed",
+  checks: readonly Check[],
+): { type: "success" | "warning" | "error"; title: string; description: string } {
+  const head = `${title} ${label} ${action}`;
+  const blocking = checks.find((c) => c.state === "fail" || c.state === "missing");
+  if (blocking) return { type: "error", title: head, description: blocking.detail };
+  const warning = checks.find((c) => c.state === "warn");
+  if (warning) return { type: "warning", title: head, description: warning.detail };
+  return { type: "success", title: head, description: `${title} checks pass.` };
 }

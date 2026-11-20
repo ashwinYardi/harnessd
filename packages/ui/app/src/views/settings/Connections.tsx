@@ -2,7 +2,7 @@
 // each with its doctor checks, the fix for a failure and Check again. Linear and Slack take
 // their secret in a write-only field (MET-33). No secret is ever shown.
 import { RotateCwIcon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/button.tsx";
 import {
   Card,
@@ -23,26 +23,48 @@ import { SecretField } from "./SecretField.tsx";
 
 const LABEL = { ok: "OK", warn: "Warning", fail: "Failing", missing: "Not set up" } as const;
 
-/** Set or not, and the source, per secret. A failed read leaves the fields usable as empty. */
+/** Set or not, and the source, per secret; "error" when they could not be read. */
 function useSecrets() {
-  const [secrets, setSecrets] = useState<Partial<Record<SecretId, SecretState>>>();
-  useEffect(() => {
-    let live = true;
+  const [secrets, setSecrets] = useState<Partial<Record<SecretId, SecretState>> | "error">();
+  const live = useRef(true);
+  const load = useCallback(() => {
+    setSecrets(undefined);
     readSecrets().then(
-      ({ secrets: list }) => live && setSecrets(Object.fromEntries(list.map((x) => [x.id, x]))),
-      () => live && setSecrets({}),
+      ({ secrets: list }) =>
+        live.current && setSecrets(Object.fromEntries(list.map((x) => [x.id, x]))),
+      () => live.current && setSecrets("error"),
     );
-    return () => {
-      live = false;
-    };
   }, []);
-  const put = (state: SecretState) => setSecrets((all) => ({ ...all, [state.id]: state }));
-  return { secrets, put };
+  useEffect(() => {
+    live.current = true;
+    load();
+    return () => {
+      live.current = false;
+    };
+  }, [load]);
+  const put = (state: SecretState) =>
+    setSecrets((all) => ({ ...(all === "error" ? {} : all), [state.id]: state }));
+  return { secrets, put, retry: load };
+}
+
+/**
+ * Failing cards first, fixed after each full run of the checks. A save re-runs one card's
+ * checks; that card keeps its place, so nothing moves under the cursor.
+ */
+function useCardOrder(loads: number, ids: () => string[]): (a: string, b: string) => number {
+  const order = useRef<{ loads: number; ids: string[] }>({ loads: -1, ids: [] });
+  if (order.current.loads !== loads) order.current = { loads, ids: ids() };
+  const at = (id: string) => order.current.ids.indexOf(id);
+  return (a, b) => at(a) - at(b);
 }
 
 export function Connections({ status }: { status: Status }) {
   const s = status.status;
-  const { secrets, put } = useSecrets();
+  const { secrets, put, retry } = useSecrets();
+  const cards = s.status === "ready" ? connectionCards(s.data) : [];
+  const byOrder = useCardOrder(status.loads, () =>
+    [...cards].sort((a, b) => Number(a.state === "ok") - Number(b.state === "ok")).map((c) => c.id),
+  );
   if (s.status === "loading") {
     return (
       <div className="grid gap-3 sm:grid-cols-2" aria-hidden="true">
@@ -57,8 +79,8 @@ export function Connections({ status }: { status: Status }) {
   }
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      {connectionCards(s.data)
-        .sort((a, b) => Number(a.state === "ok") - Number(b.state === "ok"))
+      {[...cards]
+        .sort((a, b) => byOrder(a.id, b.id))
         .map((card) => {
           const spec = secretFor(card.id);
           return (
@@ -102,11 +124,17 @@ export function Connections({ status }: { status: Status }) {
                       put(state);
                       status.replace(spec.prefix, checks);
                     }}
+                    onRetry={retry}
                     spec={spec}
                     state={
-                      secrets === undefined
-                        ? undefined
-                        : (secrets[spec.id] ?? { id: spec.id, set: false, source: null })
+                      secrets === undefined || secrets === "error"
+                        ? secrets
+                        : (secrets[spec.id] ?? {
+                            id: spec.id,
+                            set: false,
+                            source: null,
+                            stored: false,
+                          })
                     }
                     title={card.title}
                   />

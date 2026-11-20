@@ -16,7 +16,7 @@ import {
   validateTeam,
 } from "@harnessd/shared";
 import { parse } from "smol-toml";
-import { applyTableKey } from "../config/edit.ts";
+import { applyTableKey, withFileLock } from "../config/edit.ts";
 import { loadConfig } from "../config/load.ts";
 import { applyTeam, type TeamChange, TeamEditError } from "../config/team.ts";
 import { EventStream, HttpError, type Route, type SendEvent } from "../server/router.ts";
@@ -310,9 +310,12 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
         throw new HttpError(400, "invalid_body", `The path must end in /${name}.`);
       }
     }
-    const text = applyHarnessBin(await readText(globalFile), harness, bin);
-    validateConfigText(text, "~/.harnessd/config.toml");
-    await writeAtomic(globalFile, text);
+    // The secret store edits the same file; the lock keeps either from losing the other.
+    await withFileLock(globalFile, async () => {
+      const text = applyHarnessBin(await readText(globalFile), harness, bin);
+      validateConfigText(text, "~/.harnessd/config.toml");
+      await writeAtomic(globalFile, text);
+    });
     return { bin };
   }
 

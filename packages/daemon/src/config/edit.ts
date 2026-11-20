@@ -47,3 +47,20 @@ export function applyTableKey(
     .replace(/\n+$/, "");
   return out === "" ? "" : `${out}\n`;
 }
+
+const locks = new Map<string, Promise<unknown>>();
+
+/**
+ * Runs read-modify-write tasks on one file one at a time, across every caller in this
+ * process (Settings → Harnesses and the secret store both edit the global config.toml).
+ */
+export function withFileLock<T>(path: string, task: () => Promise<T>): Promise<T> {
+  const last = locks.get(path) ?? Promise.resolve();
+  const next = last.then(task, task);
+  const tail = next.catch(() => undefined);
+  locks.set(path, tail);
+  void tail.then(() => {
+    if (locks.get(path) === tail) locks.delete(path);
+  });
+  return next;
+}

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import type { SecretSource } from "@harnessd/shared";
+import type { SecretReader } from "@harnessd/shared";
 import {
   LINEAR_ENDPOINT,
   LinearClient,
@@ -56,7 +56,7 @@ function replay(replies: Reply[]) {
   return { fetch: fakeFetch, sent, remaining: () => queue.length };
 }
 
-function secrets(value: string | undefined): SecretSource & { reads: string[] } {
+function secrets(value: string | undefined): SecretReader & { reads: string[] } {
   const reads: string[] = [];
   return {
     reads,
@@ -91,7 +91,7 @@ test("listReady pages through Ready issues, drops blocked ones and sorts by prio
     "MET-15 is blocked by MET-13",
   );
 
-  assert.deepEqual(source.reads, ["linear-api-key"]);
+  assert.deepEqual(source.reads, ["linear-api-key", "linear-api-key"], "read once per request");
   assert.equal(sent.length, 2);
   for (const req of sent) {
     assert.equal(req.url, LINEAR_ENDPOINT);
@@ -411,13 +411,29 @@ test("a missing API key fails before any request", async () => {
     await assert.rejects(linear.listReady({ teamId: TEAM_ID }), {
       name: "LinearError",
       code: "missing_key",
-      message: 'Linear API key not set. Run "harnessd secrets set linear-api-key".',
+      message:
+        "Linear API key not set. Paste it in Settings, Connections, Linear, or set LINEAR_API_KEY.",
     });
     assert.equal(fake.sent.length, 0);
   }
   assert.equal(
     MISSING_KEY_MESSAGE,
-    'Linear API key not set. Run "harnessd secrets set linear-api-key".',
+    "Linear API key not set. Paste it in Settings, Connections, Linear, or set LINEAR_API_KEY.",
+  );
+});
+
+test("the key is read on each request, so a replaced or removed key applies at once", async () => {
+  const fake = replay([{ fixture: "comment-create" }, { fixture: "comment-create" }]);
+  let key: string | undefined = "lin_api_first";
+  const linear = new LinearClient({ apiKey: async () => key, fetch: fake.fetch });
+  await linear.comment(MET12_ID, "a");
+  key = "lin_api_second";
+  await linear.comment(MET12_ID, "b");
+  key = undefined;
+  await assert.rejects(linear.comment(MET12_ID, "c"), { code: "missing_key" });
+  assert.deepEqual(
+    fake.sent.map((r) => r.headers.Authorization),
+    ["lin_api_first", "lin_api_second"],
   );
 });
 
@@ -428,7 +444,7 @@ test("a function key source is accepted", async () => {
   assert.equal(fake.sent[0]?.headers.Authorization, "lin_api_fn");
 });
 
-test("HTTP 401 and Linear auth errors map to an auth LinearError and drop the cached key", async () => {
+test("HTTP 401 and Linear auth errors map to an auth LinearError", async () => {
   const { linear, source } = client([
     { body: { errors: [{ message: "Unauthorized" }] }, status: 401 },
     { fixture: "error-auth", status: 400 },
@@ -442,7 +458,7 @@ test("HTTP 401 and Linear auth errors map to an auth LinearError and drop the ca
     return true;
   });
   await linear.comment(MET12_ID, "x");
-  assert.equal(source.reads.length, 3, "key is re-read after each auth failure");
+  assert.equal(source.reads.length, 3, "the key is read on each request");
 });
 
 test("GraphQL errors surface the user-presentable message", async () => {

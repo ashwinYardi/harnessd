@@ -71,8 +71,8 @@ test("GET /api/secrets says set and the source for each fixed id, never a value"
   try {
     assert.deepEqual((await s.get("/api/secrets")).body, {
       secrets: [
-        { id: "linear.api_key", set: false, source: null },
-        { id: "slack.webhook_url", set: true, source: "env" },
+        { id: "linear.api_key", set: false, source: null, stored: false },
+        { id: "slack.webhook_url", set: true, source: "env", stored: false },
       ],
     });
   } finally {
@@ -86,7 +86,7 @@ test("POST saves a value, re-runs that connection's checks and never echoes the 
     const saved = await s.post("/api/secrets/linear.api_key", { value: KEY });
     assert.equal(saved.status, 200);
     assert.deepEqual(saved.body, {
-      secret: { id: "linear.api_key", set: true, source: "saved" },
+      secret: { id: "linear.api_key", set: true, source: "saved", stored: true },
       checks: [{ id: "linear.key", state: "ok", detail: "accepted ***", fix: "" }],
     });
     assert.deepEqual(s.asked, [{ connectionsOnly: ["linear"] }]);
@@ -95,11 +95,21 @@ test("POST saves a value, re-runs that connection's checks and never echoes the 
     const ref = await s.post("/api/secrets/slack.webhook_url", {
       value: "op://Private/Slack/webhook",
     });
-    assert.deepEqual(ref.body.secret, { id: "slack.webhook_url", set: true, source: "1Password" });
+    assert.deepEqual(ref.body.secret, {
+      id: "slack.webhook_url",
+      set: true,
+      source: "1Password",
+      stored: true,
+    });
     assert.match(await readFile(join(s.globalDir, "config.toml"), "utf8"), /op:\/\/Private/);
 
     const removed = await s.post("/api/secrets/linear.api_key/remove", {});
-    assert.deepEqual(removed.body.secret, { id: "linear.api_key", set: false, source: null });
+    assert.deepEqual(removed.body.secret, {
+      id: "linear.api_key",
+      set: false,
+      source: null,
+      stored: false,
+    });
     assert.deepEqual(s.logs, [
       "settings: saved linear.api_key (saved)",
       "settings: saved slack.webhook_url (1Password)",

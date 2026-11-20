@@ -8,11 +8,14 @@ import { mergeChecks } from "../lib/secrets.ts";
 export function useStatus() {
   const [status, setStatus] = useState<Load<Check[]>>({ status: "loading" });
   const [checking, setChecking] = useState(false);
+  /** Counts full runs of the checks; a per-card replace does not count (MET-33). */
+  const [loads, setLoads] = useState(0);
   const load = useCallback(async (announce = false) => {
     setChecking(true);
     try {
       const { checks } = await readStatus();
       setStatus({ status: "ready", data: checks });
+      setLoads((n) => n + 1);
       if (announce) {
         const bad = checks.filter(isBlocking).length;
         toast.add(
@@ -44,7 +47,7 @@ export function useStatus() {
       s.status === "ready" ? { status: "ready", data: mergeChecks(s.data, prefix, fresh) } : s,
     );
   }, []);
-  return { status, checking, recheck, retry, replace };
+  return { status, checking, recheck, retry, replace, loads };
 }
 
 export type Status = ReturnType<typeof useStatus>;
