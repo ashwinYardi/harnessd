@@ -246,9 +246,12 @@ function fakeAdapter(
           finish: (status = "ok", error, text) => resolve(result(status, text, error)),
         });
       }
-      const events = (async function* (): AsyncGenerator<AdapterEvent> {
-        yield { type: "end", result: await promise };
-      })();
+      // Like a real adapter, each iteration replays the run from the start.
+      const events: AsyncIterable<AdapterEvent> = {
+        async *[Symbol.asyncIterator]() {
+          yield { type: "end", result: await promise };
+        },
+      };
       const cancel = async () => {
         resolve(result("cancelled", undefined, "cancelled"));
         await promise;
@@ -1621,4 +1624,91 @@ test("pause stops a real claude run within 10 s; the paused flag and the worktre
   await second.loop.idle();
   assert.equal(part.state, "In Review");
   assert.equal(existsSync(wtPath), false, "removed after the resumed run finished");
+});
+
+// --- snapshot (MET-18) -----------------------------------------------------
+
+/** Wraps an adapter so each run first reports a tool call and token use. */
+function chattyAdapter(inner: ReturnType<typeof fakeAdapter>) {
+  const adapter: HarnessAdapter = {
+    id: inner.adapter.id,
+    start(task, cwd) {
+      const run = inner.adapter.start(task, cwd);
+      const events: AsyncIterable<AdapterEvent> = {
+        async *[Symbol.asyncIterator]() {
+          yield { type: "tool", name: "Edit", summary: "src/app.ts" };
+          yield {
+            type: "usage",
+            tokens: { input: 1200, output: 300, cacheRead: 5000, cacheWrite: 0 },
+          };
+          yield* run.events;
+        },
+      };
+      return { ...run, events };
+    },
+  };
+  return { ...inner, adapter };
+}
+
+test("snapshot lists each run with its budget, tokens and latest action", async () => {
+  const seen: string[] = [];
+  const t = setup({
+    adapter: chattyAdapter(fakeAdapter()),
+    extra: {
+      clock: fakeClock(),
+      onAgentEvent: (run, event) => {
+        if (event.type === "tool") seen.push(`${run.issueKey} ${run.agent}: ${event.summary}`);
+      },
+    },
+  });
+  const parent = t.linear.add({ title: "Board", state: "In Progress" });
+  const part = t.linear.add({
+    title: "Board API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  assert.deepEqual(t.loop.snapshot().runs, [], "nothing runs before the first tick");
+
+  await t.loop.tick();
+  await settle();
+  const snap = t.loop.snapshot();
+  assert.equal(snap.lastPollAt, "2026-11-19T10:00:00.000Z");
+  assert.deepEqual(snap.runs, [
+    {
+      issueId: part.id,
+      issueKey: part.key,
+      title: "Board API",
+      agent: "backend",
+      role: "backend",
+      startedAt: "2026-11-19T10:00:00.000Z",
+      budgetMs: 30 * 60_000,
+      tokens: 1500,
+      lastAction: "Edit src/app.ts",
+      stopping: false,
+    },
+  ]);
+  assert.deepEqual(seen, [`${part.key} backend: src/app.ts`]);
+
+  t.adapter.pending[0]?.finish("ok");
+  await t.loop.idle();
+  assert.deepEqual(t.loop.snapshot().runs, []);
+});
+
+test("snapshot lists the PRs that wait for a human at the merge gate", async () => {
+  const t = setup();
+  const { parent, backend } = await approved(t);
+  assert.deepEqual(t.loop.snapshot().blocked, []);
+  t.gh.statuses[7] = { files: [{ path: "src/auth/token.ts", additions: 1, deletions: 0 }] };
+  await t.loop.tick();
+  assert.deepEqual(t.loop.snapshot().blocked, [
+    {
+      issueKey: backend.key,
+      parentKey: parent.key,
+      prUrl: "https://github.test/o/r/pull/7",
+      reason: "touches protected paths",
+    },
+  ]);
+  t.gh.statuses[7] = { ...t.gh.statuses[7], state: "MERGED" };
+  await t.loop.tick();
+  assert.deepEqual(t.loop.snapshot().blocked, [], "a human merged it");
 });

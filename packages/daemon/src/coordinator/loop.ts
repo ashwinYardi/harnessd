@@ -5,6 +5,7 @@
 // again. Linear is the source of truth; loop.json only remembers in-flight runs, paused
 // runs, failure counts and QA approvals waiting to merge.
 import {
+  type AdapterEvent,
   type AdapterRun,
   emptyTokenUsage,
   type HarnessAdapter,
@@ -111,6 +112,8 @@ export interface CoordinatorLoopOptions {
   /** Runs `qa.setup_command` and `qa.test_command` in QA worktrees. Default `sh -c`. */
   runCommand?: CommandRunner;
   log?: (line: string) => void;
+  /** Every event of every sub-issue run, for the UI's live log (MET-18). */
+  onAgentEvent?: (run: { issueKey: string; agent: string }, event: AdapterEvent) => void;
   /** Recorded as the owner of runs. Default this process. */
   pid?: number;
 }
@@ -131,6 +134,41 @@ interface LiveRun {
   abort?: AbortController;
   /** Settles once the run has finished and been recorded. */
   done: Promise<void>;
+  title: string;
+  budgetMs: number;
+  /** Input plus output tokens so far. */
+  tokens: number;
+  lastAction?: string;
+}
+
+/** A sub-issue run as the UI shows it (MET-18). */
+export interface RunActivity {
+  issueId: string;
+  issueKey: string;
+  title: string;
+  agent: string;
+  role: InFlightRun["role"];
+  startedAt: string;
+  budgetMs: number;
+  tokens: number;
+  lastAction?: string;
+  /** True while a pause stops the run. */
+  stopping: boolean;
+}
+
+/** A part whose PR waits for a human at the merge gate. */
+export interface BlockedPart {
+  issueKey: string;
+  parentKey: string;
+  prUrl: string;
+  reason: string;
+}
+
+/** What the loop knows now, for the UI. Linear stays the source of truth for issues. */
+export interface LoopSnapshot {
+  lastPollAt: string | null;
+  runs: RunActivity[];
+  blocked: BlockedPart[];
 }
 
 export interface TickReport {
@@ -165,6 +203,8 @@ export interface CoordinatorLoop {
   pause(): Promise<string[]>;
   /** Allows dispatch again and, once started, ticks now. The `paused` hook still decides each tick. */
   resume(): void;
+  /** The runs in flight in this process and the PRs that wait for a human. */
+  snapshot(): LoopSnapshot;
 }
 
 function message(error: unknown): string {
@@ -200,6 +240,18 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   let pausedNow = false;
   let watch: unknown;
   let checking = false;
+
+  /** Follows a run's events: its latest action and token use, and the UI's log. */
+  function follow(l: LiveRun, run: AdapterRun): void {
+    void (async () => {
+      for await (const event of run.events) {
+        if (event.type === "tool") l.lastAction = oneLine(`${event.name} ${event.summary}`);
+        else if (event.type === "text") l.lastAction = oneLine(event.text).slice(0, 200);
+        else if (event.type === "usage") l.tokens = event.tokens.input + event.tokens.output;
+        options.onAgentEvent?.({ issueKey: l.key, agent: l.entry.agent }, event);
+      }
+    })().catch((error) => log(`${l.key}: could not read run events: ${message(error)}`));
+  }
 
   function init(): Promise<LoopState> {
     ready ??= (async () => {
@@ -479,7 +531,17 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       (result) => finish(s, entry, result),
       (error) => fail(error),
     );
-    live.set(issue.id, { key: issue.key, entry, run, done });
+    const l: LiveRun = {
+      key: issue.key,
+      entry,
+      run,
+      done,
+      title: issue.title,
+      budgetMs: budget,
+      tokens: 0,
+    };
+    live.set(issue.id, l);
+    follow(l, run);
     syncWatch();
     // Paused while this run was starting: stop it like the others.
     if (pausedNow) void pauseRuns();
@@ -502,13 +564,22 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   ): void {
     const maxRounds = config.limits.qa_max_failures;
     const abort = new AbortController();
-    const l: LiveRun = { key: issue.key, entry, abort, done: Promise.resolve() };
+    const l: LiveRun = {
+      key: issue.key,
+      entry,
+      abort,
+      done: Promise.resolve(),
+      title: issue.title,
+      budgetMs: budget,
+      tokens: 0,
+    };
     // The QA agent's run is the live run while it lasts, so a pause cancels it.
     const qaAdapter: HarnessAdapter = {
       id: adapter.id,
       start(task, cwd) {
         const run = adapter.start(task, cwd);
         l.run = run;
+        follow(l, run);
         const clear = (): void => {
           if (l.run === run) delete l.run;
         };
@@ -880,6 +951,34 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     pause() {
       pausedNow = true;
       return pauseRuns();
+    },
+    snapshot() {
+      const runs = [...live.values()].map((l): RunActivity => {
+        const a: RunActivity = {
+          issueId: l.entry.issueId,
+          issueKey: l.key,
+          title: l.title,
+          agent: l.entry.agent,
+          role: l.entry.role,
+          startedAt: l.entry.startedAt,
+          budgetMs: l.budgetMs,
+          tokens: l.tokens,
+          stopping: l.entry.pausedAt !== undefined,
+        };
+        if (l.lastAction !== undefined) a.lastAction = l.lastAction;
+        return a;
+      });
+      const blocked = (state?.merges ?? []).flatMap((m) =>
+        m.prs
+          .filter((pr) => pr.needsHuman !== undefined && pr.mergedAt === undefined)
+          .map((pr) => ({
+            issueKey: pr.partKey,
+            parentKey: m.parentKey,
+            prUrl: pr.url,
+            reason: pr.needsHuman ?? "",
+          })),
+      );
+      return { lastPollAt: state?.lastPollAt ?? null, runs, blocked };
     },
     resume() {
       pausedNow = false;

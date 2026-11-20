@@ -14,9 +14,47 @@ export interface ApiRequest {
 export interface Route {
   method: HttpMethod;
   path: string;
-  /** Returns the JSON body of a 200; throws HttpError for anything else. */
+  /**
+   * Returns the JSON body of a 200, a RawBody or an EventStream; throws HttpError for
+   * anything else.
+   */
   handler: (request: ApiRequest) => unknown;
 }
+
+/** A 200 that is not JSON: a file of the built UI (D-024). */
+export class RawBody {
+  readonly contentType: string;
+  readonly body: string | Uint8Array;
+  readonly headers: Record<string, string>;
+
+  constructor(
+    contentType: string,
+    body: string | Uint8Array,
+    headers: Record<string, string> = {},
+  ) {
+    this.contentType = contentType;
+    this.body = body;
+    this.headers = headers;
+  }
+}
+
+/** Sends one server-sent event. `data` goes out as one line of JSON. */
+export type SendEvent = (event: string, data: unknown) => void;
+
+/**
+ * A 200 that stays open as server-sent events (D-024). `open` starts sending and returns
+ * the function that stops it, called when the client goes or the server closes.
+ */
+export class EventStream {
+  readonly open: (send: SendEvent) => () => void;
+
+  constructor(open: (send: SendEvent) => () => void) {
+    this.open = open;
+  }
+}
+
+/** A comment line on every open stream at this interval keeps proxies and clients awake. */
+export const STREAM_HEARTBEAT_MS = 15_000;
 
 /** An error the API reports as `{ error: code, message }` with this status. */
 export class HttpError extends Error {
@@ -83,12 +121,50 @@ function send(res: ServerResponse, status: number, body: unknown, headers = {}):
   res.end(JSON.stringify(body));
 }
 
+function openStream(
+  req: IncomingMessage,
+  res: ServerResponse,
+  stream: EventStream,
+  streams: Set<ServerResponse> | undefined,
+): void {
+  res.writeHead(200, {
+    "content-type": "text/event-stream",
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  res.write(": open\n\n");
+  const send: SendEvent = (event, data) => {
+    if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+  const heartbeat = setInterval(() => res.write(": ping\n\n"), STREAM_HEARTBEAT_MS);
+  heartbeat.unref();
+  streams?.add(res);
+  let stop: (() => void) | undefined;
+  const end = (): void => {
+    clearInterval(heartbeat);
+    streams?.delete(res);
+    stop?.();
+    stop = undefined;
+  };
+  req.on("close", end);
+  res.on("close", end);
+  stop = stream.open(send);
+}
+
+export interface RouterOptions {
+  /** Open event streams are added here, so a server close can end them. */
+  streams?: Set<ServerResponse>;
+}
+
 /**
- * A request listener over `routes`. Every response is JSON. Requests must name a
- * loopback Host, and POSTs must send `content-type: application/json`, so a web page
- * cannot trigger them cross-origin.
+ * A request listener over `routes`. Responses are JSON unless a route returns a RawBody
+ * or an EventStream. Requests must name a loopback Host, and POSTs must send
+ * `content-type: application/json`, so a web page cannot trigger them cross-origin.
  */
-export function createRouter(routes: readonly Route[]): RequestListener {
+export function createRouter(
+  routes: readonly Route[],
+  options: RouterOptions = {},
+): RequestListener {
   return (req, res) => {
     void handle(req, res).catch(() => {
       if (!res.headersSent) send(res, 500, { error: "internal_error", message: "internal error" });
@@ -118,7 +194,15 @@ export function createRouter(routes: readonly Route[]): RequestListener {
         }
         body = await readBody(req);
       }
-      send(res, 200, await route.handler({ method: route.method, path, body }));
+      const result = await route.handler({ method: route.method, path, body });
+      if (result instanceof EventStream) {
+        openStream(req, res, result, options.streams);
+      } else if (result instanceof RawBody) {
+        res.writeHead(200, { "content-type": result.contentType, ...result.headers });
+        res.end(result.body);
+      } else {
+        send(res, 200, result);
+      }
     } catch (error) {
       if (!(error instanceof HttpError)) throw error;
       send(res, error.status, { error: error.code, message: error.message });

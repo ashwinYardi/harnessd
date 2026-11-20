@@ -1,4 +1,5 @@
 import {
+  type BoardIssue,
   type Issue,
   LINEAR_API_KEY_SECRET,
   type LinkedIssue,
@@ -109,6 +110,12 @@ const issuesQuery = (
 }`;
 
 const READY_ISSUES_QUERY = issuesQuery("ReadyIssues");
+const BOARD_ISSUES_QUERY = `query BoardIssues($filter: IssueFilter!, $first: Int!, $after: String) {
+  issues(filter: $filter, first: $first, after: $after, orderBy: updatedAt) {
+    nodes { ${ISSUE_FIELDS} updatedAt }
+    pageInfo { hasNextPage endCursor }
+  }
+}`;
 const READY_CONTAINING_QUERY = issuesQuery("ReadyIssuesContaining");
 
 const ISSUE_CHILDREN_QUERY = `query IssueChildren($id: String!) {
@@ -182,6 +189,33 @@ export class LinearClient {
       .filter(({ issue }) => issue.blockedBy.length === 0)
       .sort(compareByPriority)
       .map(({ issue }) => issue);
+  }
+
+  /**
+   * The board (MET-18): every issue of the team and project that is not canceled, with
+   * Done only for the last 7 days. Urgent first, no priority last, then by key number.
+   */
+  async listBoard(options: ListReadyOptions): Promise<BoardIssue[]> {
+    const raws = await this.#listIssues(BOARD_ISSUES_QUERY, boardFilter(options));
+    return raws
+      .map((raw) => {
+        const issue = this.#remember(raw);
+        const item: BoardIssue = {
+          id: issue.id,
+          key: issue.key,
+          title: issue.title,
+          state: issue.state,
+          priority: issue.priority,
+          labels: issue.labels,
+          url: issue.url,
+          blockedBy: issue.blockedBy,
+          updatedAt: raw.updatedAt ?? raw.createdAt,
+        };
+        if (issue.size !== undefined) item.size = issue.size;
+        if (raw.parent?.identifier) item.parentKey = raw.parent.identifier;
+        return item;
+      })
+      .sort(compareBoard);
   }
 
   /**
@@ -476,6 +510,24 @@ export function readyFilter(options: ListReadyOptions): Record<string, unknown> 
     filter.project = { name: { eqIgnoreCase: options.projectName } };
   }
   return filter;
+}
+
+/** The board's filter: team and project, not canceled, Done only for the last 7 days. */
+export function boardFilter(options: ListReadyOptions): Record<string, unknown> {
+  const { state: _ready, ...scope } = readyFilter(options);
+  return {
+    ...scope,
+    state: { type: { neq: "canceled" } },
+    or: [{ state: { type: { neq: "completed" } } }, { completedAt: { gt: "-P7D" } }],
+  };
+}
+
+const keyNumber = (key: string): number => Number(key.slice(key.lastIndexOf("-") + 1)) || 0;
+
+/** Urgent (1) to low (4), then no priority (0); then by key number. */
+function compareBoard(a: BoardIssue, b: BoardIssue): number {
+  const rank = (p: number) => (p === 0 ? 5 : p);
+  return rank(a.priority) - rank(b.priority) || keyNumber(a.key) - keyNumber(b.key);
 }
 
 /** Retry-After as delta-seconds or an HTTP date, in ms. */

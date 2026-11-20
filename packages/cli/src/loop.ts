@@ -1,14 +1,18 @@
 // `harnessd run`: the autonomy loop in the foreground. See docs/LOOP.md.
 import { join, resolve } from "node:path";
 import {
+  agentsView,
   type CoordinatorLoop,
+  createBoardSource,
   createClaudeCodeAdapter,
   createCoordinatorLoop,
   createFileLoopStore,
   createFilePauseStore,
   createGhCli,
   createGitWorktrees,
+  createLogBuffer,
   createPauseController,
+  createUiApi,
   createVisibility,
   type Daemon,
   type DaemonInfo,
@@ -22,11 +26,13 @@ import {
   runStatus,
   type SlackFetch,
   startDaemon,
+  staticRoutes,
   statusRoutes,
   type Visibility,
   writeDaemonInfo,
 } from "@harnessd/daemon";
-import { ConfigError } from "@harnessd/shared";
+import { ConfigError, type MergedConfig } from "@harnessd/shared";
+import { UI_DIR } from "@harnessd/ui";
 import { type RunChecks, refusalLines, statusOptions } from "./doctor.ts";
 
 /** Read at the edge only; never written to disk or logs. */
@@ -82,6 +88,8 @@ export interface LoopIO {
   env?: NodeJS.ProcessEnv;
   /** Resolves when the loop should stop. Default: SIGINT or SIGTERM. */
   stopSignal?: () => Promise<string>;
+  /** The built UI. Default: the one in @harnessd/ui. */
+  uiDir?: string;
   /** Slack posts go through it. Default globalThis.fetch. */
   fetch?: SlackFetch;
   /** Runs the status checks (MET-27). Default: the real machine. */
@@ -129,12 +137,16 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   const globalDir = defaultGlobalDir(env);
 
   const pauseStore = createFilePauseStore(globalDir);
+  const logs = createLogBuffer();
   let loop: CoordinatorLoop;
+  let linear: LinearClient;
+  let config: MergedConfig;
+  let team: ListReadyOptions;
   let visibility: Visibility;
   let teamId: string | undefined;
   let port: number;
   try {
-    const config = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
+    config = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
     teamId = config.linear.team_id?.trim();
     if (!teamId) {
       io.err(
@@ -143,13 +155,17 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       return 1;
     }
     port = config.daemon.port;
-    const team: ListReadyOptions = { teamId };
+    team = { teamId };
     const project = config.linear.project?.trim();
     if (project) {
       if (UUID.test(project)) team.projectId = project;
       else team.projectName = project;
     }
-    const log = (line: string) => io.out(`${new Date().toISOString()} ${line}`);
+    linear = new LinearClient({ apiKey: async () => apiKey });
+    const log = (line: string) => {
+      io.out(`${new Date().toISOString()} ${line}`);
+      logs.push(line);
+    };
     visibility = createVisibility({
       env,
       slack: config.slack,
@@ -160,7 +176,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     });
     loop = createCoordinatorLoop({
       config,
-      linear: new LinearClient({ apiKey: async () => apiKey }),
+      linear,
       adapters: {
         "claude-code": createClaudeCodeAdapter({ permissionMode: parsed.permissionMode }),
       },
@@ -174,6 +190,15 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       paused: async () => (await pauseStore.read()).paused,
       notifier: visibility.notifier,
       log,
+      // The UI's live log shows each tool call (MET-18); stdout stays one line per step.
+      onAgentEvent: (run, event) => {
+        if (event.type === "tool") {
+          logs.push(`${event.name} ${event.summary}`, {
+            source: run.agent,
+            issueKey: run.issueKey,
+          });
+        }
+      },
     });
   } catch (e) {
     io.err(`harnessd run: ${e instanceof ConfigError ? e.message : (e as Error).message}`);
@@ -193,13 +218,19 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   }
 
   // The local API (docs/API.md), so `harnessd pause` and the UI reach this loop at once.
+  const pause = createPauseController({ store: pauseStore, loops: [loop] });
+  const ui = createUiApi({
+    board: createBoardSource({ read: () => linear.listBoard(team), loop: () => loop.snapshot() }),
+    agents: () => agentsView(config, loop.snapshot()),
+    logs,
+    pause,
+  });
   let daemon: Daemon;
+  let page: Awaited<ReturnType<typeof staticRoutes>>;
   try {
-    daemon = await startDaemon({
-      port,
-      pause: createPauseController({ store: pauseStore, loops: [loop] }),
-      routes: statusRoutes(() => checks({ ...options, servingPort: true })),
-    });
+    page = await staticRoutes(io.uiDir ?? UI_DIR);
+    const status = statusRoutes(() => checks({ ...options, servingPort: true }));
+    daemon = await startDaemon({ port, pause, routes: [...ui.routes, ...status, ...page] });
   } catch (e) {
     const busy = (e as NodeJS.ErrnoException).code === "EADDRINUSE";
     io.err(
@@ -216,7 +247,11 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   };
   try {
     await writeDaemonInfo(globalDir, info);
-    io.out(`harnessd run: API at ${daemon.url}`);
+    io.out(
+      page.length > 0
+        ? `harnessd run: UI and API at ${daemon.url}`
+        : `harnessd run: API at ${daemon.url} (UI not built)`,
+    );
     const pause = await pauseStore.read();
     if (pause.paused) io.out(pausedLine(pause.since, pause.reason));
     io.out(`harnessd run: ${visibility.status}`);
@@ -237,6 +272,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       await visibility.flush(SLACK_FLUSH_MS);
     }
   } finally {
+    ui.close();
     await daemon.close();
     await removeDaemonInfo(globalDir, info).catch(() => undefined);
   }
