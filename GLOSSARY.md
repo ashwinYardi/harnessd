@@ -15,3 +15,9 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 **Block**: work that stops until a human acts: Needs input, an escalation, two QA or gate failures, or a protected PR that waits for a human. _Avoid_: blocker, failure.
 
 **Daily summary**: one message a day, at the summary time, that lists the merges and blocks since the last daily summary and the work in progress. _Avoid_: digest, report, recap.
+
+**Workspace glossary**: the term notes in `<repo>/.harnessd/vault/glossary/`. The coordinator grill writes new terms there. _Avoid_: vault glossary file.
+
+**Draft decision record**: a decision record that the grill wrote to `<repo>/.harnessd/vault/decision-drafts/`, numbered `D-NNN` until a docs PR accepts it. _Avoid_: proposed ADR.
+
+**Precedent**: a call that is hard to reverse, surprising without context and the result of a real trade-off. Each precedent becomes a draft decision record.

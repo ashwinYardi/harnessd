@@ -243,7 +243,8 @@ function snippet(body: string, needles: readonly string[]): string {
   return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
 }
 
-function stripFrontmatter(text: string): string {
+/** The text after a leading `---` frontmatter block, or the whole text when it has none. */
+export function stripFrontmatter(text: string): string {
   const match = /^---\r?\n[\s\S]*?\r?\n---\s*(\r?\n|$)/.exec(text);
   return match ? text.slice(match[0].length) : text;
 }

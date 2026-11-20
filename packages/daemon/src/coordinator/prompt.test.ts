@@ -6,7 +6,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { ESCALATION_TRIGGERS, type Issue } from "@harnessd/shared";
-import { buildGrillPrompt, loadGrillContext } from "./prompt.ts";
+import {
+  BUILT_IN_GRILL_METHOD,
+  buildGrillPrompt,
+  loadGrillContext,
+  loadGrillMethod,
+} from "./prompt.ts";
 
 const issues = JSON.parse(
   readFileSync(new URL("./fixtures/issues.json", import.meta.url), "utf8"),
@@ -59,4 +64,84 @@ test("loadGrillContext reads docs/ and tolerates a repo without them", async () 
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("loadGrillMethod builds grill-with-docs from the installed skills, else the built-in", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-skills-"));
+  try {
+    const builtIn = await loadGrillMethod(join(dir, "missing"));
+    assert.equal(builtIn.source, "built-in");
+    assert.equal(builtIn.text, BUILT_IN_GRILL_METHOD);
+    assert.deepEqual(await loadGrillMethod(undefined), builtIn);
+
+    await mkdir(join(dir, "grilling"), { recursive: true });
+    await writeFile(
+      join(dir, "grilling", "SKILL.md"),
+      "---\nname: grilling\n---\n\nWork the frontier.\n",
+    );
+    assert.equal((await loadGrillMethod(dir)).source, "built-in", "needs both skills");
+
+    await mkdir(join(dir, "domain-modeling"), { recursive: true });
+    await writeFile(
+      join(dir, "domain-modeling", "SKILL.md"),
+      "---\nname: domain-modeling\n---\n# Domain Modeling\nUpdate GLOSSARY.md inline.\n",
+    );
+    const method = await loadGrillMethod(dir);
+    assert.equal(method.source, "skill pack");
+    assert.equal(
+      method.text,
+      "### grilling\nWork the frontier.\n\n### domain-modeling\n# Domain Modeling\nUpdate GLOSSARY.md inline.",
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("loadGrillContext reads GLOSSARY.md, the vault glossary and the method", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-grill-"));
+  try {
+    await writeFile(join(dir, "GLOSSARY.md"), "# Glossary\n\n**Pin**: a commit.\n");
+    await mkdir(join(dir, ".harnessd", "vault", "glossary"), { recursive: true });
+    await writeFile(
+      join(dir, ".harnessd", "vault", "glossary", "work-part.md"),
+      "---\nterm: Work part\n---\n\n**Work part**:\nA sub-issue.\n",
+    );
+    const context = await loadGrillContext(dir, { skillsDir: join(dir, "no-skills") });
+    assert.equal(context.glossary, "# Glossary\n\n**Pin**: a commit.");
+    assert.deepEqual(context.vaultGlossary, ["**Work part**:\nA sub-issue."]);
+    assert.equal(context.method?.source, "built-in");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("prompt runs grill-with-docs headless and asks for terms and precedents", () => {
+  const prompt = buildGrillPrompt({
+    issue: issues.clear as Issue,
+    context: {
+      spec: "# spec",
+      decisions: [],
+      glossary: "**Pin**: a commit.",
+      vaultGlossary: ["**Work part**:\nA sub-issue."],
+      method: { source: "skill pack", text: "### grilling\nWork the frontier." },
+    },
+  });
+  assert.match(prompt, /## Method: grill-with-docs \(skill pack\)/);
+  assert.match(prompt, /### grilling\nWork the frontier\./);
+  assert.match(prompt, /No human answers during the grill/);
+  assert.match(prompt, /## Glossary \(GLOSSARY\.md\)\n\*\*Pin\*\*: a commit\./);
+  assert.match(
+    prompt,
+    /## Workspace glossary \(\.harnessd\/vault\/glossary\/\)\n\*\*Work part\*\*/,
+  );
+  assert.match(prompt, /"terms": \[\{ "term": "string", "definition": "string", "avoid"/);
+  assert.match(prompt, /"precedents": \[\{ "title": "string", "decision": "string", "why"/);
+
+  const bare = buildGrillPrompt({
+    issue: issues.clear as Issue,
+    context: { spec: "", decisions: [] },
+  });
+  assert.match(bare, /## Method: grill-with-docs \(built-in\)/);
+  assert.ok(bare.includes(BUILT_IN_GRILL_METHOD));
+  assert.match(bare, /## Glossary \(GLOSSARY\.md\)\n\(none\)/);
 });

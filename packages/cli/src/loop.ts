@@ -162,6 +162,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       github: createGhCli({ cwd: repoDir }),
       store: createFileLoopStore(repoDir),
       repoDir,
+      skillsDir: join(globalDir, "skills"),
       team,
       intervalMs: parsed.intervalMs,
       paused: async () => (await pauseStore.read()).paused,

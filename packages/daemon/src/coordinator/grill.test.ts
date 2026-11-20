@@ -363,3 +363,135 @@ test("extractJson tolerates a json or bare fence", () => {
   assert.equal(extractJson('```\n{"a":1}\n```'), '{"a":1}');
   assert.equal(extractJson('  {"a":1}  '), '{"a":1}');
 });
+
+test("terms and precedents go to the vault sink and the comment", async () => {
+  const s = setup([
+    reply({
+      calls: [
+        { question: "Where do new terms go?", answer: "The workspace vault", basis: "D-017" },
+      ],
+      escalation: null,
+      terms: [
+        { term: "Work part", definition: "A sub-issue the split creates.", avoid: ["chunk"] },
+      ],
+      precedents: [
+        {
+          title: "Terms go to the workspace vault",
+          decision: "The loop never writes GLOSSARY.md.",
+          why: "GLOSSARY.md stays human-reviewed.",
+        },
+      ],
+    }),
+  ]);
+  const terms: unknown[] = [];
+  const drafts: unknown[] = [];
+  s.deps.decisions = {
+    write: s.decisions.write,
+    async term(t) {
+      terms.push(t);
+      return "glossary/work-part.md";
+    },
+    async draft(d) {
+      drafts.push(d);
+      return "decision-drafts/MET-40-terms.md";
+    },
+  };
+  const result = await grillIssue(issues.clear, s.deps);
+
+  assert.equal(result.outcome, "proceed");
+  assert.equal(s.notes.length, 1, "each call is still a decision note");
+  assert.deepEqual(terms, [
+    {
+      issue: "MET-40",
+      term: "Work part",
+      definition: "A sub-issue the split creates.",
+      avoid: ["chunk"],
+    },
+  ]);
+  assert.deepEqual(drafts, [
+    {
+      issue: "MET-40",
+      title: "Terms go to the workspace vault",
+      decision: "The loop never writes GLOSSARY.md.",
+      why: "GLOSSARY.md stays human-reviewed.",
+    },
+  ]);
+  assert.deepEqual(result.terms, [
+    { term: "Work part", definition: "A sub-issue the split creates.", avoid: ["chunk"] },
+  ]);
+  assert.equal(result.precedents?.length, 1);
+  const body = s.comments[0]?.body ?? "";
+  assert.match(
+    body,
+    /\*\*New terms\*\* \(workspace glossary\):\n- Work part: A sub-issue the split creates\./,
+  );
+  assert.match(
+    body,
+    /\*\*Draft decision records\*\* \(for a docs PR\):\n- Terms go to the workspace vault: The loop never writes GLOSSARY\.md\./,
+  );
+});
+
+test("a sink without term or draft still posts them in the comment", async () => {
+  const s = setup([
+    reply({
+      calls: [],
+      escalation: null,
+      terms: [{ term: "Frontier", definition: "Open questions whose prerequisites are settled." }],
+      precedents: [],
+    }),
+  ]);
+  const result = await grillIssue(issues.clear, s.deps);
+  assert.equal(result.outcome, "proceed");
+  assert.match(s.comments[0]?.body ?? "", /- Frontier: Open questions/);
+  assert.doesNotMatch(s.comments[0]?.body ?? "", /Draft decision records/);
+});
+
+test("parseGrillReply validates terms and precedents", () => {
+  const ok = parseGrillReply(
+    '{"calls":[],"escalation":null,"terms":[{"term":"T","definition":"D"}],"precedents":[]}',
+  );
+  assert.deepEqual(ok, {
+    ok: true,
+    calls: [],
+    escalation: null,
+    terms: [{ term: "T", definition: "D", avoid: [] }],
+    precedents: [],
+  });
+  const bad = (text: string) => {
+    const r = parseGrillReply(text);
+    assert.equal(r.ok, false, text);
+    return r.ok ? "" : r.error;
+  };
+  assert.match(bad('{"calls":[],"escalation":null,"terms":{}}'), /terms: expected an array/);
+  assert.match(
+    bad('{"calls":[],"escalation":null,"terms":[{"term":"T"}]}'),
+    /terms\[0\]\.definition/,
+  );
+  assert.match(
+    bad('{"calls":[],"escalation":null,"terms":[{"term":"T","definition":"D","avoid":"x"}]}'),
+    /terms\[0\]\.avoid: expected an array of non-empty strings/,
+  );
+  assert.match(
+    bad('{"calls":[],"escalation":null,"precedents":[{"title":"T","decision":"D"}]}'),
+    /precedents\[0\]\.why/,
+  );
+});
+
+test("a term or draft that already exists is not announced as new", async () => {
+  const s = setup([
+    reply({
+      calls: [],
+      escalation: null,
+      terms: [{ term: "Pin", definition: "A commit." }],
+      precedents: [{ title: "Old", decision: "D.", why: "W." }],
+    }),
+  ]);
+  s.deps.decisions = {
+    write: s.decisions.write,
+    term: async () => undefined,
+    draft: async () => undefined,
+  };
+  const result = await grillIssue(issues.clear, s.deps);
+  assert.equal(result.outcome, "proceed");
+  assert.doesNotMatch(s.comments[0]?.body ?? "", /New terms|Draft decision records/);
+});

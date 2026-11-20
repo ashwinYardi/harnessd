@@ -95,8 +95,10 @@ export interface CoordinatorLoopOptions {
   notifier?: Notifier;
   /** Default: the workspace vault. */
   decisions?: DecisionSink;
-  /** Default: loadGrillContext(repoDir), read once per tick that has issues to split. */
+  /** Default: loadGrillContext(repoDir, { skillsDir }), read once per tick that has issues to split. */
   context?: () => Promise<GrillContext>;
+  /** The installed skill pack (`~/.harnessd/skills`). The grill reads its method from it (D-022). */
+  skillsDir?: string;
   intervalMs?: number;
   /**
    * The pause flag (MET-15), read at the start of every tick and, while runs are in
@@ -178,7 +180,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   const clock = options.clock ?? systemClock;
   const notifier = options.notifier ?? new NullNotifier();
   const decisions = options.decisions ?? createFileDecisionSink(workspaceVaultDir(repoDir));
-  const loadContext = options.context ?? (() => loadGrillContext(repoDir));
+  const loadContext =
+    options.context ?? (() => loadGrillContext(repoDir, { skillsDir: options.skillsDir }));
   const log = options.log ?? (() => {});
   const pid = options.pid ?? process.pid;
   const intervalMs = options.intervalMs ?? DEFAULT_LOOP_INTERVAL_MS;
