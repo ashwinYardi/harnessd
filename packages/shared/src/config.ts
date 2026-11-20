@@ -42,6 +42,11 @@ export interface QaConfig {
   test_command: string;
 }
 
+export interface DaemonConfig {
+  /** Port of the local HTTP API on 127.0.0.1. 0 picks a free port. */
+  port: number;
+}
+
 export interface MergeConfig {
   /** Globs; a PR touching any of them waits for a human (D-013). */
   protected_paths: string[];
@@ -77,6 +82,7 @@ export interface Settings {
   slack: SlackConfig;
   merge: MergeConfig;
   qa: QaConfig;
+  daemon: DaemonConfig;
 }
 
 export type DeepPartial<T> = T extends readonly unknown[]
@@ -205,6 +211,7 @@ export const DEFAULT_SETTINGS: Settings = {
     setup_command: "pnpm install --frozen-lockfile --prefer-offline",
     test_command: "pnpm test",
   },
+  daemon: { port: 4747 },
 };
 
 /** The default team (D-010): every agent on Claude Code. */
@@ -309,6 +316,14 @@ class Checker {
     return value.map((item, i) => this.string(item, `${path}[${i}]`));
   }
 
+  /** A TCP port: an integer from 0 to 65535. */
+  port(value: unknown, path: string): number {
+    if (typeof value !== "number" || !Number.isInteger(value) || value < 0 || value > 65_535) {
+      this.fail(path, `expected a port from 0 to 65535, got ${describe(value)}`);
+    }
+    return value;
+  }
+
   /** A table of strings; empty strings are allowed (env values). */
   stringTable(value: unknown, path: string): Record<string, string> {
     const t = this.table(value, path);
@@ -366,7 +381,16 @@ export function parseAgentSettings(
 /** Validates a parsed config.toml. Unknown keys are errors, so typos never pass silently. */
 export function parseConfigFile(value: unknown, file: string): ConfigFile {
   const c = new Checker(file);
-  const root = c.table(value, "", ["limits", "linear", "slack", "merge", "qa", "agents", "mcp"]);
+  const root = c.table(value, "", [
+    "limits",
+    "linear",
+    "slack",
+    "merge",
+    "qa",
+    "daemon",
+    "agents",
+    "mcp",
+  ]);
   const out: ConfigFile = {};
 
   if (root.limits !== undefined) {
@@ -423,6 +447,11 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
       qa.setup_command = c.text(t.setup_command, "qa.setup_command");
     if (t.test_command !== undefined) qa.test_command = c.string(t.test_command, "qa.test_command");
     out.qa = qa;
+  }
+
+  if (root.daemon !== undefined) {
+    const t = c.table(root.daemon, "daemon", ["port"]);
+    out.daemon = t.port === undefined ? {} : { port: c.port(t.port, "daemon.port") };
   }
 
   if (root.agents !== undefined) {

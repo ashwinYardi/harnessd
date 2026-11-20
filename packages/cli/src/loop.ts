@@ -5,13 +5,20 @@ import {
   createClaudeCodeAdapter,
   createCoordinatorLoop,
   createFileLoopStore,
+  createFilePauseStore,
   createGhCli,
   createGitWorktrees,
+  createPauseController,
+  type Daemon,
+  type DaemonInfo,
   DEFAULT_LOOP_INTERVAL_MS,
   defaultGlobalDir,
   LinearClient,
   type ListReadyOptions,
   loadConfig,
+  removeDaemonInfo,
+  startDaemon,
+  writeDaemonInfo,
 } from "@harnessd/daemon";
 import { ConfigError } from "@harnessd/shared";
 
@@ -104,8 +111,10 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   const repoDir = resolve(io.cwd ?? process.cwd(), parsed.dir ?? ".");
   const globalDir = defaultGlobalDir(env);
 
+  const pauseStore = createFilePauseStore(globalDir);
   let loop: CoordinatorLoop;
   let teamId: string | undefined;
+  let port: number;
   try {
     const config = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
     teamId = config.linear.team_id?.trim();
@@ -115,6 +124,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       );
       return 1;
     }
+    port = config.daemon.port;
     const team: ListReadyOptions = { teamId };
     const project = config.linear.project?.trim();
     if (project) {
@@ -133,6 +143,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       repoDir,
       team,
       intervalMs: parsed.intervalMs,
+      paused: async () => (await pauseStore.read()).paused,
       log: (line) => io.out(`${new Date().toISOString()} ${line}`),
     });
   } catch (e) {
@@ -140,10 +151,65 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     return 1;
   }
 
+  // The local API (docs/API.md), so `harnessd pause` and the UI reach this loop at once.
+  let daemon: Daemon;
+  try {
+    daemon = await startDaemon({
+      port,
+      pause: createPauseController({ store: pauseStore, loops: [loop] }),
+    });
+  } catch (e) {
+    const busy = (e as NodeJS.ErrnoException).code === "EADDRINUSE";
+    io.err(
+      busy
+        ? `harnessd run: port ${port} is in use (another harnessd run?). Stop it or set daemon.port in .harnessd/config.toml.`
+        : `harnessd run: could not start the API: ${(e as Error).message}`,
+    );
+    return 1;
+  }
+  const info: DaemonInfo = {
+    url: daemon.url,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  };
+  try {
+    await writeDaemonInfo(globalDir, info);
+    io.out(`harnessd run: API at ${daemon.url}`);
+    const pause = await pauseStore.read();
+    if (pause.paused) io.out(pausedLine(pause.since, pause.reason));
+    return await drive(
+      loop,
+      parsed,
+      io,
+      `polling ${teamId} every ${parsed.intervalMs / 1000}s in ${repoDir}`,
+    );
+  } finally {
+    await daemon.close();
+    await removeDaemonInfo(globalDir, info).catch(() => undefined);
+  }
+}
+
+export function pausedLine(since: string | undefined, reason: string | undefined): string {
+  const when = since ? ` since ${since}` : "";
+  const why = reason ? ` (${reason})` : "";
+  return `harnessd run: paused${when}${why}. Run "harnessd resume" to dispatch again.`;
+}
+
+/** Runs one tick (`--once`) or polls until the stop signal. */
+async function drive(
+  loop: CoordinatorLoop,
+  parsed: RunArgs,
+  io: LoopIO,
+  polling: string,
+): Promise<number> {
   if (parsed.once) {
     try {
       const report = await loop.tick();
       await loop.idle();
+      if (report.paused) {
+        io.out("paused: nothing dispatched");
+        return 0;
+      }
       io.out(
         `split ${report.split.length}, dispatched ${report.dispatched.length}, ` +
           `escalated ${report.escalated.length}, re-queued ${report.requeued.length}`,
@@ -155,7 +221,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     }
   }
 
-  io.out(`harnessd run: polling ${teamId} every ${parsed.intervalMs / 1000}s in ${repoDir}`);
+  io.out(`harnessd run: ${polling}`);
   loop.start();
   const signal = await (io.stopSignal ?? untilSignal)();
   loop.stop();

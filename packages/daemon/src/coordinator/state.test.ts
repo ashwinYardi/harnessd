@@ -37,6 +37,18 @@ const state: LoopState = {
       pid: 7,
     },
   ],
+  interrupted: [
+    {
+      issueId: "id-2",
+      issueKey: "MET-42",
+      role: "frontend",
+      agent: "frontend",
+      worktree: "/wt/met-42",
+      branch: "met-42-ui",
+      interruptedAt: "2026-11-19T10:01:00.000Z",
+      reason: "paused",
+    },
+  ],
   attempts: { "id-1": 1 },
   qaFailures: { "parent-1": 1 },
   qaFeedback: { "id-1": { prUrl: "https://github.test/pull/7", failing: ["Works: no test"] } },
@@ -57,6 +69,7 @@ test("save writes loop.json atomically with a .gitignore, and load reads it back
   assert.deepEqual(loaded.inFlight, state.inFlight);
   assert.deepEqual(loaded.qaFailures, state.qaFailures);
   assert.deepEqual(loaded.qaFeedback, state.qaFeedback);
+  assert.deepEqual(loaded.interrupted, state.interrupted);
   const files = (await readdir(join(dir, ".harnessd", "state"))).sort();
   assert.deepEqual(files, [".gitignore", "loop.json"], "no tmp files left behind");
   assert.equal(await readFile(join(dir, ".harnessd", "state", ".gitignore"), "utf8"), "*\n");
@@ -77,7 +90,8 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
   const parsed = parseLoopState(
     JSON.stringify({
       lastPollAt: 5,
-      inFlight: [state.inFlight[0], { issueId: "x" }],
+      inFlight: [state.inFlight[0], { issueId: "x" }, { ...state.inFlight[0], pausedAt: 3 }],
+      interrupted: [state.interrupted[0], { ...state.interrupted[0], reason: "crash" }],
       attempts: { a: 1, b: 0, c: "2", d: 1.5 },
       qaFailures: { p: 1, q: -1 },
       qaFeedback: { a: { failing: ["x", 3], reviewUrl: "u" }, b: { failing: "x" }, c: null },
@@ -87,6 +101,7 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
     version: 1,
     lastPollAt: null,
     inFlight: state.inFlight,
+    interrupted: state.interrupted,
     attempts: { a: 1 },
     qaFailures: { p: 1 },
     qaFeedback: { a: { failing: ["x"], reviewUrl: "u" } },
@@ -96,5 +111,6 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
     emptyLoopState(),
     "a file from before QA still loads",
   );
+  assert.deepEqual(parseLoopState('{"inFlight":[]}').interrupted, [], "MET-12 files still load");
   assert.throws(() => parseLoopState("[]"), /no inFlight array/);
 });

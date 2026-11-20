@@ -17,12 +17,19 @@ import {
   type Task,
   type WorkflowStateName,
 } from "@harnessd/shared";
+import { createClaudeCodeAdapter } from "../adapters/claude-code.ts";
 import { mergeLayers } from "../config/merge.ts";
+import { createFilePauseStore, createPauseController } from "../control/pause.ts";
 import type { GitHub, PullRequest, ReviewInput } from "../github/client.ts";
 import type { CreateSubIssueInput, ListReadyOptions } from "../linear/client.ts";
 import { parseLinkedIssue, type RawIssue } from "../linear/parse.ts";
 import { createGitWorktrees, type TaskWorktrees, type Worktree } from "../worktrees/index.ts";
-import { type CoordinatorLoopOptions, createCoordinatorLoop, type LoopLinear } from "./loop.ts";
+import {
+  type CoordinatorLoopOptions,
+  createCoordinatorLoop,
+  type LoopLinear,
+  RESUMED_RUN_NOTE,
+} from "./loop.ts";
 import { partMarker, readPartMarker } from "./split.ts";
 import { createFileLoopStore, emptyLoopState, type LoopState, type LoopStore } from "./state.ts";
 
@@ -235,7 +242,11 @@ function fakeAdapter(
       const events = (async function* (): AsyncGenerator<AdapterEvent> {
         yield { type: "end", result: await promise };
       })();
-      return { events, result: promise, cancel: async () => {} };
+      const cancel = async () => {
+        resolve(result("cancelled", undefined, "cancelled"));
+        await promise;
+      };
+      return { events, result: promise, cancel };
     },
   };
   return { adapter, tasks, pending, runs: () => tasks.filter((t) => /^MET-/.test(t.id)) };
@@ -907,4 +918,407 @@ test("a restart re-queues runs left in loop.json, cleans their worktrees and cou
   const final = JSON.parse(await readFile(join(repo, ".harnessd/state/loop.json"), "utf8"));
   assert.deepEqual(final.inFlight, []);
   assert.deepEqual(final.attempts, {});
+});
+
+// --- pause (MET-15) ----------------------------------------------------------
+
+function twoParts(linear: FakeLinear): [FakeIssue, FakeIssue] {
+  const parent = linear.add({ title: "P", state: "In Progress" });
+  const a = linear.add({
+    title: "API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const b = linear.add({
+    title: "UI",
+    parentId: parent.id,
+    description: `${partMarker("frontend")}\n**Size**: S`,
+  });
+  return [a, b];
+}
+
+function fakeClock() {
+  const timers: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+  return {
+    timers,
+    now: () => new Date("2026-11-19T10:00:00.000Z"),
+    setInterval(fn: () => void, ms: number) {
+      const timer = { fn, ms, cleared: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearInterval(handle: unknown) {
+      (handle as { cleared: boolean }).cleared = true;
+    },
+  };
+}
+
+test("pause cancels every run, keeps the worktrees and counts no attempt; resume reuses them", async () => {
+  const t = setup();
+  const [a, b] = twoParts(t.linear);
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key, b.key]);
+
+  assert.deepEqual(await t.loop.pause(), [a.key, b.key]);
+  assert.deepEqual(t.loop.running(), []);
+  assert.deepEqual(t.wt.removed, [], "worktrees kept for inspection");
+  for (const part of [a, b]) {
+    assert.equal(part.state, "Ready");
+    assert.ok(
+      t.linear.comments.some(
+        (c) =>
+          c.key === part.key &&
+          c.body === `**harnessd**: Paused by harnessd pause; worktree kept at /wt/${part.key}.`,
+      ),
+    );
+  }
+  assert.deepEqual(t.memory.state.inFlight, []);
+  assert.deepEqual(t.memory.state.attempts, {});
+  assert.deepEqual(
+    t.memory.state.interrupted.map((e) => [e.issueKey, e.worktree, e.reason]),
+    [
+      [a.key, `/wt/${a.key}`, "paused"],
+      [b.key, `/wt/${b.key}`, "paused"],
+    ],
+  );
+
+  const paused = await t.loop.tick();
+  assert.equal(paused.paused, true);
+  assert.deepEqual(paused.dispatched, [], "nothing dispatched while paused");
+
+  t.loop.resume();
+  const resumed = await t.loop.tick();
+  assert.equal(resumed.paused, false);
+  assert.deepEqual(resumed.dispatched, [a.key, b.key]);
+  const reruns = t.adapter.runs().slice(2);
+  assert.deepEqual(
+    reruns.map((r) => r.id),
+    [`${a.key}-1`, `${b.key}-1`],
+    "no attempt counted",
+  );
+  assert.ok(reruns.every((r) => r.prompt.endsWith(RESUMED_RUN_NOTE)));
+  assert.deepEqual(t.wt.created, [a.key, b.key, a.key, b.key]);
+  assert.deepEqual(t.memory.state.interrupted, []);
+  for (const run of t.adapter.pending.slice(2)) run.finish("ok");
+  await t.loop.idle();
+  assert.equal(a.state, "In Review");
+});
+
+test("a run that finishes ok while the pause lands is not interrupted", async () => {
+  const t = setup();
+  const [a, b] = twoParts(t.linear);
+  await t.loop.tick();
+  const pausing = t.loop.pause();
+  t.adapter.pending[0]?.finish("ok");
+  await pausing;
+  assert.equal(a.state, "In Review");
+  assert.deepEqual(t.wt.removed, [`/wt/${a.key}`]);
+  assert.equal(b.state, "Ready");
+  assert.deepEqual(
+    t.memory.state.interrupted.map((e) => e.issueKey),
+    [b.key],
+  );
+});
+
+test("a pause flag written with no daemon stops runs at the next watch check", async () => {
+  let flag = false;
+  const clock = fakeClock();
+  const t = setup({ extra: { clock, paused: () => flag } });
+  const [a, b] = twoParts(t.linear);
+  await t.loop.tick();
+  const watches = clock.timers.filter((x) => !x.cleared);
+  assert.equal(watches.length, 1, "one watch while runs are in flight");
+  const watch = watches[0];
+  assert.ok(watch !== undefined && watch.ms <= 2_000, "re-read at least every 2 s");
+
+  watch.fn();
+  await settle();
+  assert.equal(t.loop.running().length, 2, "still running while the flag is clear");
+
+  flag = true;
+  watch.fn();
+  await t.loop.idle();
+  assert.deepEqual(t.loop.running(), []);
+  assert.equal(a.state, "Ready");
+  assert.equal(b.state, "Ready");
+  assert.deepEqual(t.wt.removed, []);
+  assert.equal(t.memory.state.interrupted.length, 2);
+  assert.equal(watch.cleared, true, "no watch once nothing runs");
+  assert.equal((await t.loop.tick()).paused, true);
+  assert.equal(t.adapter.runs().length, 2);
+});
+
+test("pausing during a QA run cancels it: no review, no QA failure, the worktree is kept", async () => {
+  const t = setup();
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  const path = `/wt/${qa.key}-sha7`;
+  assert.equal(t.adapter.pending.length, 1, "the QA agent is running");
+
+  assert.deepEqual(await t.loop.pause(), [qa.key]);
+  assert.deepEqual(t.loop.running(), []);
+  assert.equal(t.gh.reviews.length, 0, "no review is posted");
+  assert.deepEqual(t.memory.state.qaFailures, {}, "no QA failure counted");
+  assert.deepEqual(t.memory.state.qaFeedback, {});
+  assert.deepEqual(t.wt.removed, [], "the QA worktree is kept");
+  assert.equal(qa.state, "Ready");
+  assert.equal(backend.state, "In Review", "the part is not sent back");
+  assert.equal(parent.state, "In Progress");
+  assert.ok(
+    t.linear.comments.some(
+      (c) =>
+        c.key === qa.key &&
+        c.body === `**harnessd**: Paused by harnessd pause; worktree kept at ${path}.`,
+    ),
+  );
+  assert.deepEqual(t.memory.state.inFlight, []);
+  assert.deepEqual(
+    t.memory.state.interrupted.map((e) => [e.issueKey, e.worktree, e.reason]),
+    [[qa.key, path, "paused"]],
+  );
+  assert.equal((await t.loop.tick()).paused, true);
+  assert.equal(t.adapter.runs().length, 1, "nothing dispatched while paused");
+
+  // Resume: QA checks the PR out afresh in the same round and approves.
+  t.loop.resume();
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  assert.deepEqual(t.wt.removed, [path], "the kept worktree is cleared before the new checkout");
+  assert.deepEqual(t.memory.state.interrupted, []);
+  assert.match(t.adapter.runs().at(-1)?.id ?? "", /-qa-1-pr7$/, "still round 1");
+  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+  assert.equal(t.gh.reviews.length, 1);
+  assert.equal(t.gh.reviews[0]?.event, "APPROVE");
+  assert.equal(qa.state, "In Review");
+});
+
+test("pausing while QA runs the tests stops them and starts no QA agent", async () => {
+  const signals: AbortSignal[] = [];
+  const t = setup({
+    extra: {
+      runCommand: (_command, _cwd, _ms, signal) =>
+        new Promise((resolve) => {
+          if (signal !== undefined) signals.push(signal);
+          signal?.addEventListener("abort", () =>
+            resolve({ exitCode: null, timedOut: false, output: "killed" }),
+          );
+        }),
+    },
+  });
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+  await t.loop.tick();
+  await settle();
+  assert.equal(signals.length, 1, "the setup command is running");
+
+  assert.deepEqual(await t.loop.pause(), [qa.key]);
+  assert.equal(signals[0]?.aborted, true);
+  assert.equal(signals.length, 1, "the test command never starts");
+  assert.equal(t.adapter.runs().length, 0, "no QA agent run");
+  assert.equal(t.gh.reviews.length, 0);
+  assert.equal(t.memory.state.qaFailures[parent.id], undefined);
+  assert.equal(qa.state, "Ready");
+  assert.equal(backend.state, "In Review");
+  assert.deepEqual(
+    t.memory.state.interrupted.map((e) => e.worktree),
+    [`/wt/${qa.key}-sha7`],
+  );
+});
+
+test("a part sent back by QA and then paused resumes with both the review and the resumed note", async () => {
+  const state = emptyLoopState();
+  const t0 = new FakeLinear();
+  const [a] = twoParts(t0);
+  state.qaFeedback[a.id] = {
+    prUrl: "https://github.test/o/r/pull/7",
+    failing: ["Has tests: none"],
+  };
+  const t = setup({ linear: t0, store: memoryStore(state) });
+  await t.loop.tick();
+  await t.loop.pause();
+  t.loop.resume();
+  await t.loop.tick();
+  const rerun = t.adapter.runs().find((r, i) => i >= 2 && r.id === `${a.key}-1`);
+  assert.match(rerun?.prompt ?? "", /## QA requested changes/);
+  assert.match(rerun?.prompt ?? "", /Has tests: none/);
+  assert.ok(rerun?.prompt.endsWith(RESUMED_RUN_NOTE));
+});
+
+test("a tick that finds the flag set cancels what still runs", async () => {
+  let flag = false;
+  const t = setup({ extra: { paused: () => flag } });
+  const [a] = twoParts(t.linear);
+  await t.loop.tick();
+  flag = true;
+  const report = await t.loop.tick();
+  assert.equal(report.paused, true);
+  assert.deepEqual(t.loop.running(), []);
+  assert.equal(a.state, "Ready");
+  assert.deepEqual(t.wt.removed, []);
+});
+
+test("a pause cancels grill runs and skips the split", async () => {
+  let paused = false;
+  const grills: Array<() => void> = [];
+  const adapter: HarnessAdapter = {
+    id: "claude-code",
+    start() {
+      let resolve: (r: RunResult) => void = () => {};
+      const result = new Promise<RunResult>((r) => {
+        resolve = r;
+      });
+      const cancelled: RunResult = {
+        status: "cancelled",
+        exitCode: null,
+        durationMs: 1,
+        tokens: emptyTokenUsage(),
+        error: "cancelled",
+      };
+      grills.push(() => resolve(cancelled));
+      const events = (async function* (): AsyncGenerator<AdapterEvent> {
+        yield { type: "end", result: await result };
+      })();
+      return {
+        events,
+        result,
+        cancel: async () => {
+          resolve(cancelled);
+          await result;
+        },
+      };
+    },
+  };
+  const t = setup({ extra: { adapters: { "claude-code": adapter }, paused: () => paused } });
+  const issue = t.linear.add({ title: "Needs a grill", description: BODY("S") });
+  const tick = t.loop.tick();
+  while (grills.length === 0) await settle();
+  paused = true;
+  assert.deepEqual(await t.loop.pause(), []);
+  const report = await tick;
+  assert.equal(report.paused, true);
+  assert.deepEqual(report.split, []);
+  assert.equal(t.linear.children(issue).length, 0, "no fallback split from a cancelled run");
+  assert.equal(issue.state, "Ready");
+});
+
+test("a restart after a pause that was not yet recorded keeps the worktree", async () => {
+  const linear = new FakeLinear();
+  const [a] = twoParts(linear);
+  a.state = "In Progress";
+  const store = memoryStore({
+    ...emptyLoopState(),
+    inFlight: [
+      {
+        issueId: a.id,
+        issueKey: a.key,
+        role: "backend",
+        agent: "backend",
+        worktree: `/wt/${a.key}`,
+        branch: a.key.toLowerCase(),
+        startedAt: "2026-11-19T09:00:00.000Z",
+        pid: 1,
+        pausedAt: "2026-11-19T09:30:00.000Z",
+      },
+    ],
+  });
+  let paused = true;
+  const t = setup({ linear, store, extra: { paused: () => paused } });
+  const report = await t.loop.tick();
+  assert.deepEqual(report.requeued, [a.key]);
+  assert.deepEqual(t.wt.removed, []);
+  assert.equal(a.state, "Ready");
+  assert.deepEqual(
+    store.state.interrupted.map((e) => [e.issueKey, e.interruptedAt]),
+    [[a.key, "2026-11-19T09:30:00.000Z"]],
+  );
+  paused = false;
+  assert.ok((await t.loop.tick()).dispatched.includes(a.key));
+  assert.ok(t.adapter.runs()[0]?.prompt.endsWith(RESUMED_RUN_NOTE));
+});
+
+test("pause stops a real claude run within 10 s; the paused flag and the worktree survive a restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-pause-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  const home = join(root, "home");
+  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  await writeFile(join(repo, "README.md"), "hi\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+  const worktrees = createGitWorktrees({ repoDir: repo, root: join(root, "worktrees") });
+
+  const fake = join(import.meta.dirname, "../../test/fixtures/fake-claude.mjs");
+  const record = join(root, "record.json");
+  let mode = "hang-stubborn"; // ignores SIGTERM: only the SIGKILL after the grace stops it
+  const prompts: string[] = [];
+  const adapter: HarnessAdapter = {
+    id: "claude-code",
+    start(task, cwd) {
+      prompts.push(task.prompt);
+      return createClaudeCodeAdapter({
+        bin: fake,
+        killGraceMs: 500,
+        env: { FAKE_CLAUDE_MODE: mode, FAKE_CLAUDE_RECORD: record },
+      }).start(task, cwd);
+    },
+  };
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress" });
+  const part = linear.add({
+    title: "Long job",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+
+  const pauseStore = createFilePauseStore(home);
+  const make = () =>
+    setup({
+      linear,
+      worktrees,
+      store: createFileLoopStore(repo),
+      extra: {
+        adapters: { "claude-code": adapter },
+        paused: async () => (await createFilePauseStore(home).read()).paused,
+      },
+    });
+  const first = make();
+  const control = createPauseController({ store: pauseStore, loops: [first.loop] });
+  assert.deepEqual((await first.loop.tick()).dispatched, [part.key]);
+  while (!existsSync(record) || !(await readFile(record, "utf8")).includes("grandchildPid")) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  const started = Date.now();
+  const result = await control.pause("deploy freeze");
+  const took = Date.now() - started;
+  assert.ok(took < 10_000, `took ${took}ms`);
+  assert.equal(result.paused, true);
+  assert.equal(result.reason, "deploy freeze");
+  assert.equal(result.cancelled, 1);
+  assert.deepEqual(first.loop.running(), []);
+  const saved = JSON.parse(await readFile(join(repo, ".harnessd/state/loop.json"), "utf8"));
+  assert.deepEqual(saved.inFlight, []);
+  assert.deepEqual(saved.attempts, {});
+  const wtPath: string = saved.interrupted[0].worktree;
+  assert.ok(existsSync(join(wtPath, "README.md")), "worktree kept");
+  assert.equal(part.state, "Ready");
+  assert.match(linear.comments.at(-1)?.body ?? "", /Paused by harnessd pause; worktree kept at /);
+
+  // The daemon stops and a new one starts: still paused, and recovery keeps the worktree.
+  const second = make();
+  const report = await second.loop.tick();
+  assert.equal(report.paused, true);
+  assert.deepEqual(report.dispatched, []);
+  assert.deepEqual(report.requeued, []);
+  assert.ok(existsSync(join(wtPath, "README.md")), "restart recovery kept the worktree");
+
+  await pauseStore.resume();
+  mode = "ok";
+  assert.deepEqual((await second.loop.tick()).dispatched, [part.key]);
+  assert.ok(prompts.at(-1)?.endsWith(RESUMED_RUN_NOTE), "the run picks up the kept worktree");
+  await second.loop.idle();
+  assert.equal(part.state, "In Review");
+  assert.equal(existsSync(wtPath), false, "removed after the resumed run finished");
 });

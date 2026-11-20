@@ -18,6 +18,7 @@ test("parseConfigFile accepts a full config", () => {
     slack: { channel: "#ops" },
     merge: { protected_paths: ["infra/**"] },
     qa: { setup_command: "", test_command: "make test" },
+    daemon: { port: 4800 },
     agents: {
       backend: {
         role: "backend",
@@ -53,7 +54,7 @@ test("unknown keys are rejected with their path", () => {
   );
   rejects(
     { colour: "red" },
-    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, agents, mcp`,
+    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, daemon, agents, mcp`,
   );
   rejects(
     { limits: { budget_minutes: { L: 300 } } },
@@ -69,6 +70,14 @@ test("wrong types are rejected with their path", () => {
   rejects(
     { limits: { budget_minutes: { S: 1.5 } } },
     `${FILE}: limits.budget_minutes.S: expected an integer >= 1, got 1.5`,
+  );
+  rejects(
+    { daemon: { port: 70_000 } },
+    `${FILE}: daemon.port: expected a port from 0 to 65535, got 70000`,
+  );
+  rejects(
+    { daemon: { port: "80" } },
+    `${FILE}: daemon.port: expected a port from 0 to 65535, got "80"`,
   );
   rejects({ slack: "#x" }, `${FILE}: slack: expected a table, got "#x"`);
   rejects({ qa: { test_command: "" } }, `${FILE}: qa.test_command: expected a non-empty string`);

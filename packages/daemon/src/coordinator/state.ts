@@ -18,6 +18,20 @@ export interface InFlightRun {
   startedAt: string;
   /** The daemon process that started the run. */
   pid: number;
+  /** Set when `harnessd pause` cancelled the run: its worktree is kept (MET-15). */
+  pausedAt?: string;
+}
+
+/** A run `harnessd pause` cancelled. Its worktree is kept until the sub-issue runs again. */
+export interface InterruptedRun {
+  issueId: string;
+  issueKey: string;
+  role: AgentRole;
+  agent: string;
+  worktree: string;
+  branch: string;
+  interruptedAt: string;
+  reason: "paused";
 }
 
 /** What QA asked a part to fix; its next run's prompt carries it. */
@@ -35,6 +49,8 @@ export interface LoopState {
   /** ISO time of the last poll, null before the first. */
   lastPollAt: string | null;
   inFlight: InFlightRun[];
+  /** Runs cancelled by a pause, with the worktree kept for inspection. */
+  interrupted: InterruptedRun[];
   /** Failed runs per sub-issue id (D-014: one retry, then Needs input). */
   attempts: Record<string, number>;
   /** Failed QA rounds per parent issue id (D-014: the second one escalates). */
@@ -48,6 +64,7 @@ export function emptyLoopState(): LoopState {
     version: 1,
     lastPollAt: null,
     inFlight: [],
+    interrupted: [],
     attempts: {},
     qaFailures: {},
     qaFeedback: {},
@@ -76,7 +93,24 @@ function isRun(value: unknown): value is InFlightRun {
     typeof r.worktree === "string" &&
     typeof r.branch === "string" &&
     typeof r.startedAt === "string" &&
-    typeof r.pid === "number"
+    typeof r.pid === "number" &&
+    (r.pausedAt === undefined || typeof r.pausedAt === "string")
+  );
+}
+
+function isInterrupted(value: unknown): value is InterruptedRun {
+  const r = value as Partial<InterruptedRun> | null;
+  return (
+    typeof r === "object" &&
+    r !== null &&
+    typeof r.issueId === "string" &&
+    typeof r.issueKey === "string" &&
+    typeof r.role === "string" &&
+    typeof r.agent === "string" &&
+    typeof r.worktree === "string" &&
+    typeof r.branch === "string" &&
+    typeof r.interruptedAt === "string" &&
+    r.reason === "paused"
   );
 }
 
@@ -113,6 +147,7 @@ export function parseLoopState(text: string): LoopState {
     version: 1,
     lastPollAt: typeof raw.lastPollAt === "string" ? raw.lastPollAt : null,
     inFlight: raw.inFlight.filter(isRun),
+    interrupted: Array.isArray(raw.interrupted) ? raw.interrupted.filter(isInterrupted) : [],
     attempts: counts(raw.attempts),
     qaFailures: counts(raw.qaFailures),
     qaFeedback: feedback(raw.qaFeedback),

@@ -3,6 +3,7 @@ import type { Readable, Writable } from "node:stream";
 import { defaultGlobalDir, findRepoRoot, serveMemory, syncRepo, vaultDirs } from "@harnessd/daemon";
 import { ConfigError, VERSION } from "@harnessd/shared";
 import { runLoop } from "./loop.ts";
+import { runPause, runResume } from "./pause.ts";
 
 export interface CliIO {
   out: (line: string) => void;
@@ -25,6 +26,9 @@ Commands:
   run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
                Run the coordinator loop: split Ready issues and dispatch agents.
                Needs LINEAR_API_KEY and linear.team_id (docs/LOOP.md)
+  pause [--reason <text>]
+               Stop every agent in every workspace; worktrees are kept
+  resume       Let the loop dispatch again
   mcp memory [--workspace <dir>]
                Serve the memory vaults over MCP on stdio (sync registers it)
   version      Print the version
@@ -84,6 +88,10 @@ export async function run(argv: readonly string[], io: CliIO): Promise<number> {
       return mcp(rest, io);
     case "run":
       return runLoop(rest, io);
+    case "pause":
+      return runPause(rest, io);
+    case "resume":
+      return runResume(rest, io);
     case "version":
     case "--version":
     case "-v":
