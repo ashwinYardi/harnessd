@@ -1,0 +1,7 @@
+# harnessd builds harnessd (MET-20). Secrets stay in the environment, never here.
+[linear]
+team_id = "MET"
+project = "harnessd"
+
+[limits]
+max_concurrent = 2

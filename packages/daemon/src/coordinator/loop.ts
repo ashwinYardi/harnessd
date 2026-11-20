@@ -97,7 +97,7 @@ export interface CoordinatorLoopOptions {
   decisions?: DecisionSink;
   /** Default: loadGrillContext(repoDir, { skillsDir }), read once per tick that has issues to split. */
   context?: () => Promise<GrillContext>;
-  /** The installed skill pack (`~/.harnessd/skills`). The grill reads its method from it (D-021). */
+  /** The installed skill pack (`~/.harnessd/skills`). The grill reads its method from it (D-022). */
   skillsDir?: string;
   intervalMs?: number;
   /**
@@ -281,9 +281,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     await safely(`move ${target.key} to Needs input`, () =>
       linear.moveTo(target.id, "Needs input"),
     );
-    const url = target.url ? ` ${target.url}` : "";
-    await safely("send the ping", () =>
-      notifier.notify(`${target.key} needs input (${reason}): ${summary}${url}`),
+    const issue = target.url ? { key: target.key, url: target.url } : { key: target.key };
+    await safely("send the notice", () =>
+      notifier.notify({ kind: "needs_input", issue, prs: [], reason, detail: summary }),
     );
   }
 
@@ -341,7 +341,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       if (failures >= MAX_RUN_ATTEMPTS) {
         delete s.attempts[id];
         await escalate(
-          { id, key: entry.issueKey },
+          { id, key: entry.issueKey, ...(entry.issueUrl ? { url: entry.issueUrl } : {}) },
           "run failed",
           `the ${entry.agent} run failed twice (${why})`,
           `**harnessd**: the ${entry.agent} run failed twice (${why}), so this needs a human (D-014).`,
@@ -400,6 +400,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const entry: InFlightRun = {
       issueId: issue.id,
       issueKey: issue.key,
+      issueUrl: issue.url,
       role,
       agent: agentName,
       worktree: "",

@@ -1,6 +1,6 @@
 # Coordinator: the grill
 
-Before any work starts, the coordinator grills each picked issue itself (SPEC "Autonomy loop" steps 2 and 3, D-011). It uses the grill-with-docs method (D-017), run headless (D-021). Code: `packages/daemon/src/coordinator/`. Types and trigger names: `packages/shared/src/coordinator.ts`.
+Before any work starts, the coordinator grills each picked issue itself (SPEC "Autonomy loop" steps 2 and 3, D-011). It uses the grill-with-docs method (D-017), run headless (D-022). Code: `packages/daemon/src/coordinator/`. Types and trigger names: `packages/shared/src/coordinator.ts`.
 
 ## Contract
 `grillIssue(issue, deps)` returns `{ calls, escalation, outcome }`, where `outcome` is `proceed`, `needs_input` or `error`.
@@ -14,7 +14,7 @@ Before any work starts, the coordinator grills each picked issue itself (SPEC "A
 | `context` | `loadGrillContext(repo, { skillsDir })`: `docs/SPEC.md`, `docs/decisions/*.md`, `GLOSSARY.md`, the workspace vault glossary and the method. |
 | `cwd` | The repo. The model may read code and `.harnessd/vault/`; it must not edit. |
 | `linear` | `comment(issueId, body)` and `moveTo(issueId, state)`. `LinearClient` fits. |
-| `notifier` | `Notifier { notify(text) }`. `NullNotifier` until Slack lands (MET-16). |
+| `notifier` | `Notifier { notify(notice) }`: Slack #harnessd, or `NullNotifier` without a webhook (D-021). |
 | `decisions` | `DecisionSink { write(note), term?(note), draft?(note) }`. `createFileDecisionSink(vault)` is the default. |
 
 ## Method: grill-with-docs
@@ -54,12 +54,12 @@ The prompt carries the method, the coordinator instructions, the issue (title, b
 
 ## Side effects
 These run in this order. If one fails, the steps after it are skipped and the outcome is `error`.
-1. One decision note per call: `<repo>/.harnessd/vault/decisions/<ISSUE>-<slug>.md`, with YAML frontmatter (`issue`, `question`, `decision`, `basis`) and a body.
+1. One decision note per call: `<repo>/.harnessd/vault/decisions/<ISSUE>-<slug>.md`, with YAML frontmatter (`issue`, `question`, `decision`, `basis`) and a body. Existing notes are never overwritten.
 2. One term note per new term: `<repo>/.harnessd/vault/glossary/<slug>.md`.
 3. One draft decision record per precedent: `<repo>/.harnessd/vault/decision-drafts/<ISSUE>-<slug>.md`. It is in the `docs/decisions/` style, numbered `D-NNN`, with `Status: draft <date>.`. To accept it, a docs PR gives it the next number and moves it to `docs/decisions/`. The loop does not open that PR.
 4. One Linear comment. It has a header, then one bullet per call (`question → answer (basis: …)`). It then lists new terms and draft decision records, if any. When escalating, it also has the question for the human and the D-011 trigger.
 5. On escalation only, the issue moves to **Needs input**.
-6. On escalation only, exactly one ping is sent: `<KEY> needs input (<trigger>): <question> <url>`.
+6. On escalation only, exactly one notice is sent: `<KEY> needs input (<trigger>): <question> <url>`.
 
 Term notes and drafts are never overwritten. A sink without `term` or `draft` skips them; the comment still lists them.
 

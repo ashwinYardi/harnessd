@@ -1,4 +1,4 @@
-// The workspace vault glossary and draft decision records (D-017, D-021). The coordinator
+// The workspace vault glossary and draft decision records (D-017, D-022). The coordinator
 // grill writes both. The repo's own GLOSSARY.md and docs/decisions/ stay human-reviewed.
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";

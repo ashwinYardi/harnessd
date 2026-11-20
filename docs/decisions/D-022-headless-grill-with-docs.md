@@ -1,4 +1,4 @@
-# D-021 The coordinator runs grill-with-docs headless
+# D-022 The coordinator runs grill-with-docs headless
 Status: draft 2026-11-20. Extends D-017.
 - The prompt carries the method. It is built from `grilling/SKILL.md` and `domain-modeling/SKILL.md` in the installed skill pack. A built-in short form is the fallback.
 - Headless rules override the skills. The coordinator answers each frontier question itself, with a basis. It asks the human only for a D-011 trigger.

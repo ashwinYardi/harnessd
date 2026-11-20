@@ -64,6 +64,23 @@ launchctl kickstart -k gui/$(id -u)/dev.harnessd.daemon
 ```
 Until the key is set, the service logs the missing-key error to `daemon.err.log` and retries every 30 s. `launchctl setenv` does not survive a reboot.
 
+### Slack
+harnessd posts to Slack **#harnessd** through an incoming webhook (D-015, D-021). Without one it posts nothing, logs one warning at start and works as before.
+1. In Slack, create an app for your workspace, turn on **Incoming Webhooks** and add a webhook for #harnessd. Copy its url.
+2. Give the url to launchd, then restart the service:
+   ```sh
+   launchctl setenv HARNESSD_SLACK_WEBHOOK_URL https://hooks.slack.com/services/...
+   launchctl kickstart -k gui/$(id -u)/dev.harnessd.daemon
+   ```
+3. Check `daemon.out.log` for `slack: posting notices to #harnessd, daily summary at 21:00 Asia/Kolkata`.
+
+The url is a secret. harnessd reads it from the environment only and never writes it to disk or logs. It must start with `https://`. The webhook fixes the channel; `slack.channel` is only a label. Set `slack.summary_time` and `slack.time_zone` in `.harnessd/config.toml` (docs/CONFIG.md).
+
+What harnessd posts:
+- **A notice per event:** one line per merge, per block (Needs input, an escalation, two QA or gate failures) and per protected PR that waits for a human. Each line links the issue and the PR, when there is one.
+- **A daily summary** at `slack.summary_time` (default 21:00) in `slack.time_zone` (default `Asia/Kolkata`). It lists the merges and blocks since the last summary, and the runs in progress now. If the daemon was off at that time, the summary goes out once at the next start. The first start sends none. State is in `<repo>/.harnessd/state/summary.json`.
+- **Failures:** a post runs in the background, so Slack never stops or slows the loop. A 5xx, a 429 or a network error is retried 3 times, after 1 s, 2 s and 4 s. Then the message is dropped with one log line. Other 4xx errors are dropped at once.
+
 ```sh
 launchctl print gui/$(id -u)/dev.harnessd.daemon     # status
 tail -f ~/.harnessd/logs/daemon.err.log

@@ -131,7 +131,7 @@ export const GRILL_REPLY_SHAPE = `{
   "precedents": [{ "title": "string", "decision": "string", "why": "string" }]
 }`;
 
-/** How the coordinator runs grill-with-docs with nobody to answer (D-017, D-021). */
+/** How the coordinator runs grill-with-docs with nobody to answer (D-017, D-022). */
 const HEADLESS_RULES = [
   "No human answers during the grill. These rules override the method where they differ:",
   "- Build the design tree. Answer each frontier question yourself, with a basis. Then recompute the frontier. Stop when it is empty.",

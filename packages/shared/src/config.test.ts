@@ -15,7 +15,7 @@ test("parseConfigFile accepts a full config", () => {
   const input = {
     limits: { max_concurrent: 5, budget_minutes: { S: 20, M: 90 }, qa_max_failures: 1 },
     linear: { team_id: "MET", project: "harnessd" },
-    slack: { channel: "#ops" },
+    slack: { channel: "#ops", summary_time: "18:30", time_zone: "Europe/Berlin" },
     merge: { protected_paths: ["infra/**"], label: "hold", method: "rebase" },
     qa: { setup_command: "", test_command: "make test" },
     daemon: { port: 4800 },
@@ -87,6 +87,22 @@ test("wrong types are rejected with their path", () => {
     `${FILE}: qa.command: unknown key, expected one of setup_command, test_command`,
   );
   rejects({ slack: { channel: "" } }, `${FILE}: slack.channel: expected a non-empty string`);
+  rejects(
+    { slack: { summary_time: "9pm" } },
+    `${FILE}: slack.summary_time: expected a 24-hour time "HH:MM", got "9pm"`,
+  );
+  rejects(
+    { slack: { summary_time: "24:00" } },
+    `${FILE}: slack.summary_time: expected a 24-hour time "HH:MM", got "24:00"`,
+  );
+  rejects(
+    { slack: { time_zone: "Mars/Olympus" } },
+    `${FILE}: slack.time_zone: expected an IANA time zone such as "Asia/Kolkata", got "Mars/Olympus"`,
+  );
+  rejects(
+    { slack: { webhook_url: "https://hooks.slack.com/x" } },
+    `${FILE}: slack.webhook_url: unknown key, expected one of channel, summary_time, time_zone`,
+  );
   rejects(
     { merge: { protected_paths: ["a", 3] } },
     `${FILE}: merge.protected_paths[1]: expected a string, got 3`,

@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { DEFAULT_SETTINGS, type WorkflowStateName } from "@harnessd/shared";
 import type { PullRequestStatus } from "../github/client.ts";
 import { advanceMerges, ciVerdict, globToRegExp, type MergeDeps, protectedFiles } from "./merge.ts";
+import { formatNotice } from "./notifier.ts";
 import { emptyLoopState, type LoopState } from "./state.ts";
 
 test("globs: ** spans directories, * and ? stay in one, braces pick, case is ignored", () => {
@@ -116,8 +117,8 @@ function deps(status: Partial<PullRequestStatus>, state: LoopState) {
       },
     },
     notifier: {
-      async notify(text) {
-        pings.push(text);
+      async notify(notice) {
+        pings.push(formatNotice(notice));
       },
     },
     config: DEFAULT_SETTINGS.merge,
@@ -152,7 +153,7 @@ test("a PR closed without merging is left to a human: one ping, the approval dro
   assert.deepEqual(merged, []);
   assert.deepEqual(moves, [["parent", "Needs input"]]);
   assert.deepEqual(pings, [
-    "MET-2 needs a human (closed without merging): PR #7 https://github.test/pull/7",
+    "MET-2 needs a human (closed without merging): PR #7 https://github.test/pull/7 (MET-1 https://linear.test/MET-1)",
   ]);
   assert.deepEqual(state.merges, []);
 });

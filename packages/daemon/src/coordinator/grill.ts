@@ -1,5 +1,5 @@
 // The coordinator's self-grill (SPEC "Autonomy loop" steps 2-3, D-011), with the
-// grill-with-docs method (D-017) run headless (D-021). See docs/COORDINATOR.md.
+// grill-with-docs method (D-017) run headless (D-022). See docs/COORDINATOR.md.
 import {
   type Call,
   ESCALATION_TRIGGER_LABELS,
@@ -15,7 +15,7 @@ import {
 } from "@harnessd/shared";
 import type { LinearClient } from "../linear/client.ts";
 import type { DecisionSink } from "./decisions.ts";
-import type { Notifier } from "./notifier.ts";
+import type { Notice, Notifier } from "./notifier.ts";
 import { buildGrillPrompt, type GrillContext } from "./prompt.ts";
 
 /** The two Linear writes the grill makes. A LinearClient satisfies it. */
@@ -213,9 +213,15 @@ export function formatGrillComment(
   return `${lines.join("\n")}\n`;
 }
 
-/** The one Slack line sent on escalation. */
-export function formatGrillPing(issue: Issue, escalation: Escalation): string {
-  return `${issue.key} needs input (${escalation.trigger}): ${oneLine(escalation.question)} ${issue.url}`;
+/** The one notice sent on escalation. */
+export function grillNotice(issue: Issue, escalation: Escalation): Notice {
+  return {
+    kind: "needs_input",
+    issue: { key: issue.key, url: issue.url },
+    prs: [],
+    reason: escalation.trigger,
+    detail: oneLine(escalation.question),
+  };
 }
 
 /** Title of a call's decision note: the question, without the question mark, at most 80 chars. */
@@ -363,8 +369,8 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     if (escalation) {
       step = "move the issue to Needs input";
       await deps.linear.moveTo(issue.id, "Needs input");
-      step = "send the ping";
-      await deps.notifier.notify(formatGrillPing(issue, escalation));
+      step = "send the notice";
+      await deps.notifier.notify(grillNotice(issue, escalation));
     }
   } catch (error) {
     return {
