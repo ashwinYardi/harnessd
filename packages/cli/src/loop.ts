@@ -13,6 +13,7 @@ import {
   type DaemonInfo,
   DEFAULT_LOOP_INTERVAL_MS,
   defaultGlobalDir,
+  isBlocking,
   LinearClient,
   type ListReadyOptions,
   loadConfig,
@@ -160,9 +161,8 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   const checks = io.checks ?? runStatus;
   const options = statusOptions(repoDir, env);
   const startChecks = await checks(options);
-  const refusal = refusalLines(startChecks);
-  if (refusal.length > 1) {
-    for (const line of refusal) io.err(line);
+  if (startChecks.some(isBlocking)) {
+    for (const line of refusalLines(startChecks)) io.err(line);
     return 1;
   }
   for (const c of startChecks.filter((c) => c.state === "warn")) {

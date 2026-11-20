@@ -56,7 +56,7 @@ It checks the machine and the workspace at `dir` (default: the current directory
 | `ok` | It works. | no |
 | `warn` | It works, but something is off. | no |
 | `fail` | It is there but broken. | yes |
-| `missing` | It is required and absent, or a check it needs failed first. | yes |
+| `missing` | It is required and absent. A check that waits on a blocking one is `missing` too, with the detail "not checked". | yes |
 
 The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for a usage error.
 
@@ -64,22 +64,22 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 |---|---|---|
 | `node` | the running Node | `fail` below 24. Fix: `nvm install 24 && nvm alias default 24`, or `brew install node@24` |
 | `config` | loads global and workspace config.toml | `fail` with the file and key |
-| `harness.<id>.cli` | `$HARNESSD_CLAUDE_BIN` or `claude` on PATH, then `--version` | `missing` when not found |
+| `harness.<id>.cli` | `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, on PATH; then `--version` | `missing` when not found |
 | `harness.<id>.auth` | `claude auth status --json`; `codex login status` | `fail` when signed out; `warn` when the status cannot be read |
 | `harness.<id>.version` | the version against a list of known-bad releases | `warn` |
 | `github.cli` | `$HARNESSD_GH_BIN` or `gh` on PATH | `missing` |
 | `github.auth` | `gh auth status --active` | `fail`: run `gh auth login` |
 | `github.push` | `gh repo view --json viewerPermission` | `fail` below WRITE, or with no GitHub remote |
-| `github.ci` | `gh api repos/{owner}/{repo}/rules/branches/<default>` | `warn` when no check is required |
+| `github.ci` | the default branch's rulesets, and its classic protection when gh may read it | `warn` when no check is required |
 | `linear.key` | one GraphQL read with `LINEAR_API_KEY` | `missing` when unset; `fail` when rejected or unreachable |
 | `linear.team` | `linear.team_id`, as a key or a UUID | `missing` when unset; `fail` when unknown |
 | `linear.states` | Ready, In Progress, In Review, Done and Needs input | `fail`, with the missing names |
 | `slack.webhook` | `SLACK_WEBHOOK_URL` is set | `warn` only |
 | `git.worktrees` | `git worktree list` in the workspace | `fail` outside a git clone |
-| `daemon.port` | binds `127.0.0.1:<daemon.port>` | `fail` when in use |
+| `daemon.port` | binds `127.0.0.1:<daemon.port>` | `warn` when a running harnessd holds it; `fail` when anything else does |
 | `skills.pack` | each default skill in `~/.harnessd/skills/` | `warn`: run `harnessd init` |
 
-Harnesses are checked once for each harness an agent uses. Checks run in parallel, each group within 5 s, so `doctor` returns within a few seconds. No check spends tokens. Output never shows a key, a token or a webhook: values of environment variables with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in the name are replaced by `***`.
+Harnesses are checked once for each harness an agent uses. Checks run in parallel. No command runs past 5 s, so `doctor` returns within a few seconds. No check spends tokens. Sign-in checks read only the exit code and named JSON fields, never the account or the token. Output never shows a key, a token or a webhook: each value of 6 characters or more of an environment variable with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in its name is replaced by `***`. `SLACK_WEBHOOK_URL` is the name the Slack notifier (MET-16) is to read.
 
 ## The launchd service
 | | |

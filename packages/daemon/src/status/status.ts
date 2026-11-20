@@ -11,11 +11,11 @@ import { LinearClient, LinearError } from "../linear/client.ts";
 import {
   compareSemver,
   type Exec,
+  type ExecResult,
   execFile,
   findOnPath,
   isExecutableFile,
   parseSemver,
-  readVersion,
 } from "./detect.ts";
 
 /**
@@ -109,19 +109,55 @@ function firstLine(text: string): string {
 interface Ctx {
   o: StatusOptions;
   exec: Exec;
+  isExec: (path: string) => Promise<boolean>;
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
   config: MergedConfig | undefined;
 }
 
-/** Checks that run in order inside one group; groups run in parallel. */
+/**
+ * Checks that run in order inside one group; groups run in parallel. Every command
+ * a group runs is killed at the group's deadline, and none starts after it.
+ */
 interface Group {
   ids: string[];
-  run: () => Promise<Check[]>;
+  run: (deadline: number) => Promise<Check[]>;
 }
 
-function run(ctx: Ctx, cmd: string, args: readonly string[]) {
-  return ctx.exec(cmd, args, { cwd: ctx.o.repoDir, env: ctx.env, timeoutMs: ctx.timeoutMs });
+const timedOut = (ms: number) => `timed out after ${ms / 1000} s`;
+
+/** Runs one command, killed at the deadline. Past the deadline it returns code 124. */
+function run(
+  ctx: Ctx,
+  deadline: number,
+  cmd: string,
+  args: readonly string[],
+): Promise<ExecResult> {
+  const left = deadline - Date.now();
+  if (left <= 0) return Promise.resolve({ code: 124, stdout: "", stderr: timedOut(ctx.timeoutMs) });
+  return ctx.exec(cmd, args, { cwd: ctx.o.repoDir, env: ctx.env, timeoutMs: left });
+}
+
+/** The binary that `envBin` names when set, else `bin` on PATH; or why there is none. */
+async function locate(
+  ctx: Ctx,
+  bin: string,
+  envBin: string,
+): Promise<{ path: string } | { absent: string }> {
+  const override = ctx.env[envBin]?.trim();
+  if (override) {
+    return (await ctx.isExec(override))
+      ? { path: override }
+      : { absent: `${override} (${envBin}) is not executable` };
+  }
+  const path = await findOnPath(ctx.env, bin, ctx.isExec);
+  return path === undefined ? { absent: `${bin} is not on PATH` } : { path };
+}
+
+async function versionOf(ctx: Ctx, deadline: number, path: string): Promise<string> {
+  const res = await run(ctx, deadline, path, ["--version"]);
+  const line = `${res.stdout}\n${res.stderr}`.split("\n").find((l) => l.trim() !== "");
+  return res.code === 0 && line ? line.trim() : "version unknown";
 }
 
 function nodeGroup(ctx: Ctx): Group {
@@ -146,7 +182,7 @@ function nodeGroup(ctx: Ctx): Group {
 
 interface HarnessSpec {
   bin: string;
-  envBin?: string;
+  envBin: string;
   pkg: string;
   /** argv that reports sign-in without spending tokens. */
   status: string[];
@@ -207,32 +243,23 @@ function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
   const install = `Install it: npm i -g ${spec.pkg}`;
   return {
     ids,
-    run: async () => {
-      const isExec = ctx.o.isExecutable ?? isExecutableFile;
-      const override = spec.envBin ? ctx.env[spec.envBin]?.trim() : undefined;
-      const path = override
-        ? (await isExec(override))
-          ? override
-          : undefined
-        : await findOnPath(ctx.env, spec.bin, isExec);
-      if (path === undefined) {
-        const where = override ? `${override} is not executable` : `${spec.bin} is not on PATH`;
+    run: async (deadline) => {
+      const found = await locate(ctx, spec.bin, spec.envBin);
+      if ("absent" in found) {
         return [
-          bad(`${p}.cli`, "missing", where, install),
+          bad(`${p}.cli`, "missing", found.absent, install),
           notChecked(`${p}.auth`, `${p}.cli`),
           notChecked(`${p}.version`, `${p}.cli`),
         ];
       }
-      const version = await readVersion(ctx.exec, path, { env: ctx.env, timeoutMs: ctx.timeoutMs });
-      const cli = ok(`${p}.cli`, `${version ?? "version unknown"} (${path})`);
+      const path = found.path;
+      const version = await versionOf(ctx, deadline, path);
+      const cli = ok(`${p}.cli`, `${version} (${path})`);
 
-      const res = await run(ctx, path, spec.status);
+      const res = await run(ctx, deadline, path, spec.status);
       const signed =
         res.code === 124
-          ? {
-              state: "fail" as const,
-              detail: `sign-in check timed out after ${ctx.timeoutMs / 1000} s`,
-            }
+          ? { state: "fail" as const, detail: `sign-in check ${timedOut(ctx.timeoutMs)}` }
           : spec.signedIn(res.stdout, res.code);
       const auth =
         signed.state === "ok"
@@ -248,14 +275,8 @@ function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
   };
 }
 
-function versionCheck(
-  ctx: Ctx,
-  harness: HarnessId,
-  id: string,
-  line: string | undefined,
-  pkg: string,
-): Check {
-  const v = line === undefined ? undefined : parseSemver(line);
+function versionCheck(ctx: Ctx, harness: HarnessId, id: string, line: string, pkg: string): Check {
+  const v = parseSemver(line);
   if (v === undefined) return bad(id, "warn", "version unknown", `Reinstall it: npm i -g ${pkg}`);
   const text = v.join(".");
   for (const known of ctx.o.knownBadVersions ?? KNOWN_BAD_VERSIONS) {
@@ -281,24 +302,21 @@ function githubGroup(ctx: Ctx): Group {
   const ids = ["github.cli", "github.auth", "github.push", "github.ci"];
   return {
     ids,
-    run: async () => {
-      const isExec = ctx.o.isExecutable ?? isExecutableFile;
-      const override = ctx.env.HARNESSD_GH_BIN?.trim();
-      const gh = override || (await findOnPath(ctx.env, "gh", isExec));
-      if (gh === undefined || (override && !(await isExec(override)))) {
+    run: async (deadline) => {
+      const found = await locate(ctx, "gh", "HARNESSD_GH_BIN");
+      if ("absent" in found) {
         return [
-          bad("github.cli", "missing", "gh is not on PATH", "Install it: brew install gh"),
+          bad("github.cli", "missing", found.absent, "Install it: brew install gh"),
           ...ids.slice(1).map((id) => notChecked(id, "github.cli")),
         ];
       }
-      const version = await readVersion(ctx.exec, gh, { env: ctx.env, timeoutMs: ctx.timeoutMs });
-      const out: Check[] = [ok("github.cli", `${version ?? "version unknown"} (${gh})`)];
+      const gh = found.path;
+      const out: Check[] = [ok("github.cli", `${await versionOf(ctx, deadline, gh)} (${gh})`)];
 
       // gh can print a masked token here, so only the exit code is read.
-      const auth = await run(ctx, gh, ["auth", "status", "--active"]);
+      const auth = await run(ctx, deadline, gh, ["auth", "status", "--active"]);
       if (auth.code !== 0) {
-        const detail =
-          auth.code === 124 ? `timed out after ${ctx.timeoutMs / 1000} s` : "not signed in";
+        const detail = auth.code === 124 ? timedOut(ctx.timeoutMs) : "not signed in";
         out.push(bad("github.auth", "fail", detail, "Run: gh auth login"));
         return [
           ...out,
@@ -308,7 +326,7 @@ function githubGroup(ctx: Ctx): Group {
       }
       out.push(ok("github.auth", "signed in"));
 
-      const view = await run(ctx, gh, [
+      const view = await run(ctx, deadline, gh, [
         "repo",
         "view",
         "--json",
@@ -345,31 +363,38 @@ function githubGroup(ctx: Ctx): Group {
               `Ask an admin of ${name} for write access, or sign gh in as another account.`,
             ),
       );
-      out.push(await ciCheck(ctx, gh, repo.defaultBranchRef?.name ?? "main"));
+      out.push(await ciCheck(ctx, deadline, gh, repo.defaultBranchRef?.name ?? "main"));
       return out;
     },
   };
 }
 
-/** The status checks the default branch's rulesets require. */
-async function ciCheck(ctx: Ctx, gh: string, branch: string): Promise<Check> {
+/**
+ * The status checks the default branch requires, from its rulesets and from classic
+ * branch protection. Classic protection needs admin rights to read, so its errors
+ * are ignored.
+ */
+async function ciCheck(ctx: Ctx, deadline: number, gh: string, branch: string): Promise<Check> {
   const fix = `Require the CI check on ${branch} in a ruleset; the merge gate trusts CI (D-013).`;
-  const res = await run(ctx, gh, ["api", `repos/{owner}/{repo}/rules/branches/${branch}`]);
-  if (res.code !== 0) {
+  const rules = await run(ctx, deadline, gh, [
+    "api",
+    `repos/{owner}/{repo}/rules/branches/${branch}`,
+  ]);
+  if (rules.code !== 0) {
     return bad(
       "github.ci",
       "warn",
-      `could not read the rules for ${branch}: ${firstLine(res.stderr)}`,
+      `could not read the rules for ${branch}: ${firstLine(rules.stderr)}`,
       fix,
     );
   }
   const names = new Set<string>();
   try {
-    const rules = JSON.parse(res.stdout) as Array<{
+    const parsed = JSON.parse(rules.stdout) as Array<{
       type?: string;
       parameters?: { required_status_checks?: Array<{ context?: string }> };
     }>;
-    for (const rule of Array.isArray(rules) ? rules : []) {
+    for (const rule of Array.isArray(parsed) ? parsed : []) {
       if (rule.type !== "required_status_checks") continue;
       for (const c of rule.parameters?.required_status_checks ?? []) {
         if (typeof c.context === "string") names.add(c.context);
@@ -377,6 +402,20 @@ async function ciCheck(ctx: Ctx, gh: string, branch: string): Promise<Check> {
     }
   } catch {
     return bad("github.ci", "warn", `could not read the rules for ${branch}`, fix);
+  }
+  const classic = await run(ctx, deadline, gh, [
+    "api",
+    `repos/{owner}/{repo}/branches/${branch}/protection/required_status_checks`,
+  ]);
+  if (classic.code === 0) {
+    try {
+      const parsed = JSON.parse(classic.stdout) as { contexts?: unknown };
+      for (const c of Array.isArray(parsed.contexts) ? parsed.contexts : []) {
+        if (typeof c === "string") names.add(c);
+      }
+    } catch {
+      // Not JSON: count it as no classic protection.
+    }
   }
   if (names.size === 0) return bad("github.ci", "warn", `no required checks on ${branch}`, fix);
   return ok("github.ci", `${branch} requires: ${[...names].sort().join(", ")}`);
@@ -399,7 +438,7 @@ function linearGroup(ctx: Ctx): Group {
   const ids = ["linear.key", "linear.team", "linear.states"];
   return {
     ids,
-    run: async () => {
+    run: async (deadline) => {
       const key = ctx.env.LINEAR_API_KEY?.trim();
       const teamId = ctx.config?.linear.team_id?.trim();
       if (!key) {
@@ -418,7 +457,10 @@ function linearGroup(ctx: Ctx): Group {
       const client = new LinearClient({
         apiKey: async () => key,
         fetch: ((url, init) =>
-          baseFetch(url, { ...init, signal: AbortSignal.timeout(ctx.timeoutMs) })) as typeof fetch,
+          baseFetch(url, {
+            ...init,
+            signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+          })) as typeof fetch,
         maxRetryWaitMs: 0,
       });
       let data: LinearStatus;
@@ -508,9 +550,8 @@ function slackGroup(ctx: Ctx): Group {
 function gitGroup(ctx: Ctx): Group {
   return {
     ids: ["git.worktrees"],
-    run: async () => {
-      const isExec = ctx.o.isExecutable ?? isExecutableFile;
-      const git = await findOnPath(ctx.env, "git", isExec);
+    run: async (deadline) => {
+      const git = await findOnPath(ctx.env, "git", ctx.isExec);
       if (git === undefined) {
         return [
           bad(
@@ -521,7 +562,7 @@ function gitGroup(ctx: Ctx): Group {
           ),
         ];
       }
-      const res = await run(ctx, git, ["worktree", "list", "--porcelain"]);
+      const res = await run(ctx, deadline, git, ["worktree", "list", "--porcelain"]);
       if (res.code === 0) {
         const count = res.stdout.split("\n").filter((l) => l.startsWith("worktree ")).length;
         return [
@@ -548,14 +589,37 @@ function portIsFree(port: number): Promise<boolean> {
   });
 }
 
+/** True when a harnessd API answers /health on the port. */
+async function harnessdOn(ctx: Ctx, deadline: number, port: number): Promise<boolean> {
+  try {
+    const res = await (ctx.o.fetch ?? fetch)(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+    });
+    const body = (await res.json()) as { ok?: unknown; version?: unknown };
+    return body.ok === true && typeof body.version === "string";
+  } catch {
+    return false;
+  }
+}
+
 function portGroup(ctx: Ctx): Group {
   return {
     ids: ["daemon.port"],
-    run: async () => {
+    run: async (deadline) => {
       const port = ctx.config?.daemon.port ?? DEFAULT_SETTINGS.daemon.port;
       if (port === 0) return [ok("daemon.port", "0: a free port is picked at start")];
       if (ctx.o.servingPort) return [ok("daemon.port", `${port} is served by this daemon`)];
       if (await (ctx.o.portFree ?? portIsFree)(port)) return [ok("daemon.port", `${port} is free`)];
+      if (await harnessdOn(ctx, deadline, port)) {
+        return [
+          bad(
+            "daemon.port",
+            "warn",
+            `${port} is in use by a running harnessd`,
+            "To start another harnessd run, give it its own daemon.port in .harnessd/config.toml.",
+          ),
+        ];
+      }
       return [
         bad(
           "daemon.port",
@@ -601,7 +665,13 @@ function skillsGroup(ctx: Ctx, names: readonly string[]): Group {
   };
 }
 
-/** Runs a group under the timeout; a group that runs over fails every check it owns. */
+/** Extra time for a group to report after its deadline killed a command. */
+const GUARD_GRACE_MS = 250;
+
+/**
+ * Runs a group with a deadline. A group reports its own timeouts; only a group that
+ * still has not answered after the grace fails every check it owns.
+ */
 async function guarded(group: Group, timeoutMs: number): Promise<Check[]> {
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<Check[]>((resolve) => {
@@ -609,21 +679,16 @@ async function guarded(group: Group, timeoutMs: number): Promise<Check[]> {
       () =>
         resolve(
           group.ids.map((id) =>
-            bad(
-              id,
-              "fail",
-              `timed out after ${timeoutMs / 1000} s`,
-              "Run harnessd doctor again; check the network.",
-            ),
+            bad(id, "fail", timedOut(timeoutMs), "Run harnessd doctor again; check the network."),
           ),
         ),
-      timeoutMs,
+      timeoutMs + GUARD_GRACE_MS,
     );
   });
   try {
     return await Promise.race([
       group
-        .run()
+        .run(Date.now() + timeoutMs)
         .catch((e: unknown) =>
           group.ids.map((id) =>
             bad(id, "fail", `check failed: ${(e as Error).message}`, "Run harnessd doctor again."),
@@ -677,7 +742,14 @@ export async function runStatus(options: StatusOptions): Promise<Check[]> {
       "Fix the key named above; see docs/CONFIG.md.",
     );
   }
-  const ctx: Ctx = { o: options, exec: options.exec ?? execFile, env, timeoutMs, config };
+  const ctx: Ctx = {
+    o: options,
+    exec: options.exec ?? execFile,
+    isExec: options.isExecutable ?? isExecutableFile,
+    env,
+    timeoutMs,
+    config,
+  };
   const harnesses = [...new Set(Object.values(config?.agents ?? {}).map((a) => a.harness))];
   if (harnesses.length === 0) harnesses.push("claude-code");
   harnesses.sort((a, b) =>

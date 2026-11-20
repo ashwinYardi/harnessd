@@ -84,12 +84,18 @@ async function world(config = '[linear]\nteam_id = "MET"\n') {
     nodeVersion: "v24.11.0",
     nodePath: "/bin/node",
     isExecutable: async (p) => bins.has(p),
-    exec: async (cmd: string, args: readonly string[], _o?: ExecOptions) => {
+    // Like the real exec: a command still running at timeoutMs is killed with code 124.
+    exec: async (cmd: string, args: readonly string[], o?: ExecOptions) => {
       const key = [cmd, ...args].join(" ");
       calls.push(key);
       const reply = replies.get(key);
       if (reply === undefined) return failed(`unexpected call: ${key}`, 127);
-      return typeof reply === "function" ? reply() : reply;
+      if (typeof reply !== "function") return reply;
+      let timer: NodeJS.Timeout | undefined;
+      const killed = new Promise<ExecResult>((r) => {
+        timer = setTimeout(() => r(failed("killed", 124)), o?.timeoutMs ?? 60_000);
+      });
+      return Promise.race([reply(), killed]).finally(() => clearTimeout(timer));
     },
     fetch: (async (_url: string | URL | Request, init?: RequestInit) => {
       linearBodies.push(JSON.parse(String(init?.body)));
@@ -430,4 +436,49 @@ test("no secret from the environment appears in any check", async () => {
   const text = JSON.stringify(checks);
   assert.doesNotMatch(text, /TOKENVALUE|SECRETVALUE|SECRETHOOK/);
   assert.match(byId(checks, "git.worktrees").detail, /\*\*\*/);
+});
+
+test("a bad HARNESSD_GH_BIN is named in the detail", async () => {
+  const w = await world();
+  const checks = await runStatus({
+    ...w.options,
+    env: { ...w.options.env, HARNESSD_GH_BIN: "/opt/gh" },
+  });
+  assert.equal(byId(checks, "github.cli").detail, "/opt/gh (HARNESSD_GH_BIN) is not executable");
+});
+
+test("classic branch protection adds its required checks", async () => {
+  const w = await world();
+  w.replies.set("/bin/gh api repos/{owner}/{repo}/rules/branches/main", ok("[]"));
+  w.replies.set(
+    "/bin/gh api repos/{owner}/{repo}/branches/main/protection/required_status_checks",
+    ok('{"strict":true,"contexts":["lint","test"]}'),
+  );
+  assert.equal(byId(await runStatus(w.options), "github.ci").detail, "main requires: lint, test");
+});
+
+test("a slow call times out only its own check; finished checks stay ok", async () => {
+  const w = await world();
+  w.replies.set(
+    "/bin/gh auth status --active",
+    () => new Promise((r) => setTimeout(() => r(ok()), 400)),
+  );
+  const checks = await runStatus({ ...w.options, timeoutMs: 200 });
+  assert.equal(byId(checks, "github.cli").state, "ok");
+  assert.equal(byId(checks, "github.auth").detail, "timed out after 0.2 s");
+  assert.equal(byId(checks, "github.push").state, "missing");
+});
+
+test("a port held by a running harnessd is a warning, not a fail", async () => {
+  const w = await world();
+  const fetchHealth = (async (url: string | URL | Request) =>
+    String(url).endsWith("/health")
+      ? Response.json({ ok: true, version: "0.0.0" })
+      : (w.options.fetch as typeof fetch)(url)) as typeof fetch;
+  const check = byId(
+    await runStatus({ ...w.options, portFree: async () => false, fetch: fetchHealth }),
+    "daemon.port",
+  );
+  assert.equal(check.state, "warn");
+  assert.equal(check.detail, "4747 is in use by a running harnessd");
 });
