@@ -7,6 +7,7 @@ import {
   createGhCli,
   GitHubError,
   parsePullRequestFiles,
+  parsePullRequestStatus,
   parsePullRequests,
   titleHasKey,
 } from "./client.ts";
@@ -110,6 +111,117 @@ test("postReview sends the review as JSON on stdin through gh api and returns it
     body: 'Fails: "x"\n- y',
     commit_id: "sha9",
   });
+});
+
+test("prStatus reads one gh pr view with the gate's fields; the latest run of a check wins", async () => {
+  const { gh, calls } = await client();
+  const status = await gh.prStatus(7);
+  assert.deepEqual((await calls())[0]?.argv, [
+    "pr",
+    "view",
+    "7",
+    "--json",
+    "number,url,state,headRefOid,mergeable,statusCheckRollup,files,changedFiles",
+  ]);
+  assert.equal(status.state, "OPEN");
+  assert.equal(status.headRefOid, "sha7");
+  assert.equal(status.mergeable, "MERGEABLE");
+  assert.equal(status.changedFiles, 2);
+  assert.deepEqual(
+    status.files.map((f) => f.path),
+    ["src/a.ts", "src/auth/session.ts"],
+  );
+  assert.deepEqual(status.checks, [
+    {
+      name: "CI / test",
+      state: "pass",
+      detail: "SUCCESS",
+      url: "https://github.test/o/r/actions/runs/2",
+    },
+    { name: "CI / lint", state: "pending", detail: "IN_PROGRESS" },
+    { name: "ci/legacy", state: "pass", detail: "SUCCESS", url: "https://ci.test/1" },
+  ]);
+});
+
+test("mergePr squashes at the approved head; addLabel creates a missing label once", async () => {
+  const { gh, calls } = await client();
+  await gh.mergePr(7, { method: "squash", matchHeadCommit: "sha7" });
+  await gh.addLabel(7, "needs-human");
+  assert.deepEqual(
+    (await calls()).map((c) => c.argv),
+    [
+      ["pr", "merge", "7", "--squash", "--match-head-commit", "sha7"],
+      ["pr", "edit", "7", "--add-label", "needs-human"],
+    ],
+  );
+
+  const missing = await client("no-label");
+  await missing.gh.addLabel(7, "needs-human");
+  assert.deepEqual(
+    (await missing.calls()).map((c) => c.argv.slice(0, 3)),
+    [
+      ["pr", "edit", "7"],
+      ["label", "create", "needs-human"],
+      ["pr", "edit", "7"],
+    ],
+  );
+});
+
+test("parsePullRequestStatus grades check runs and commit statuses", () => {
+  const status = (rollup: unknown[], extra: Record<string, unknown> = {}) =>
+    parsePullRequestStatus(
+      JSON.stringify({
+        number: 1,
+        url: "u",
+        state: "OPEN",
+        headRefOid: "s",
+        files: [],
+        statusCheckRollup: rollup,
+        ...extra,
+      }),
+    );
+  const run = (status: string, conclusion: string) => ({
+    __typename: "CheckRun",
+    name: `${status}-${conclusion}`,
+    status,
+    conclusion,
+  });
+  const ctx = (state: string) => ({ __typename: "StatusContext", context: state, state });
+  assert.deepEqual(
+    status([
+      run("COMPLETED", "SUCCESS"),
+      run("COMPLETED", "NEUTRAL"),
+      run("COMPLETED", "SKIPPED"),
+      run("COMPLETED", "FAILURE"),
+      run("COMPLETED", "CANCELLED"),
+      run("COMPLETED", "TIMED_OUT"),
+      run("QUEUED", ""),
+      ctx("SUCCESS"),
+      ctx("PENDING"),
+      ctx("EXPECTED"),
+      ctx("ERROR"),
+      { __typename: "Mystery" },
+    ]).checks.map((c) => c.state),
+    [
+      "pass",
+      "pass",
+      "pass",
+      "fail",
+      "fail",
+      "fail",
+      "pending",
+      "pass",
+      "pending",
+      "pending",
+      "fail",
+      "pending",
+    ],
+  );
+  const bare = status([], { statusCheckRollup: null });
+  assert.deepEqual(bare.checks, []);
+  assert.equal(bare.mergeable, "UNKNOWN");
+  assert.equal(bare.changedFiles, 0);
+  assert.throws(() => status([], { state: "DRAFT" }), /state: unexpected "DRAFT"/);
 });
 
 test("a failing gh call or unreadable output is a GitHubError with gh's message", async () => {

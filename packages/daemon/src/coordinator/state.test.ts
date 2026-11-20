@@ -52,6 +52,29 @@ const state: LoopState = {
   attempts: { "id-1": 1 },
   qaFailures: { "parent-1": 1 },
   qaFeedback: { "id-1": { prUrl: "https://github.test/pull/7", failing: ["Works: no test"] } },
+  merges: [
+    {
+      qaId: "qa-1",
+      qaKey: "MET-43",
+      parentId: "parent-1",
+      parentKey: "MET-40",
+      parentUrl: "https://linear.test/MET-40",
+      approvedAt: "2026-11-19T10:02:00.000Z",
+      prs: [
+        {
+          partId: "id-1",
+          partKey: "MET-41",
+          number: 7,
+          url: "https://github.test/pull/7",
+          sha: "abc123",
+          needsHuman: "protected paths",
+          labeled: true,
+        },
+      ],
+    },
+  ],
+  gateFailures: { "parent-1": 1 },
+  humanPings: { "https://github.test/pull/7": "2026-11-19T10:03:00.000Z" },
 };
 
 test("a missing file loads as the empty state", async () => {
@@ -70,6 +93,9 @@ test("save writes loop.json atomically with a .gitignore, and load reads it back
   assert.deepEqual(loaded.qaFailures, state.qaFailures);
   assert.deepEqual(loaded.qaFeedback, state.qaFeedback);
   assert.deepEqual(loaded.interrupted, state.interrupted);
+  assert.deepEqual(loaded.merges, state.merges);
+  assert.deepEqual(loaded.gateFailures, state.gateFailures);
+  assert.deepEqual(loaded.humanPings, state.humanPings);
   const files = (await readdir(join(dir, ".harnessd", "state"))).sort();
   assert.deepEqual(files, [".gitignore", "loop.json"], "no tmp files left behind");
   assert.equal(await readFile(join(dir, ".harnessd", "state", ".gitignore"), "utf8"), "*\n");
@@ -95,6 +121,14 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
       attempts: { a: 1, b: 0, c: "2", d: 1.5 },
       qaFailures: { p: 1, q: -1 },
       qaFeedback: { a: { failing: ["x", 3], reviewUrl: "u" }, b: { failing: "x" }, c: null },
+      merges: [
+        state.merges[0],
+        { ...state.merges[0], prs: [{ number: 7 }] },
+        { ...state.merges[0], prs: [{ ...state.merges[0]?.prs[0], sha: "" }] },
+        { qaId: "x" },
+      ],
+      gateFailures: { p: 2, q: 0 },
+      humanPings: { u: "t", v: 1 },
     }),
   );
   assert.deepEqual(parsed, {
@@ -105,6 +139,9 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
     attempts: { a: 1 },
     qaFailures: { p: 1 },
     qaFeedback: { a: { failing: ["x"], reviewUrl: "u" } },
+    merges: state.merges,
+    gateFailures: { p: 2 },
+    humanPings: { u: "t" },
   });
   assert.deepEqual(
     parseLoopState('{"inFlight":[]}'),

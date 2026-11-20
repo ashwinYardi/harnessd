@@ -1,8 +1,9 @@
-// The autonomy loop (SPEC "Autonomy loop" steps 1-5, D-010, D-012, D-013, D-014). See docs/LOOP.md.
+// The autonomy loop (SPEC "Autonomy loop" steps 1-7, D-010, D-012, D-013, D-014). See docs/LOOP.md.
 //
-// Each tick: re-queue runs a previous process left behind, check the pause flag, dispatch
-// eligible sub-issues, grill and split Ready issues, then dispatch again. Linear is the
-// source of truth; loop.json only remembers in-flight runs, paused runs and failure counts.
+// Each tick: re-queue runs a previous process left behind, check the pause flag, advance
+// the merge gate, dispatch eligible sub-issues, grill and split Ready issues, then dispatch
+// again. Linear is the source of truth; loop.json only remembers in-flight runs, paused
+// runs, failure counts and QA approvals waiting to merge.
 import {
   type AdapterRun,
   emptyTokenUsage,
@@ -22,6 +23,7 @@ import type { TaskWorktrees } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
 import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
 import { grillIssue } from "./grill.ts";
+import { advanceMerges, pendingMerge } from "./merge.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
 import { planIssue, type SplitPlan } from "./plan.ts";
 import { type GrillContext, loadGrillContext } from "./prompt.ts";
@@ -82,7 +84,7 @@ export interface CoordinatorLoopOptions {
   /** One adapter per harness the agents use. */
   adapters: Partial<Record<HarnessId, HarnessAdapter>>;
   worktrees: TaskWorktrees;
-  /** QA finds and reviews PRs through it (the `gh` CLI, D-002). */
+  /** QA reviews and the merge gate merges PRs through it (the `gh` CLI, D-002). */
   github: GitHub;
   store: LoopStore;
   clock?: LoopClock;
@@ -139,6 +141,8 @@ export interface TickReport {
   escalated: string[];
   /** Sub-issues started this tick. */
   dispatched: string[];
+  /** Parts whose PR the merge gate merged this tick. */
+  merged: string[];
 }
 
 export interface CoordinatorLoop {
@@ -568,6 +572,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         log,
       });
       log(`${issue.key}: QA ${result.outcome}, ${settled}`);
+      if (settled === "approved") {
+        // The merge gate's record, pinned to the heads QA reviewed (docs/LOOP.md "Merge").
+        s.merges = s.merges.filter((m) => m.qaId !== issue.id);
+        s.merges.push(pendingMerge(issue, qa.parent, result.reviews, clock.now()));
+      }
       await save();
     })();
     // Paused while this round was starting: stop it like the others.
@@ -793,6 +802,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       split: [],
       escalated: [],
       dispatched: [],
+      merged: [],
     };
     await requeue(s, report);
     if (await readPaused()) {
@@ -802,6 +812,27 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       return report;
     }
     s.lastPollAt = clock.now().toISOString();
+    if (s.merges.length > 0) {
+      const merges = await advanceMerges(s, {
+        github,
+        linear,
+        notifier,
+        config: config.merge,
+        maxFailures: config.limits.qa_max_failures,
+        // Re-read before every merge, so a pause stops merges too (MET-15).
+        paused: readPaused,
+        save,
+        now: () => clock.now(),
+        log,
+      });
+      report.merged = merges.merged;
+      if (merges.paused) {
+        report.paused = true;
+        await pauseRuns();
+        await save();
+        return report;
+      }
+    }
     await dispatchEligible(s, report);
     await splitReady(report);
     await dispatchEligible(s, report);

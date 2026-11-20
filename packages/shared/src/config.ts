@@ -47,9 +47,26 @@ export interface DaemonConfig {
   port: number;
 }
 
+/** How the merge gate merges a PR (`gh pr merge --squash` and so on). */
+export const MERGE_METHODS = ["squash", "merge", "rebase"] as const;
+export type MergeMethod = (typeof MERGE_METHODS)[number];
+
+export function isMergeMethod(value: string): value is MergeMethod {
+  return (MERGE_METHODS as readonly string[]).includes(value);
+}
+
+/** The merge gate (D-013, docs/LOOP.md "Merge"). */
 export interface MergeConfig {
-  /** Globs; a PR touching any of them waits for a human (D-013). */
+  /**
+   * Globs matched against each changed file's repo path, case-insensitively. A glob
+   * without a `/` matches the file name at any depth. A PR touching any of them waits
+   * for a human (D-013).
+   */
   protected_paths: string[];
+  /** The label a protected PR gets. */
+  label: string;
+  /** How a PR that passes the gate is merged. */
+  method: MergeMethod;
 }
 
 /** One `[agents.<name>]` table in config.toml. */
@@ -193,19 +210,32 @@ export const DEFAULT_SETTINGS: Settings = {
   slack: { channel: "#harnessd" },
   merge: {
     protected_paths: [
-      // auth, payments, secrets
+      // auth
       "**/auth/**",
+      "**/auth.*",
+      // payments
       "**/payments/**",
+      "**/billing/**",
+      // secrets
       "**/secrets/**",
+      "**/*secret*",
       "**/.env",
       "**/.env.*",
       "**/*.pem",
       "**/*.key",
-      // release config and CI, which the merge gate trusts
+      // release config, and the CI workflows the gate trusts
       ".github/workflows/**",
-      // merge-gate config
+      "docs/RELEASING.md",
+      "**/.releaserc*",
+      "**/release.config.*",
+      // merge-gate config: the harnessd config holding [merge], code owners, branch rules
       ".harnessd/config.toml",
+      "**/CODEOWNERS",
+      ".github/settings.yml",
+      ".github/rulesets/**",
     ],
+    label: "needs-human",
+    method: "squash",
   },
   qa: {
     setup_command: "pnpm install --frozen-lockfile --prefer-offline",
@@ -433,11 +463,16 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
   }
 
   if (root.merge !== undefined) {
-    const t = c.table(root.merge, "merge", ["protected_paths"]);
-    out.merge =
-      t.protected_paths === undefined
-        ? {}
-        : { protected_paths: c.stringArray(t.protected_paths, "merge.protected_paths") };
+    const t = c.table(root.merge, "merge", ["protected_paths", "label", "method"]);
+    const merge: Partial<MergeConfig> = {};
+    if (t.protected_paths !== undefined) {
+      merge.protected_paths = c.stringArray(t.protected_paths, "merge.protected_paths");
+    }
+    if (t.label !== undefined) merge.label = c.string(t.label, "merge.label");
+    if (t.method !== undefined) {
+      merge.method = c.oneOf(t.method, "merge.method", MERGE_METHODS, isMergeMethod);
+    }
+    out.merge = merge;
   }
 
   if (root.qa !== undefined) {

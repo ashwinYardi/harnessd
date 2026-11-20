@@ -44,6 +44,35 @@ export interface QaFeedback {
   failing: string[];
 }
 
+/** One PR QA approved, waiting for the merge gate (MET-14). */
+export interface MergePr {
+  partId: string;
+  partKey: string;
+  number: number;
+  url: string;
+  /** The head QA reviewed and approved. Only this commit is ever merged. */
+  sha: string;
+  /** Set once the PR is merged, by harnessd or by a human. */
+  mergedAt?: string;
+  /** Why it waits for a human (protected paths, a refused merge), once it does. */
+  needsHuman?: string;
+  /** True once the PR carries `merge.label`. */
+  labeled?: boolean;
+  /** Set when the PR was closed without being merged. */
+  closedAt?: string;
+}
+
+/** A QA approval of a parent's parts, waiting to be merged (docs/LOOP.md "Merge"). */
+export interface PendingMerge {
+  qaId: string;
+  qaKey: string;
+  parentId: string;
+  parentKey: string;
+  parentUrl: string;
+  approvedAt: string;
+  prs: MergePr[];
+}
+
 export interface LoopState {
   version: 1;
   /** ISO time of the last poll, null before the first. */
@@ -57,6 +86,12 @@ export interface LoopState {
   qaFailures: Record<string, number>;
   /** Open QA requests per part sub-issue id, cleared when the part's next run succeeds. */
   qaFeedback: Record<string, QaFeedback>;
+  /** QA approvals the merge gate has not finished, one per QA sub-issue. */
+  merges: PendingMerge[];
+  /** Failed CI or merge conflicts per parent issue id (D-014: the second one escalates). */
+  gateFailures: Record<string, number>;
+  /** PR URL to the time its needs-human ping went out, so it goes out once. */
+  humanPings: Record<string, string>;
 }
 
 export function emptyLoopState(): LoopState {
@@ -68,6 +103,9 @@ export function emptyLoopState(): LoopState {
     attempts: {},
     qaFailures: {},
     qaFeedback: {},
+    merges: [],
+    gateFailures: {},
+    humanPings: {},
   };
 }
 
@@ -137,6 +175,60 @@ function feedback(value: unknown): Record<string, QaFeedback> {
   return out;
 }
 
+function optionalString(value: unknown): value is string | undefined {
+  return value === undefined || typeof value === "string";
+}
+
+function isMergePr(value: unknown): value is MergePr {
+  const p = value as Partial<MergePr> | null;
+  return (
+    typeof p === "object" &&
+    p !== null &&
+    typeof p.partId === "string" &&
+    typeof p.partKey === "string" &&
+    typeof p.number === "number" &&
+    typeof p.url === "string" &&
+    typeof p.sha === "string" &&
+    p.sha !== "" &&
+    optionalString(p.mergedAt) &&
+    optionalString(p.needsHuman) &&
+    optionalString(p.closedAt) &&
+    (p.labeled === undefined || typeof p.labeled === "boolean")
+  );
+}
+
+function merges(value: unknown): PendingMerge[] {
+  if (!Array.isArray(value)) return [];
+  const out: PendingMerge[] = [];
+  for (const raw of value) {
+    const m = raw as Partial<PendingMerge> | null;
+    if (
+      typeof m !== "object" ||
+      m === null ||
+      typeof m.qaId !== "string" ||
+      typeof m.qaKey !== "string" ||
+      typeof m.parentId !== "string" ||
+      typeof m.parentKey !== "string" ||
+      typeof m.parentUrl !== "string" ||
+      typeof m.approvedAt !== "string" ||
+      !Array.isArray(m.prs) ||
+      !m.prs.every(isMergePr)
+    ) {
+      // A half-readable approval is dropped rather than merged on a guess.
+      continue;
+    }
+    out.push(m as PendingMerge);
+  }
+  return out;
+}
+
+function strings(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [key, v] of Object.entries(value)) if (typeof v === "string") out[key] = v;
+  return out;
+}
+
 /** Reads a state file's JSON, keeping only well-formed parts. Throws on anything unreadable. */
 export function parseLoopState(text: string): LoopState {
   const raw = JSON.parse(text) as Partial<LoopState> | null;
@@ -151,6 +243,9 @@ export function parseLoopState(text: string): LoopState {
     attempts: counts(raw.attempts),
     qaFailures: counts(raw.qaFailures),
     qaFeedback: feedback(raw.qaFeedback),
+    merges: merges(raw.merges),
+    gateFailures: counts(raw.gateFailures),
+    humanPings: strings(raw.humanPings),
   };
 }
 

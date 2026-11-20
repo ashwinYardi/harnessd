@@ -1,6 +1,6 @@
 # The autonomy loop
 
-`harnessd run` polls Linear, splits Ready issues into sub-issues, runs one agent per sub-issue and has QA review every PR (SPEC "Autonomy loop" steps 1 to 5, D-010, D-012, D-013, D-014). Code: `packages/daemon/src/coordinator/loop.ts`.
+`harnessd run` polls Linear, splits Ready issues into sub-issues, runs one agent per sub-issue, has QA review every PR and merges what passes the gate (SPEC "Autonomy loop" steps 1 to 7, D-010, D-012, D-013, D-014). Code: `packages/daemon/src/coordinator/loop.ts`.
 
 ## Running it
 ```sh
@@ -17,8 +17,9 @@ LINEAR_API_KEY=lin_api_... harnessd run [dir] [--once] [--interval <seconds>] [-
 ## One tick
 1. **Re-queue.** Any run recorded in `loop.json` that this process does not own was left by a previous process. Its worktree is removed and its sub-issue goes back to Ready, with no attempt counted. A run a pause had already marked keeps its worktree (see Pause).
 2. **Pause check.** The pause flag is re-read. If it is set, anything still running is cancelled and the tick stops.
-3. **Dispatch** eligible sub-issues, then **split** Ready issues, then **dispatch** again.
-4. **Save** `loop.json`.
+3. **Merge.** Every QA approval recorded in `loop.json` goes one step through the merge gate (see Merge).
+4. **Dispatch** eligible sub-issues, then **split** Ready issues, then **dispatch** again.
+5. **Save** `loop.json`.
 
 ## Split
 Every Ready issue without a part marker is first grilled (docs/COORDINATOR.md).
@@ -118,20 +119,52 @@ After the round:
 
 | Result | What happens |
 |---|---|
-| every PR approved | QA moves to In Review, with a comment that links each review. MET-14 merges. |
+| every PR approved | QA moves to In Review, with a comment that links each review. The approval, with each PR's head, goes to `loop.json` for the merge gate. |
 | changes requested, first failure | Each failing part goes back to Ready with a comment that links its review. QA goes back to Ready and runs again once the parts are back in review. |
 | QA could not judge a PR, first failure | QA goes back to Ready and runs again. |
 | second failure | QA and the parent move to Needs input. One comment goes on the parent and one ping is sent. Nothing is sent back again (D-014). |
 
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
 
+## Merge
+The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR merges only when **all** of these hold:
+- QA approved it, at the head it still has;
+- CI is green;
+- it touches no protected path.
+
+**Approval.** GitHub's review state cannot be the record: on a PR opened by the same `gh` login, the verdict is only a comment review. So harnessd records the approval itself. Each approved QA round adds one entry to `merges` in `loop.json`, with each part's PR number and the head sha QA checked out and reviewed.
+
+**Each tick**, every PR in `merges` is read again with one call, `gh pr view <n> --json number,url,state,headRefOid,mergeable,statusCheckRollup,files,changedFiles`. Then, in this order:
+
+| Finding | What happens |
+|---|---|
+| merged on GitHub | A human merged it: the part moves to Done. |
+| closed, not merged | The parent moves to Needs input, with a comment and one ping. The approval is dropped. |
+| head is not the approved sha | Nothing merges unreviewed. QA moves back to Ready with a comment and runs again on the new head. No QA failure is counted. |
+| a changed file matches `merge.protected_paths` | Needs a human (below). |
+| GitHub listed fewer files than `changedFiles` | Needs a human: the paths could not all be checked. |
+| a check failed, or the PR conflicts with its base | Sent back (below). |
+| a check is pending, there are no checks yet, or mergeability is still UNKNOWN | Nothing happens. The next tick looks again. |
+| every check passed | `gh pr merge <n> --squash --match-head-commit <approved sha>`. The part moves to Done, with a comment and a line to the notifier (D-015). |
+
+- **CI green** means at least one check, and every check passed: a check run that completed with SUCCESS, NEUTRAL or SKIPPED, or a commit status of SUCCESS. When a check was re-run, only its latest run counts. Any other conclusion fails. A PR with no checks waits, because D-013 needs CI green.
+- **Needs a human.** The PR gets the `merge.label` label (default `needs-human`; the label is created when the repo lacks it). The parent moves to Needs input with one comment, and one ping is sent. The ping is recorded under `humanPings` in `loop.json`, keyed by the PR URL, before it is sent. So a PR is pinged once, across ticks, restarts and new QA rounds. harnessd never merges that PR. It keeps reading it, and once a human merges it, the part moves to Done. A merge GitHub refuses (branch protection, a draft) goes the same way, with gh's error in the comment.
+- **Sent back.** A failed check or a conflict is a gate failure for the parent. The rule is the QA one: sent back once, then escalated (SPEC step 6, D-014).
+  - The first failure sends each failing part back to Ready. Its next prompt lists the failing checks, like QA feedback, and it pushes to its open PR. QA moves to Ready and runs again once the parts are back in review.
+  - The `limits.qa_max_failures`-th failure (default 2) moves QA and the parent to Needs input, with one comment and one ping. Nothing is sent back again.
+  - Gate failures are counted per parent under `gateFailures`, apart from QA failures. A new QA approval does not reset them. A parent reaching Done does.
+- **Done.** Once every PR of an approval is merged, QA moves to Done. When every part of the parent is Done, the parent moves to Done too.
+- **Pause.** No merge happens while paused. The flag is checked at the start of the tick, before each PR is read, and again right before each `gh pr merge`. A pause that lands mid-tick stops the gate before the next merge. The approval stays in `loop.json` for after resume. A flag that cannot be read counts as paused here.
+- **Protected paths** are globs in `merge.protected_paths` (docs/CONFIG.md). They are matched against each changed file's repo path, ignoring case. `**` spans directories, `*` and `?` stay within one directory, and `{a,b}` matches either. A glob without a `/` matches the file name at any depth. GitHub's file list gives a renamed file's new path only.
+- `merge.method` (default `squash`) picks `--squash`, `--merge` or `--rebase`.
+
 ## State file
 `<repo>/.harnessd/state/loop.json` is written atomically (temp file, fsync, rename). The folder has its own `.gitignore`.
 
 ```json
-{ "version": 1, "lastPollAt": "…", "inFlight": [{ "issueId": "…", "issueKey": "MET-41", "role": "backend", "agent": "backend", "worktree": "…", "branch": "…", "startedAt": "…", "pid": 123, "pausedAt": "…" }], "interrupted": [{ "issueId": "…", "issueKey": "MET-42", "role": "frontend", "agent": "frontend", "worktree": "…", "branch": "…", "interruptedAt": "…", "reason": "paused" }], "attempts": { "<issueId>": 1 }, "qaFailures": { "<parentId>": 1 }, "qaFeedback": { "<partId>": { "prUrl": "…", "reviewUrl": "…", "failing": ["…"] } } }
+{ "version": 1, "lastPollAt": "…", "inFlight": [{ "issueId": "…", "issueKey": "MET-41", "role": "backend", "agent": "backend", "worktree": "…", "branch": "…", "startedAt": "…", "pid": 123, "pausedAt": "…" }], "interrupted": [{ "issueId": "…", "issueKey": "MET-42", "role": "frontend", "agent": "frontend", "worktree": "…", "branch": "…", "interruptedAt": "…", "reason": "paused" }], "attempts": { "<issueId>": 1 }, "qaFailures": { "<parentId>": 1 }, "qaFeedback": { "<partId>": { "prUrl": "…", "reviewUrl": "…", "failing": ["…"] } }, "merges": [{ "qaId": "…", "qaKey": "MET-43", "parentId": "…", "parentKey": "MET-40", "parentUrl": "…", "approvedAt": "…", "prs": [{ "partId": "…", "partKey": "MET-41", "number": 7, "url": "…", "sha": "…", "mergedAt": "…", "needsHuman": "…", "labeled": true, "closedAt": "…" }] }], "gateFailures": { "<parentId>": 1 }, "humanPings": { "<prUrl>": "…" } }
 ```
 
 `pausedAt` is set only on an in-flight run that a pause is cancelling.
 
-Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts and the QA feedback a sent-back part gets in its prompt. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.
+Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the QA approvals waiting to merge and the needs-human pings already sent. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.
