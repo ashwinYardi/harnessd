@@ -93,6 +93,8 @@ Harnesses are checked once for each harness an agent uses. Checks run in paralle
 
 `HARNESSD_HOME` is passed on when it was set for `init`.
 
+launchd does not load nvm or your shell profile. The service sees only the PATH in the plist, and `harnessd init` writes that PATH. The from-source wrapper in the README names its Node by an absolute path, so the service always runs that Node, whatever Node is first on PATH. After you change Node, run the README Install block again with the new Node active, then run `harnessd init` again.
+
 ## Secrets
 harnessd needs a Linear personal API key, and a Slack webhook url if you want Slack. Set both in the app. No shell profile edit and no restart is needed (D-030).
 
