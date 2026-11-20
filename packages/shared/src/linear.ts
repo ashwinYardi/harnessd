@@ -48,6 +48,38 @@ export interface Issue {
   milestone?: string;
 }
 
+/** An issue that blocks another, with its workflow state name ("In Review"). */
+export interface BlockerRef {
+  id: string;
+  key: string;
+  state: string;
+}
+
+/** An issue with its parent and every blocker, finished or not. */
+export interface LinkedIssue extends Issue {
+  /** Linear UUID of the parent issue, when this is a sub-issue. */
+  parentId?: string;
+  parentKey?: string;
+  /** Every issue with a "blocks" relation to this one. */
+  blockers: BlockerRef[];
+}
+
+/** Area labels; an issue carries exactly one (SPEC "Linear filing rules"). */
+export const AREA_LABELS = [
+  "harness-adapter",
+  "ui",
+  "cloud",
+  "memory",
+  "coordinator",
+  "infra",
+] as const;
+
+export type AreaLabel = (typeof AREA_LABELS)[number];
+
+export function isAreaLabel(value: string): value is AreaLabel {
+  return (AREA_LABELS as readonly string[]).includes(value);
+}
+
 /**
  * Read-only view of the secret store. The store itself (keychain, env) ships separately;
  * this is the boundary integrations depend on.

@@ -8,6 +8,7 @@ import {
   LinearError,
   MISSING_KEY_MESSAGE,
   parseRetryAfter,
+  readyFilter,
 } from "./client.ts";
 
 const KEY = "lin_api_test_0000";
@@ -143,6 +144,174 @@ test("listReady parses size, Done when, labels, milestone and finished blockers"
   assert.deepEqual(met14?.doneWhen, []);
   assert.equal(met14?.milestone, undefined);
   assert.equal(issues.find((i) => i.key === "MET-18")?.size, "L");
+});
+
+function rawChild(n: number, extra: Record<string, unknown> = {}) {
+  return {
+    id: `child-${n}`,
+    identifier: `MET-${n}`,
+    title: `Child ${n}`,
+    description: `harnessd part: backend\n**Size**: S`,
+    priority: 2,
+    url: `https://linear.app/meta-harness/issue/met-${n}`,
+    createdAt: `2026-11-0${n % 9}T09:00:00.000Z`,
+    state: { name: "Ready" },
+    team: { id: TEAM_ID, key: "MET" },
+    labels: { nodes: [] },
+    parent: { id: MET12_ID, identifier: "MET-12" },
+    inverseRelations: { nodes: [] },
+    ...extra,
+  };
+}
+
+const page = (nodes: unknown[]) => ({
+  data: { issues: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } },
+});
+
+test("readyFilter takes a team key or UUID and a project id or name", () => {
+  assert.deepEqual(readyFilter({ teamId: "MET", projectName: "harnessd" }), {
+    team: { key: { eqIgnoreCase: "MET" } },
+    state: { name: { eqIgnoreCase: "Ready" } },
+    project: { name: { eqIgnoreCase: "harnessd" } },
+  });
+  assert.deepEqual(readyFilter({ teamId: TEAM_ID, projectId: "p", projectName: "ignored" }), {
+    team: { id: { eq: TEAM_ID } },
+    state: { name: { eqIgnoreCase: "Ready" } },
+    project: { id: { eq: "p" } },
+  });
+});
+
+test("listReadyContaining filters on the description and keeps blocked issues with their blockers", async () => {
+  const blocked = rawChild(31, {
+    priority: 1,
+    inverseRelations: {
+      nodes: [
+        {
+          type: "blocks",
+          issue: {
+            id: "child-30",
+            identifier: "MET-30",
+            state: { type: "started", name: "In Progress" },
+          },
+        },
+      ],
+    },
+  });
+  const { linear, sent } = client([{ body: page([rawChild(30, { priority: 3 }), blocked]) }]);
+  const issues = await linear.listReadyContaining({ teamId: "MET" }, "harnessd part: ");
+  assert.deepEqual(
+    issues.map((i) => i.key),
+    ["MET-31", "MET-30"],
+  );
+  assert.deepEqual(issues[0]?.blockers, [{ id: "child-30", key: "MET-30", state: "In Progress" }]);
+  assert.deepEqual(issues[0]?.blockedBy, ["MET-30"]);
+  assert.equal(issues[0]?.parentId, MET12_ID);
+  assert.equal(issues[0]?.parentKey, "MET-12");
+  assert.match(sent[0]?.query ?? "", /query ReadyIssuesContaining\(/);
+  assert.match(sent[0]?.query ?? "", /parent \{ id identifier \}/);
+  assert.deepEqual(sent[0]?.variables.filter, {
+    team: { key: { eqIgnoreCase: "MET" } },
+    state: { name: { eqIgnoreCase: "Ready" } },
+    description: { contains: "harnessd part: " },
+  });
+});
+
+test("listChildren returns sub-issues in creation order", async () => {
+  const { linear, sent } = client([
+    {
+      body: {
+        data: { issue: { id: MET12_ID, children: { nodes: [rawChild(42), rawChild(41)] } } },
+      },
+    },
+  ]);
+  const children = await linear.listChildren(MET12_ID);
+  assert.deepEqual(
+    children.map((c) => c.key),
+    ["MET-41", "MET-42"],
+  );
+  assert.match(sent[0]?.query ?? "", /query IssueChildren\(\$id: String!\)/);
+  assert.deepEqual(sent[0]?.variables, { id: MET12_ID });
+});
+
+test("listChildren fails clearly for a missing parent", async () => {
+  const { linear } = client([{ body: { data: { issue: null } } }]);
+  await assert.rejects(linear.listChildren("nope"), { name: "LinearError", code: "not_found" });
+});
+
+const PARENT_META = {
+  data: {
+    issue: {
+      id: MET12_ID,
+      team: { id: TEAM_ID },
+      project: { id: "proj-1" },
+      labels: {
+        nodes: [
+          { id: "label-coord", name: "coordinator" },
+          { id: "label-p1", name: "p1" },
+        ],
+      },
+    },
+  },
+};
+
+test("createSubIssue creates a child in the parent's team and project with its labels", async () => {
+  const { linear, sent, remaining } = client([
+    { body: PARENT_META },
+    { fixture: "team-states" },
+    { body: { data: { issueCreate: { success: true, issue: rawChild(50) } } } },
+  ]);
+  const child = await linear.createSubIssue(MET12_ID, {
+    title: "Child 50",
+    description: "body",
+    state: "Ready",
+    labels: ["coordinator"],
+  });
+  assert.equal(remaining(), 0);
+  assert.equal(child.key, "MET-50");
+  assert.equal(child.parentKey, "MET-12");
+  assert.deepEqual(
+    sent.map((r) => /^(?:query|mutation) (\w+)/.exec(r.query)?.[1]),
+    ["IssueParentMeta", "TeamStates", "IssueCreate"],
+  );
+  assert.deepEqual(sent[2]?.variables, {
+    input: {
+      teamId: TEAM_ID,
+      parentId: MET12_ID,
+      title: "Child 50",
+      description: "body",
+      stateId: "0c7e1b2a-3d4f-4e5a-9b6c-000000000002",
+      projectId: "proj-1",
+      labelIds: ["label-coord"],
+    },
+  });
+});
+
+test("createSubIssue refuses a label the parent does not carry", async () => {
+  const { linear, sent } = client([{ body: PARENT_META }]);
+  await assert.rejects(
+    linear.createSubIssue(MET12_ID, {
+      title: "t",
+      description: "d",
+      state: "Ready",
+      labels: ["ui"],
+    }),
+    { name: "LinearError", code: "not_found", message: /has no label "ui"/ },
+  );
+  assert.equal(sent.length, 1);
+});
+
+test("createBlocksRelation posts a blocks relation from blocker to blocked", async () => {
+  const { linear, sent } = client([{ body: { data: { issueRelationCreate: { success: true } } } }]);
+  await linear.createBlocksRelation("child-41", "child-43");
+  assert.match(sent[0]?.query ?? "", /mutation IssueRelationCreate\(/);
+  assert.deepEqual(sent[0]?.variables, {
+    input: { issueId: "child-41", relatedIssueId: "child-43", type: "blocks" },
+  });
+});
+
+test("createBlocksRelation fails when Linear reports no success", async () => {
+  const { linear } = client([{ body: { data: { issueRelationCreate: { success: false } } } }]);
+  await assert.rejects(linear.createBlocksRelation("a", "b"), { code: "graphql" });
 });
 
 test("getIssue reads one issue by key", async () => {

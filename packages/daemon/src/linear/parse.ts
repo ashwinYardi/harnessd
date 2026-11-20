@@ -1,4 +1,11 @@
-import type { DoneWhenItem, Issue, Priority, Size } from "@harnessd/shared";
+import type {
+  BlockerRef,
+  DoneWhenItem,
+  Issue,
+  LinkedIssue,
+  Priority,
+  Size,
+} from "@harnessd/shared";
 
 /** Shape of an issue node as selected by ISSUE_FIELDS in client.ts. */
 export interface RawIssue {
@@ -13,10 +20,15 @@ export interface RawIssue {
   team?: { id: string; key: string } | null;
   labels?: { nodes: { name: string }[] } | null;
   projectMilestone?: { name: string } | null;
+  parent?: { id: string; identifier: string } | null;
   inverseRelations?: {
     nodes: {
       type: string;
-      issue?: { identifier: string; state?: { type: string } | null } | null;
+      issue?: {
+        id?: string;
+        identifier: string;
+        state?: { type: string; name?: string } | null;
+      } | null;
     }[];
   } | null;
 }
@@ -84,6 +96,30 @@ export function parseIssue(raw: RawIssue): Issue {
     blockedBy: unfinishedBlockers(raw),
   };
   if (raw.projectMilestone?.name) issue.milestone = raw.projectMilestone.name;
+  return issue;
+}
+
+/** Every issue that blocks this one, finished or not, with its state name. */
+export function blockerRefs(raw: RawIssue): BlockerRef[] {
+  const refs: BlockerRef[] = [];
+  for (const relation of raw.inverseRelations?.nodes ?? []) {
+    if (relation.type !== "blocks" || !relation.issue) continue;
+    refs.push({
+      id: relation.issue.id ?? "",
+      key: relation.issue.identifier,
+      state: relation.issue.state?.name ?? "",
+    });
+  }
+  return refs;
+}
+
+/** parseIssue plus the parent and every blocker. */
+export function parseLinkedIssue(raw: RawIssue): LinkedIssue {
+  const issue: LinkedIssue = { ...parseIssue(raw), blockers: blockerRefs(raw) };
+  if (raw.parent?.id) {
+    issue.parentId = raw.parent.id;
+    issue.parentKey = raw.parent.identifier;
+  }
   return issue;
 }
 

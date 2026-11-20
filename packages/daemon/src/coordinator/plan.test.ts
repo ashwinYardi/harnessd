@@ -1,0 +1,189 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import {
+  emptyTokenUsage,
+  type HarnessAdapter,
+  type Issue,
+  type ResolvedAgentConfig,
+  type RunResult,
+  type Task,
+} from "@harnessd/shared";
+import {
+  buildPlanPrompt,
+  fallbackPlan,
+  MAX_PLAN_PARTS,
+  parsePlanReply,
+  planIssue,
+} from "./plan.ts";
+
+function issue(fields: Partial<Issue> = {}): Issue {
+  return {
+    id: "id-1",
+    key: "MET-40",
+    title: "Agents show avatars",
+    description:
+      "**Why**\nPeople tell agents apart.\n\n**Done when**\n- [ ] Avatars show\n\n**Size**: M",
+    priority: 2,
+    state: "Ready",
+    labels: ["coordinator"],
+    size: "M",
+    doneWhen: [{ text: "Avatars show", checked: false }],
+    url: "https://linear.test/MET-40",
+    blockedBy: [],
+    ...fields,
+  };
+}
+
+const agent: ResolvedAgentConfig = {
+  name: "coordinator",
+  role: "coordinator",
+  harness: "claude-code",
+  instructions: "Keep parts small.",
+  rules: [],
+  skills: [],
+};
+
+function adapterReplying(reply: string | { status: RunResult["status"]; error: string }) {
+  const tasks: Task[] = [];
+  const adapter: HarnessAdapter = {
+    id: "claude-code",
+    start(task) {
+      tasks.push(task);
+      const result: RunResult = {
+        status: typeof reply === "string" ? "ok" : reply.status,
+        exitCode: 0,
+        durationMs: 1,
+        tokens: emptyTokenUsage(),
+      };
+      if (typeof reply === "string") result.finalText = reply;
+      else result.error = reply.error;
+      return {
+        events: (async function* () {
+          yield { type: "end" as const, result };
+        })(),
+        result: Promise.resolve(result),
+        cancel: async () => {},
+      };
+    },
+  };
+  return { adapter, tasks };
+}
+
+const part = (role: string, size = "S") => ({
+  role,
+  title: `${role} work`,
+  prompt: "Do it.",
+  size,
+});
+
+test("parsePlanReply accepts strict JSON, also inside a code fence", () => {
+  const reply = JSON.stringify({ parts: [part("backend"), part("frontend", "m")] });
+  assert.deepEqual(parsePlanReply(reply), {
+    ok: true,
+    parts: [
+      { role: "backend", title: "backend work", prompt: "Do it.", size: "S" },
+      { role: "frontend", title: "frontend work", prompt: "Do it.", size: "M" },
+    ],
+  });
+  assert.equal(parsePlanReply(`Here:\n\`\`\`json\n${reply}\n\`\`\``).ok, true);
+});
+
+test("parsePlanReply parses L so the loop can refuse it", () => {
+  const parsed = parsePlanReply(JSON.stringify({ parts: [part("backend", "L")] }));
+  assert.equal(parsed.ok && parsed.parts[0]?.size, "L");
+});
+
+test("parsePlanReply rejects anything off-shape", () => {
+  const cases: Array<[unknown, RegExp]> = [
+    [[], /expected a JSON object/],
+    [{ parts: [], notes: "x" }, /unknown key "notes"/],
+    [{ parts: "x" }, /parts: expected an array/],
+    [{ parts: [] }, /at least one part/],
+    [{ parts: Array.from({ length: MAX_PLAN_PARTS + 1 }, () => part("backend")) }, /at most 6/],
+    [{ parts: [{ ...part("backend"), extra: 1 }] }, /parts\[0\]: unknown key "extra"/],
+    [{ parts: [{ ...part("backend"), title: " " }] }, /parts\[0\]\.title: expected a non-empty/],
+    [{ parts: [part("qa")] }, /role: expected backend or frontend, got "qa"/],
+    [{ parts: [part("backend", "XL")] }, /size: expected S or M, got "XL"/],
+  ];
+  for (const [value, error] of cases) {
+    const parsed = parsePlanReply(JSON.stringify(value));
+    assert.equal(parsed.ok, false, JSON.stringify(value));
+    if (!parsed.ok) assert.match(parsed.error, error);
+  }
+  const prose = parsePlanReply("I think two parts.");
+  assert.equal(prose.ok, false);
+  if (!prose.ok) assert.match(prose.error, /^not JSON/);
+});
+
+test("fallbackPlan is one part: frontend with the ui label, else backend, at the issue size", () => {
+  assert.deepEqual(
+    fallbackPlan(issue({ labels: ["ui"], size: "S" })).map((p) => [p.role, p.size, p.title]),
+    [["frontend", "S", "Agents show avatars"]],
+  );
+  assert.deepEqual(
+    fallbackPlan(issue()).map((p) => [p.role, p.size]),
+    [["backend", "M"]],
+  );
+  assert.equal(fallbackPlan(issue({ size: undefined }))[0]?.size, "M");
+});
+
+test("buildPlanPrompt carries the rules, the issue, the grill calls and the context", () => {
+  const prompt = buildPlanPrompt({
+    issue: issue(),
+    context: { spec: "THE SPEC", decisions: [{ name: "D-014", text: "Sizes." }] },
+    instructions: "Keep parts small.",
+    calls: [{ question: "Where?", answer: "daemon", basis: "SPEC" }],
+  });
+  for (const text of [
+    "Reply with strict JSON only",
+    '"role": "backend" | "frontend"',
+    "L is not allowed",
+    "Do not plan QA",
+    "## Coordinator instructions\nKeep parts small.",
+    "## Issue MET-40: Agents show avatars",
+    "- [ ] Avatars show",
+    "- Where? → daemon",
+    "THE SPEC",
+    "### D-014\nSizes.",
+  ]) {
+    assert.ok(prompt.includes(text), text);
+  }
+});
+
+test("planIssue runs the coordinator harness and returns the model plan", async () => {
+  const { adapter, tasks } = adapterReplying(JSON.stringify({ parts: [part("backend")] }));
+  const plan = await planIssue(issue(), {
+    adapter,
+    agent: { ...agent, model: "opus" },
+    context: { spec: "", decisions: [] },
+    cwd: "/repo",
+  });
+  assert.equal(plan.source, "model");
+  assert.equal(plan.parts.length, 1);
+  assert.equal(tasks[0]?.id, "plan-MET-40");
+  assert.equal(tasks[0]?.budgetMs, 10 * 60_000);
+  assert.equal(tasks[0]?.model, "opus");
+});
+
+test("planIssue falls back on a bad reply, a failed run or a harness mismatch", async () => {
+  const deps = { agent, context: { spec: "", decisions: [] }, cwd: "/repo" };
+  const bad = await planIssue(issue(), { ...deps, adapter: adapterReplying("nope").adapter });
+  assert.equal(bad.source, "fallback");
+  assert.match(bad.error ?? "", /not JSON/);
+  assert.deepEqual(bad.parts, fallbackPlan(issue()));
+
+  const failed = await planIssue(issue(), {
+    ...deps,
+    adapter: adapterReplying({ status: "timeout", error: "over budget" }).adapter,
+  });
+  assert.equal(failed.source, "fallback");
+
+  const other = adapterReplying("{}");
+  const mismatch = await planIssue(issue(), {
+    ...deps,
+    adapter: { ...other.adapter, id: "codex" },
+  });
+  assert.equal(mismatch.source, "fallback");
+  assert.match(mismatch.error ?? "", /does not match/);
+  assert.equal(other.tasks.length, 0);
+});

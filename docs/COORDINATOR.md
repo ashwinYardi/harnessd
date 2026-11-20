@@ -40,4 +40,4 @@ These run in this order. If one fails, the steps after it are skipped and the ou
 3. On escalation only, the issue moves to **Needs input**.
 4. On escalation only, exactly one ping is sent: `<KEY> needs input (<trigger>): <question> <url>`.
 
-On `proceed`, the issue's state is left alone; the loop goes on to split and assign the issue.
+On `proceed`, the issue's state is left alone; the loop goes on to split and assign the issue (docs/LOOP.md).

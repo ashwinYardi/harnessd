@@ -1,10 +1,11 @@
 import {
   type Issue,
   LINEAR_API_KEY_SECRET,
+  type LinkedIssue,
   type SecretSource,
   type WorkflowStateName,
 } from "@harnessd/shared";
-import { compareByPriority, parseIssue, type RawIssue } from "./parse.ts";
+import { compareByPriority, parseIssue, parseLinkedIssue, type RawIssue } from "./parse.ts";
 
 export const LINEAR_ENDPOINT = "https://api.linear.app/graphql";
 
@@ -43,9 +44,30 @@ export interface LinearClientOptions {
 }
 
 export interface ListReadyOptions {
+  /** Team UUID, or the team key ("MET"). */
   teamId: string;
   projectId?: string;
+  /** Project name, matched case-insensitively; used when projectId is not set. */
+  projectName?: string;
 }
+
+/** A new sub-issue: same team and project as the parent. */
+export interface CreateSubIssueInput {
+  title: string;
+  /** Markdown body. */
+  description: string;
+  state: WorkflowStateName;
+  /** Label names to copy from the parent. Names the parent does not carry are an error. */
+  labels?: string[];
+}
+
+interface ParentMeta {
+  teamId: string;
+  projectId: string | undefined;
+  labels: { id: string; name: string }[];
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface WorkflowState {
   id: string;
@@ -73,14 +95,36 @@ const ISSUE_FIELDS = `
   team { id key }
   labels { nodes { name } }
   projectMilestone { name }
-  inverseRelations { nodes { type issue { identifier state { type } } } }
+  parent { id identifier }
+  inverseRelations { nodes { type issue { identifier state { type name } id } } }
 `;
 
-const READY_ISSUES_QUERY = `query ReadyIssues($filter: IssueFilter!, $first: Int!, $after: String) {
+const issuesQuery = (
+  name: string,
+) => `query ${name}($filter: IssueFilter!, $first: Int!, $after: String) {
   issues(filter: $filter, first: $first, after: $after, orderBy: createdAt) {
     nodes { ${ISSUE_FIELDS} }
     pageInfo { hasNextPage endCursor }
   }
+}`;
+
+const READY_ISSUES_QUERY = issuesQuery("ReadyIssues");
+const READY_CONTAINING_QUERY = issuesQuery("ReadyIssuesContaining");
+
+const ISSUE_CHILDREN_QUERY = `query IssueChildren($id: String!) {
+  issue(id: $id) { id children(first: 100) { nodes { ${ISSUE_FIELDS} } } }
+}`;
+
+const PARENT_META_QUERY = `query IssueParentMeta($id: String!) {
+  issue(id: $id) { id team { id } project { id } labels { nodes { id name } } }
+}`;
+
+const ISSUE_CREATE_MUTATION = `mutation IssueCreate($input: IssueCreateInput!) {
+  issueCreate(input: $input) { success issue { ${ISSUE_FIELDS} } }
+}`;
+
+const RELATION_CREATE_MUTATION = `mutation IssueRelationCreate($input: IssueRelationCreateInput!) {
+  issueRelationCreate(input: $input) { success }
 }`;
 
 const ISSUE_QUERY = `query Issue($id: String!) {
@@ -105,7 +149,7 @@ const COMMENT_CREATE_MUTATION = `mutation CommentCreate($input: CommentCreateInp
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** Minimal Linear GraphQL client: Ready issues, state moves and comments. */
+/** Minimal Linear GraphQL client: Ready issues, sub-issues, relations, state moves and comments. */
 export class LinearClient {
   #readKey: () => Promise<string | undefined>;
   #key: string | undefined;
@@ -129,26 +173,7 @@ export class LinearClient {
 
   /** Ready issues that nothing unfinished blocks, urgent first, then oldest first. */
   async listReady(options: ListReadyOptions): Promise<Issue[]> {
-    const filter: Record<string, unknown> = {
-      team: { id: { eq: options.teamId } },
-      state: { name: { eqIgnoreCase: "Ready" } },
-    };
-    if (options.projectId !== undefined) filter.project = { id: { eq: options.projectId } };
-
-    const raws: RawIssue[] = [];
-    let after: string | null = null;
-    for (;;) {
-      const data: {
-        issues: { nodes: RawIssue[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
-      } = await this.request(READY_ISSUES_QUERY, { filter, first: PAGE_SIZE, after });
-      if (!data.issues)
-        throw new LinearError("invalid_response", "Linear returned no issues field.");
-      raws.push(...data.issues.nodes);
-      const { hasNextPage, endCursor } = data.issues.pageInfo;
-      if (!hasNextPage || !endCursor) break;
-      after = endCursor;
-    }
-
+    const raws = await this.#listIssues(READY_ISSUES_QUERY, readyFilter(options));
     return raws
       .map((raw) => {
         const issue = this.#remember(raw);
@@ -157,6 +182,81 @@ export class LinearClient {
       .filter(({ issue }) => issue.blockedBy.length === 0)
       .sort(compareByPriority)
       .map(({ issue }) => issue);
+  }
+
+  /**
+   * Ready issues whose description contains `text`, blocked ones included, with
+   * their parent and blockers. Urgent first, then oldest first.
+   */
+  async listReadyContaining(options: ListReadyOptions, text: string): Promise<LinkedIssue[]> {
+    const filter = { ...readyFilter(options), description: { contains: text } };
+    const raws = await this.#listIssues(READY_CONTAINING_QUERY, filter);
+    return raws
+      .map((raw) => {
+        this.#remember(raw);
+        const issue = parseLinkedIssue(raw);
+        return { issue, priority: issue.priority, createdAt: raw.createdAt };
+      })
+      .sort(compareByPriority)
+      .map(({ issue }) => issue);
+  }
+
+  /** The sub-issues of an issue, with their blockers, in creation order. */
+  async listChildren(parentId: string): Promise<LinkedIssue[]> {
+    const data: { issue: { children: { nodes: RawIssue[] } | null } | null } = await this.request(
+      ISSUE_CHILDREN_QUERY,
+      { id: parentId },
+    );
+    if (!data.issue) throw new LinearError("not_found", `Linear issue ${parentId} not found.`);
+    return (data.issue.children?.nodes ?? [])
+      .slice()
+      .sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))
+      .map((raw) => {
+        this.#remember(raw);
+        return parseLinkedIssue(raw);
+      });
+  }
+
+  /** Creates a sub-issue of `parentId` in the parent's team and project. */
+  async createSubIssue(parentId: string, input: CreateSubIssueInput): Promise<LinkedIssue> {
+    const parent = await this.#parentMeta(parentId);
+    const labelIds = (input.labels ?? []).map((name) => {
+      const label = parent.labels.find((l) => l.name === name);
+      if (!label) {
+        throw new LinearError("not_found", `Linear issue ${parentId} has no label "${name}".`);
+      }
+      return label.id;
+    });
+    const stateId = await this.#stateId(parent.teamId, input.state);
+    const create: Record<string, unknown> = {
+      teamId: parent.teamId,
+      parentId,
+      title: input.title,
+      description: input.description,
+      stateId,
+    };
+    if (parent.projectId !== undefined) create.projectId = parent.projectId;
+    if (labelIds.length > 0) create.labelIds = labelIds;
+    const data: { issueCreate: { success: boolean; issue: RawIssue | null } } = await this.request(
+      ISSUE_CREATE_MUTATION,
+      { input: create },
+    );
+    if (!data.issueCreate?.success || !data.issueCreate.issue) {
+      throw new LinearError("graphql", `Linear did not create the sub-issue of ${parentId}.`);
+    }
+    this.#remember(data.issueCreate.issue);
+    return parseLinkedIssue(data.issueCreate.issue);
+  }
+
+  /** Records that `blockerId` blocks `blockedId` (Linear relation type "blocks"). */
+  async createBlocksRelation(blockerId: string, blockedId: string): Promise<void> {
+    const data: { issueRelationCreate: { success: boolean } } = await this.request(
+      RELATION_CREATE_MUTATION,
+      { input: { issueId: blockerId, relatedIssueId: blockedId, type: "blocks" } },
+    );
+    if (!data.issueRelationCreate?.success) {
+      throw new LinearError("graphql", `Linear did not relate ${blockerId} to ${blockedId}.`);
+    }
   }
 
   /** Reads one issue by key ("MET-12") or UUID. */
@@ -168,20 +268,10 @@ export class LinearClient {
 
   /** Moves an issue to a workflow state of its team, matched by name (case-insensitive). */
   async moveTo(issueId: string, stateName: WorkflowStateName): Promise<void> {
-    const teamId = await this.#teamOf(issueId);
-    const states = await this.#statesOf(teamId);
-    const wanted = stateName.toLowerCase();
-    const state = states.find((s) => s.name.toLowerCase() === wanted);
-    if (!state) {
-      const known = states.map((s) => s.name).join(", ");
-      throw new LinearError(
-        "not_found",
-        `Linear team has no workflow state "${stateName}" (has: ${known}).`,
-      );
-    }
+    const stateId = await this.#stateId(await this.#teamOf(issueId), stateName);
     const data: { issueUpdate: { success: boolean } } = await this.request(ISSUE_UPDATE_MUTATION, {
       id: issueId,
-      input: { stateId: state.id },
+      input: { stateId },
     });
     if (!data.issueUpdate?.success) {
       throw new LinearError("graphql", `Linear did not move ${issueId} to "${stateName}".`);
@@ -284,6 +374,58 @@ export class LinearClient {
     return key;
   }
 
+  async #listIssues(query: string, filter: Record<string, unknown>): Promise<RawIssue[]> {
+    const raws: RawIssue[] = [];
+    let after: string | null = null;
+    for (;;) {
+      const data: {
+        issues: { nodes: RawIssue[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } };
+      } = await this.request(query, { filter, first: PAGE_SIZE, after });
+      if (!data.issues)
+        throw new LinearError("invalid_response", "Linear returned no issues field.");
+      raws.push(...data.issues.nodes);
+      const { hasNextPage, endCursor } = data.issues.pageInfo;
+      if (!hasNextPage || !endCursor) break;
+      after = endCursor;
+    }
+    return raws;
+  }
+
+  async #stateId(teamId: string, stateName: WorkflowStateName): Promise<string> {
+    const states = await this.#statesOf(teamId);
+    const wanted = stateName.toLowerCase();
+    const state = states.find((s) => s.name.toLowerCase() === wanted);
+    if (!state) {
+      const known = states.map((s) => s.name).join(", ");
+      throw new LinearError(
+        "not_found",
+        `Linear team has no workflow state "${stateName}" (has: ${known}).`,
+      );
+    }
+    return state.id;
+  }
+
+  async #parentMeta(parentId: string): Promise<ParentMeta> {
+    const data: {
+      issue: {
+        id: string;
+        team: { id: string } | null;
+        project: { id: string } | null;
+        labels: { nodes: { id: string; name: string }[] } | null;
+      } | null;
+    } = await this.request(PARENT_META_QUERY, { id: parentId });
+    const teamId = data.issue?.team?.id;
+    if (!data.issue || !teamId) {
+      throw new LinearError("not_found", `Linear issue ${parentId} not found.`);
+    }
+    this.#issueTeams.set(parentId, teamId);
+    return {
+      teamId,
+      projectId: data.issue.project?.id,
+      labels: data.issue.labels?.nodes ?? [],
+    };
+  }
+
   #remember(raw: RawIssue): Issue {
     const issue = parseIssue(raw);
     if (raw.team?.id) {
@@ -318,6 +460,22 @@ export class LinearClient {
     this.#teamStates.set(teamId, states);
     return states;
   }
+}
+
+/** Team by UUID or by key; project by id, else by name. Only Ready issues. */
+export function readyFilter(options: ListReadyOptions): Record<string, unknown> {
+  const team = UUID.test(options.teamId)
+    ? { id: { eq: options.teamId } }
+    : { key: { eqIgnoreCase: options.teamId } };
+  const filter: Record<string, unknown> = {
+    team,
+    state: { name: { eqIgnoreCase: "Ready" } },
+  };
+  if (options.projectId !== undefined) filter.project = { id: { eq: options.projectId } };
+  else if (options.projectName !== undefined) {
+    filter.project = { name: { eqIgnoreCase: options.projectName } };
+  }
+  return filter;
 }
 
 /** Retry-After as delta-seconds or an HTTP date, in ms. */

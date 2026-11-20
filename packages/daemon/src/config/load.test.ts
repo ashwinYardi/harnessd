@@ -50,6 +50,32 @@ test("missing folders load as defaults", async () => {
   assert.equal(resolveAgentConfig(merged, "coordinator").instructions, "");
 });
 
+test("an avatar loads from config.toml or agents/<name>.md, once per folder", async () => {
+  const f = await fixture({
+    "home/.harnessd/config.toml": '[agents.backend]\navatar = "https://example.test/b.png"\n',
+    "repo/.harnessd/agents/qa.md": "---\navatar: avatars/qa.png\n---\nCheck everything.\n",
+  });
+  const merged = await loadConfig({
+    globalDir: f.globalDir,
+    workspaceDir: f.workspaceDir,
+    home: f.home,
+  });
+  assert.equal(merged.agents.backend?.avatar, "https://example.test/b.png");
+  assert.equal(resolveAgentConfig(merged, "qa").avatar, "avatars/qa.png");
+  assert.equal("avatar" in resolveAgentConfig(merged, "frontend"), false);
+
+  const clash = await fixture({
+    "home/.harnessd/config.toml": '[agents.qa]\navatar = "a.png"\n',
+    "home/.harnessd/agents/qa.md": "---\navatar: b.png\n---\n",
+  });
+  await assert.rejects(
+    loadConfig({ globalDir: clash.globalDir, home: clash.home }),
+    configError(
+      "~/.harnessd/agents/qa.md: avatar: also set as agents.qa.avatar in ~/.harnessd/config.toml",
+    ),
+  );
+});
+
 test("global and workspace folders load and merge", async () => {
   const f = await fixture({
     "home/.harnessd/config.toml": [

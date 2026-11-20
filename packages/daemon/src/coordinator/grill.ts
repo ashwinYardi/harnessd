@@ -151,7 +151,8 @@ export function noteTitle(question: string): string {
   return title.length <= 80 ? title : `${title.slice(0, 79)}…`;
 }
 
-async function runOnce(
+/** Runs one task to the end and returns the final assistant text, or why there is none. */
+export async function runForReply(
   adapter: HarnessAdapter,
   task: Task,
   cwd: string,
@@ -222,7 +223,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       attempt === 1
         ? prompt
         : `${prompt}\nYour previous reply was rejected (${parsed.ok ? "" : parsed.error}). Reply again with only the JSON object.\n`;
-    const reply = await runOnce(deps.adapter, task(attempt, text), deps.cwd);
+    const reply = await runForReply(deps.adapter, task(attempt, text), deps.cwd);
     parsed = reply.ok ? parseGrillReply(reply.text) : reply;
     if (parsed.ok) break;
   }
