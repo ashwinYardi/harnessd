@@ -15,7 +15,7 @@ test("parseConfigFile accepts a full config", () => {
   const input = {
     limits: { max_concurrent: 5, budget_minutes: { S: 20, M: 90 }, qa_max_failures: 1 },
     linear: { team_id: "MET", project: "harnessd" },
-    slack: { channel: "#ops" },
+    slack: { channel: "#ops", summary_time: "18:30", time_zone: "Europe/Berlin" },
     merge: { protected_paths: ["infra/**"], label: "hold", method: "rebase" },
     qa: { setup_command: "", test_command: "make test" },
     daemon: { port: 4800 },
@@ -54,7 +54,7 @@ test("unknown keys are rejected with their path", () => {
   );
   rejects(
     { colour: "red" },
-    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, daemon, agents, mcp`,
+    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, daemon, agents, mcp, skills`,
   );
   rejects(
     { limits: { budget_minutes: { L: 300 } } },
@@ -87,6 +87,22 @@ test("wrong types are rejected with their path", () => {
     `${FILE}: qa.command: unknown key, expected one of setup_command, test_command`,
   );
   rejects({ slack: { channel: "" } }, `${FILE}: slack.channel: expected a non-empty string`);
+  rejects(
+    { slack: { summary_time: "9pm" } },
+    `${FILE}: slack.summary_time: expected a 24-hour time "HH:MM", got "9pm"`,
+  );
+  rejects(
+    { slack: { summary_time: "24:00" } },
+    `${FILE}: slack.summary_time: expected a 24-hour time "HH:MM", got "24:00"`,
+  );
+  rejects(
+    { slack: { time_zone: "Mars/Olympus" } },
+    `${FILE}: slack.time_zone: expected an IANA time zone such as "Asia/Kolkata", got "Mars/Olympus"`,
+  );
+  rejects(
+    { slack: { webhook_url: "https://hooks.slack.com/x" } },
+    `${FILE}: slack.webhook_url: unknown key, expected one of channel, summary_time, time_zone`,
+  );
   rejects(
     { merge: { protected_paths: ["a", 3] } },
     `${FILE}: merge.protected_paths[1]: expected a string, got 3`,
@@ -166,4 +182,25 @@ test("mcp servers are validated with their path", () => {
     `${FILE}: mcp.my docs: server names may only use letters, digits, _ and -`,
   );
   rejects({ mcp: [] }, `${FILE}: mcp: expected a table, got an array`);
+});
+
+test("skill tables take enabled, upstream, commit and version", () => {
+  const skills = {
+    tdd: { upstream: "mattpocock/skills", commit: "abeeaf95660ba9e8b7c753eb38f441ca707a8823" },
+    impeccable: { upstream: "pbakaus/impeccable", commit: "b49177d", version: "4.10.0" },
+    research: { enabled: false },
+  };
+  assert.deepEqual(parseConfigFile({ skills }, FILE), { skills });
+  rejects(
+    { skills: { tdd: { enabled: "no" } } },
+    `${FILE}: skills.tdd.enabled: expected true or false, got "no"`,
+  );
+  rejects(
+    { skills: { tdd: { pin: "x" } } },
+    `${FILE}: skills.tdd.pin: unknown key, expected one of enabled, upstream, commit, version`,
+  );
+  rejects(
+    { skills: { tdd: { commit: "" } } },
+    `${FILE}: skills.tdd.commit: expected a non-empty string`,
+  );
 });

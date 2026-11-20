@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { createFilePauseStore, readDaemonInfo, startDaemon } from "@harnessd/daemon";
+import { type Check, createFilePauseStore, readDaemonInfo, startDaemon } from "@harnessd/daemon";
 import { run } from "./index.ts";
 import { parseRunArgs, runLoop } from "./loop.ts";
 
@@ -28,6 +28,7 @@ async function setup(env: NodeJS.ProcessEnv, config?: string) {
     err: (l: string) => err.push(l),
     cwd: repo,
     env: { HARNESSD_HOME: home, ...env },
+    checks: async () => [] as Check[],
   };
   return { root, repo, home, out, err, io };
 }
@@ -170,4 +171,86 @@ test("run without a built UI still serves the API and says so", async () => {
   await createFilePauseStore(s.home).pause();
   assert.equal(await runLoop(["--once"], { ...s.io, uiDir: join(s.root, "none") }), 0);
   assert.match(s.out[0] ?? "", /^harnessd run: API at http:\/\/\S+ \(UI not built\)$/);
+});
+
+test("run without a Slack webhook logs one warning and works as before", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  assert.equal(await run(["run", "--once"], s.io), 0);
+  const warnings = s.out.filter((l) => /HARNESSD_SLACK_WEBHOOK_URL is not set/.test(l));
+  assert.equal(warnings.length, 1);
+  assert.equal(s.out.at(-1), "paused: nothing dispatched");
+});
+
+test("run sends a missed daily summary once at start, through the webhook", async () => {
+  const webhook = "https://hooks.slack.test/services/T000/B000/fake-token";
+  const s = await setup(
+    { LINEAR_API_KEY: "k", HARNESSD_SLACK_WEBHOOK_URL: webhook },
+    PAUSED_CONFIG,
+  );
+  await createFilePauseStore(s.home).pause();
+  await mkdir(join(s.repo, ".harnessd", "state"), { recursive: true });
+  await writeFile(
+    join(s.repo, ".harnessd", "state", "summary.json"),
+    JSON.stringify({ version: 1, lastSentAt: "2026-01-01T00:00:00.000Z", notices: [] }),
+  );
+  const posts: { url: string; text: string }[] = [];
+  const io = {
+    ...s.io,
+    fetch: async (url: string, init: { body: string }) => {
+      posts.push({ url, text: (JSON.parse(init.body) as { text: string }).text });
+      return { ok: true, status: 200 };
+    },
+  };
+  assert.equal(await run(["run", "--once"], io), 0);
+  assert.equal(await runLoop(["--once"], io), 0, "a second start sends nothing more");
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0]?.url, webhook);
+  assert.match(
+    posts[0]?.text ?? "",
+    /^\*harnessd daily summary\* since 1 Jan 05:30 \(Asia\/Kolkata\)/,
+  );
+  assert.doesNotMatch([...s.out, ...s.err].join("\n"), /fake-token/);
+});
+
+test("run refuses to start on a failing check and prints its fix", async () => {
+  const s = await setup({ LINEAR_API_KEY: "lin_api_secret_value" }, PAUSED_CONFIG);
+  const code = await runLoop(["--once"], {
+    ...s.io,
+    checks: async () => [
+      { id: "node", state: "ok", detail: "v24.11.0", fix: "" },
+      { id: "slack.webhook", state: "warn", detail: "not set", fix: "set it" },
+      { id: "github.auth", state: "fail", detail: "not signed in", fix: "Run: gh auth login" },
+    ],
+  });
+  assert.equal(code, 1);
+  assert.match(s.err[0] ?? "", /1 check failed; not starting/);
+  assert.equal(s.err[1], "  github.auth (fail): not signed in. Fix: Run: gh auth login");
+  assert.deepEqual(s.out, [], "no API and no loop");
+  assert.equal(await readDaemonInfo(s.home), undefined);
+});
+
+test("run starts on warnings only and serves the checks at GET /api/status", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  const seen: boolean[] = [];
+  let body: unknown;
+  const code = await runLoop([], {
+    ...s.io,
+    checks: async (o) => {
+      seen.push(o.servingPort === true);
+      return [{ id: "slack.webhook", state: "warn", detail: "not set", fix: "set it" }];
+    },
+    stopSignal: async () => {
+      const info = await readDaemonInfo(s.home);
+      body = await (await fetch(`${info?.url}/api/status`)).json();
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.match(s.err.join("\n"), /warn slack\.webhook: not set/);
+  assert.deepEqual(body, {
+    checks: [{ id: "slack.webhook", state: "warn", detail: "not set", fix: "set it" }],
+  });
+  assert.deepEqual(seen, [false, true], "the API run knows this daemon holds the port");
 });

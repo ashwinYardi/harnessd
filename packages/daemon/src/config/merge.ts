@@ -98,11 +98,28 @@ export function mergeLayers(layers: readonly ConfigLayer[]): MergedConfig {
     agents,
     mcp,
     rules: byName<Rule>(layers.map((l) => l.rules)),
-    skills: byName<Skill>(layers.map((l) => l.skills)),
+    skills: enabledSkills(layers),
     instructions: layers
       .map((l) => l.instructions)
       .filter((b): b is InstructionBlock => b !== undefined),
   };
+}
+
+/**
+ * Skills merged by name, minus those turned off. Each layer's `[skills.<name>] enabled`
+ * applies to the skills merged so far, so a workspace can turn off a global skill.
+ */
+function enabledSkills(layers: readonly ConfigLayer[]): Skill[] {
+  const map = new Map<string, Skill>();
+  const off = new Set<string>();
+  for (const layer of layers) {
+    for (const skill of layer.skills) map.set(skill.name, skill);
+    for (const [name, s] of Object.entries(layer.skillSettings)) {
+      if (s.enabled === false) off.add(name);
+      else if (s.enabled === true) off.delete(name);
+    }
+  }
+  return byName<Skill>([[...map.values()].filter((s) => !off.has(s.name))]);
 }
 
 /** The effective config for one agent: global → workspace → agent. */

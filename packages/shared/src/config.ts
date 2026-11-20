@@ -30,8 +30,17 @@ export interface LinearConfig {
   project?: string;
 }
 
+/**
+ * Slack #harnessd (D-015, D-021). The webhook url is a secret: it comes only from
+ * HARNESSD_SLACK_WEBHOOK_URL, never from a config file.
+ */
 export interface SlackConfig {
+  /** A label for the start line; the webhook fixes the real channel. */
   channel: string;
+  /** When the daily summary goes out, "HH:MM" in `time_zone`. */
+  summary_time: string;
+  /** An IANA time zone. */
+  time_zone: string;
 }
 
 /** How harnessd itself checks a PR before QA approves it (D-013). */
@@ -89,6 +98,21 @@ export interface McpServerConfig {
   env?: Record<string, string>;
 }
 
+/**
+ * One `[skills.<name>]` table. The global file records each default skill's pin;
+ * any layer can turn a skill off. See docs/CONFIG.md "Skills".
+ */
+export interface SkillSettings {
+  /** false drops the skill from this layer on, so sync does not write it. */
+  enabled?: boolean;
+  /** The upstream repo, as `owner/name` on GitHub. */
+  upstream?: string;
+  /** The upstream commit the installed folder holds. init installs only this commit. */
+  commit?: string;
+  /** The upstream release, when it has one. Informational. */
+  version?: string;
+}
+
 /** MCP server names: they become keys in .mcp.json and `[mcp_servers.<name>]` in Codex TOML. */
 export const MCP_NAME = /^[A-Za-z0-9_-]+$/;
 
@@ -112,6 +136,7 @@ export type DeepPartial<T> = T extends readonly unknown[]
 export interface ConfigFile extends DeepPartial<Settings> {
   agents?: Record<string, AgentSettings>;
   mcp?: Record<string, McpServerConfig>;
+  skills?: Record<string, SkillSettings>;
 }
 
 /** A piece of instruction text and the file it came from. */
@@ -136,6 +161,10 @@ export interface Skill {
   /** The SKILL.md file. */
   source: string;
   body: string;
+  /** Frontmatter lines other than `name` and `description`, verbatim, in source order. */
+  frontmatter?: string[];
+  /** Every other file in the folder, relative and `/`-separated, sorted. Sync copies them. */
+  files?: string[];
 }
 
 /** One agent as defined by a single layer (config.toml table plus `agents/<name>.md`). */
@@ -162,6 +191,8 @@ export interface ConfigLayer {
   skills: Skill[];
   /** `[mcp.<name>]` tables from config.toml. */
   mcp: Record<string, McpServerConfig>;
+  /** `[skills.<name>]` tables from config.toml. */
+  skillSettings: Record<string, SkillSettings>;
   /** The folder's AGENTS.md, if present and non-empty. */
   instructions?: InstructionBlock;
 }
@@ -207,7 +238,7 @@ export interface ResolvedAgentConfig {
 export const DEFAULT_SETTINGS: Settings = {
   limits: { max_concurrent: 3, budget_minutes: { S: 30, M: 120 }, qa_max_failures: 2 },
   linear: {},
-  slack: { channel: "#harnessd" },
+  slack: { channel: "#harnessd", summary_time: "21:00", time_zone: "Asia/Kolkata" },
   merge: {
     protected_paths: [
       // auth
@@ -286,6 +317,15 @@ function keyPath(path: string, key: string): string {
   return path === "" ? key : `${path}.${key}`;
 }
 
+function isTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 class Checker {
   readonly file: string;
 
@@ -318,6 +358,27 @@ class Checker {
   string(value: unknown, path: string): string {
     if (typeof value !== "string") this.fail(path, `expected a string, got ${describe(value)}`);
     if (value.trim() === "") this.fail(path, "expected a non-empty string");
+    return value;
+  }
+
+  /** "HH:MM", 24-hour. */
+  clockTime(value: unknown, path: string): string {
+    if (typeof value !== "string" || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) {
+      this.fail(path, `expected a 24-hour time "HH:MM", got ${describe(value)}`);
+    }
+    return value;
+  }
+
+  timeZone(value: unknown, path: string): string {
+    if (typeof value !== "string" || !isTimeZone(value)) {
+      this.fail(path, `expected an IANA time zone such as "Asia/Kolkata", got ${describe(value)}`);
+    }
+    return value;
+  }
+
+  bool(value: unknown, path: string): boolean {
+    if (typeof value !== "boolean")
+      this.fail(path, `expected true or false, got ${describe(value)}`);
     return value;
   }
 
@@ -420,6 +481,7 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
     "daemon",
     "agents",
     "mcp",
+    "skills",
   ]);
   const out: ConfigFile = {};
 
@@ -458,8 +520,14 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
   }
 
   if (root.slack !== undefined) {
-    const t = c.table(root.slack, "slack", ["channel"]);
-    out.slack = t.channel === undefined ? {} : { channel: c.string(t.channel, "slack.channel") };
+    const t = c.table(root.slack, "slack", ["channel", "summary_time", "time_zone"]);
+    const slack: Partial<SlackConfig> = {};
+    if (t.channel !== undefined) slack.channel = c.string(t.channel, "slack.channel");
+    if (t.summary_time !== undefined) {
+      slack.summary_time = c.clockTime(t.summary_time, "slack.summary_time");
+    }
+    if (t.time_zone !== undefined) slack.time_zone = c.timeZone(t.time_zone, "slack.time_zone");
+    out.slack = slack;
   }
 
   if (root.merge !== undefined) {
@@ -508,6 +576,22 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
       mcp[name] = parseMcpServer(def, file, `mcp.${name}`);
     }
     out.mcp = mcp;
+  }
+
+  if (root.skills !== undefined) {
+    const t = c.table(root.skills, "skills");
+    const skills: Record<string, SkillSettings> = {};
+    for (const [name, def] of Object.entries(t)) {
+      const path = `skills.${name}`;
+      const s = c.table(def, path, ["enabled", "upstream", "commit", "version"]);
+      const entry: SkillSettings = {};
+      if (s.enabled !== undefined) entry.enabled = c.bool(s.enabled, `${path}.enabled`);
+      for (const key of ["upstream", "commit", "version"] as const) {
+        if (s[key] !== undefined) entry[key] = c.string(s[key], `${path}.${key}`);
+      }
+      skills[name] = entry;
+    }
+    out.skills = skills;
   }
 
   return out;

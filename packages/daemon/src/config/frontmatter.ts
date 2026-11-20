@@ -2,6 +2,8 @@ import { ConfigError } from "@harnessd/shared";
 
 export interface Frontmatter {
   data: Record<string, string>;
+  /** Each key's source lines, verbatim: the `key:` line plus its continuation lines. */
+  lines: Record<string, string[]>;
   body: string;
 }
 
@@ -22,11 +24,12 @@ function unquote(value: string): string {
  */
 export function parseFrontmatter(text: string, file: string): Frontmatter {
   const lines = text.replace(/^﻿/, "").split(/\r?\n/);
-  if (!FENCE.test(lines[0] ?? "")) return { data: {}, body: text };
+  if (!FENCE.test(lines[0] ?? "")) return { data: {}, lines: {}, body: text };
   const end = lines.findIndex((line, i) => i > 0 && FENCE.test(line));
   if (end === -1) throw new ConfigError(file, undefined, "frontmatter has no closing ---");
 
   const data: Record<string, string> = {};
+  const raw: Record<string, string[]> = {};
   let last: string | undefined;
   for (let i = 1; i < end; i++) {
     const line = lines[i] ?? "";
@@ -34,6 +37,7 @@ export function parseFrontmatter(text: string, file: string): Frontmatter {
     if (/^\s/.test(line) && last !== undefined) {
       const prev = data[last] ?? "";
       data[last] = prev === "" ? line.trim() : `${prev} ${line.trim()}`;
+      raw[last]?.push(line);
       continue;
     }
     const match = ENTRY.exec(line);
@@ -43,7 +47,8 @@ export function parseFrontmatter(text: string, file: string): Frontmatter {
     const key = match[1] ?? "";
     const value = unquote(match[2] ?? "");
     data[key] = /^[>|][+-]?$/.test(value) ? "" : value;
+    raw[key] = [line];
     last = key;
   }
-  return { data, body: lines.slice(end + 1).join("\n") };
+  return { data, lines: raw, body: lines.slice(end + 1).join("\n") };
 }

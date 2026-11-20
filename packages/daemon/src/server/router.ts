@@ -21,7 +21,7 @@ export interface Route {
   handler: (request: ApiRequest) => unknown;
 }
 
-/** A 200 that is not JSON: a file of the built UI (D-020). */
+/** A 200 that is not JSON: a file of the built UI (D-024). */
 export class RawBody {
   readonly contentType: string;
   readonly body: string | Uint8Array;
@@ -42,7 +42,7 @@ export class RawBody {
 export type SendEvent = (event: string, data: unknown) => void;
 
 /**
- * A 200 that stays open as server-sent events (D-020). `open` starts sending and returns
+ * A 200 that stays open as server-sent events (D-024). `open` starts sending and returns
  * the function that stops it, called when the client goes or the server closes.
  */
 export class EventStream {

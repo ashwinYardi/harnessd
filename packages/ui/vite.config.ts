@@ -1,4 +1,4 @@
-// Builds the app in `app/` into `dist/app`, which the daemon serves (D-020).
+// Builds the app in `app/` into `dist/app`, which the daemon serves (D-024).
 // `pnpm dev` proxies /api to a running `harnessd run` on the default port.
 import { defineConfig } from "vite";
 

@@ -125,3 +125,29 @@ test("sync refuses a repo without .harnessd/", async () => {
   );
   assert.equal(await readFile(join(root, "AGENTS.md"), "utf8"), "hand-written\n");
 });
+
+test("a skill folder sync did not generate is kept untouched and reported", async () => {
+  const options = await setup("full");
+  const mine = join(options.repoDir, ".claude", "skills", "deploy");
+  await mkdir(mine, { recursive: true });
+  await writeFile(join(mine, "SKILL.md"), "---\nname: deploy\n---\nHand-vendored.\n");
+  const { changed, skipped } = await syncRepo(options);
+  assert.deepEqual(skipped, [".claude/skills/deploy"]);
+  assert.ok(!changed.some((p) => p.startsWith(".claude/skills/deploy/")));
+  assert.ok(changed.includes(".agents/skills/deploy/SKILL.md"));
+  assert.equal(
+    await readFile(join(mine, "SKILL.md"), "utf8"),
+    "---\nname: deploy\n---\nHand-vendored.\n",
+  );
+  assert.ok(!(await exists(join(mine, "reference.md"))));
+});
+
+test("a workspace can turn off a global skill", async () => {
+  const options = await setup("full");
+  await writeFile(
+    join(options.repoDir, ".harnessd", "config.toml"),
+    "[skills.deploy]\nenabled = false\n",
+  );
+  const { changed } = await syncRepo(options);
+  assert.ok(!changed.some((p) => p.includes("skills/deploy/")));
+});

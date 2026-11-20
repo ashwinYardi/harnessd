@@ -1,4 +1,4 @@
-// The UI's read routes and live event stream (MET-18, D-020). See docs/API.md.
+// The UI's read routes and live event stream (MET-18, D-024). See docs/API.md.
 import {
   AGENT_ROLES,
   type AgentsSnapshot,
@@ -14,7 +14,7 @@ import type { LoopSnapshot } from "../coordinator/loop.ts";
 import type { LogBuffer } from "./logs.ts";
 import { EventStream, type Route, type SendEvent } from "./router.ts";
 
-/** How long a read of Linear serves the board (D-020). */
+/** How long a read of Linear serves the board (D-024). */
 export const BOARD_TTL_MS = 15_000;
 
 /** How often open streams check the pause flag and the agents for a change. */

@@ -1,14 +1,29 @@
 // `harnessd init`: sets up harnessd on this machine. See docs/INSTALL.md.
 //
 // Idempotent: harness CLIs already on PATH are kept, an existing config.toml is never
-// overwritten, and the launchd service is reloaded only when its plist changed.
+// overwritten (init only appends missing skill pins), installed skills stay at their
+// pinned commit, and the launchd service is reloaded only when its plist changed.
 // Every OS effect goes through InitSystem so the tests run on any platform with fakes.
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
+import { fileURLToPath } from "node:url";
+import {
+  type ExecResult,
+  findOnPath,
+  isTransientDir,
+  PACK_MARKER,
+  parseConfigText,
+  pathDirs,
+  readVersion,
+  tomlKey,
+  tomlString,
+} from "@harnessd/daemon";
+import { ConfigError, type SkillSettings } from "@harnessd/shared";
+import { PACK_MANIFEST, type PackSkill } from "./pack.ts";
 
 export const INIT_USAGE = "Usage: harnessd init [--yes] [--no-service] [--workspace <dir>]";
 
@@ -37,19 +52,18 @@ export const CONFIG_TEMPLATE = `# harnessd global config. Every key is optional;
 # port = 4747
 `;
 
-export interface ExecResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-}
+export type { ExecResult };
 
 export interface InitFs {
   /** undefined when the file does not exist. */
   read(path: string): Promise<string | undefined>;
   write(path: string, data: string): Promise<void>;
   mkdirp(path: string): Promise<void>;
+  /** True for a file or a folder. */
   exists(path: string): Promise<boolean>;
   isExecutable(path: string): Promise<boolean>;
+  /** Replaces the folder `to` with a copy of `from`. */
+  copyDir(from: string, to: string): Promise<void>;
 }
 
 export interface InitSystem {
@@ -60,6 +74,8 @@ export interface InitSystem {
   env: NodeJS.ProcessEnv;
   /** The running node binary; its folder goes first on the service's PATH. */
   nodePath: string;
+  /** The default skill pack this build ships (dist/pack/, see pack.ts). */
+  packDir: string;
   fs: InitFs;
   /** `inherit` streams the command's output to the terminal (installs). */
   exec(cmd: string, args: readonly string[], options?: { inherit?: boolean }): Promise<ExecResult>;
@@ -104,29 +120,13 @@ export function formatCommand(cmd: string, args: readonly string[]): string {
     .join(" ");
 }
 
-/** PATH entries npx adds for its own run; a service must not depend on them. */
-function isTransient(dir: string): boolean {
-  return dir.includes("/_npx/") || dir.includes("/node_modules/.bin");
-}
-
-function pathDirs(env: NodeJS.ProcessEnv): string[] {
-  return (env.PATH ?? "").split(delimiter).filter((d) => d !== "");
-}
-
-/** Finds `bin` on PATH, skipping npx's temporary folders. */
-export async function which(sys: InitSystem, bin: string): Promise<string | undefined> {
-  for (const dir of pathDirs(sys.env)) {
-    if (isTransient(dir)) continue;
-    const candidate = join(dir, bin);
-    if (await sys.fs.isExecutable(candidate)) return candidate;
-  }
-  return undefined;
+/** Finds `bin` on PATH, skipping npx's temporary folders (shared with the status engine). */
+export function which(sys: InitSystem, bin: string): Promise<string | undefined> {
+  return findOnPath(sys.env, bin, sys.fs.isExecutable);
 }
 
 async function version(sys: InitSystem, path: string): Promise<string> {
-  const res = await sys.exec(path, ["--version"]);
-  const line = `${res.stdout}\n${res.stderr}`.split("\n").find((l) => l.trim() !== "");
-  return res.code === 0 && line ? line.trim() : "version unknown";
+  return (await readVersion((cmd, args) => sys.exec(cmd, args), path)) ?? "version unknown";
 }
 
 function xml(s: string): string {
@@ -193,7 +193,7 @@ export function servicePath(sys: InitSystem, harnessd: string): string {
   const dirs = [
     dirname(sys.nodePath),
     dirname(harnessd),
-    ...pathDirs(sys.env).filter((d) => !isTransient(d)),
+    ...pathDirs(sys.env).filter((d) => !isTransientDir(d)),
     "/usr/bin",
     "/bin",
     "/usr/sbin",
@@ -291,6 +291,146 @@ async function writeConfig({ io, sys }: Step): Promise<void> {
   io.out(`config: wrote ${file}`);
 }
 
+const PIN_HEADER =
+  '# Default skill pack (docs/CONFIG.md "Skills"). init installs only the pinned commit.';
+
+/** What a pin records: the upstream repo and commit, plus the release when known. */
+type SkillPin = Pick<PackSkill, "upstream" | "commit" | "version">;
+
+function pinTable(name: string, pin: SkillPin): string {
+  const lines = [`[skills.${tomlKey(name)}]`, `upstream = ${tomlString(pin.upstream)}`];
+  lines.push(`commit = ${tomlString(pin.commit)}`);
+  if (pin.version !== undefined) lines.push(`version = ${tomlString(pin.version)}`);
+  return lines.join("\n");
+}
+
+function parseMarker(text: string | undefined): SkillPin | undefined {
+  if (text === undefined) return undefined;
+  try {
+    const m = JSON.parse(text);
+    return typeof m?.commit === "string" && typeof m?.upstream === "string" ? m : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What init does with one pack skill. Pure, so every case reads in one place. */
+type SkillPlan =
+  | { action: "foreign" }
+  | { action: "install" | "update" | "keep" | "skip"; pin?: SkillPin; note?: string };
+
+function planSkill(
+  skill: PackSkill,
+  present: boolean,
+  marker: SkillPin | undefined,
+  table: SkillSettings | undefined,
+  configFile: string,
+): SkillPlan {
+  if (present && marker === undefined) return { action: "foreign" };
+  const fix = `Set skills.${skill.name}.commit = "${skill.commit}" in ${configFile}`;
+  if (table !== undefined && table.commit === undefined) {
+    // A table exists (say `enabled = false`) but has no pin; init cannot append a second one.
+    if (marker !== undefined) return { action: "keep" };
+    return {
+      action: "skip",
+      note: `skills: ${skill.name} has no commit in its table. ${fix} to install it.`,
+    };
+  }
+  // No table: record what is installed, or what this build ships.
+  const pin = table === undefined ? (marker ?? skill) : undefined;
+  const pinned = table?.commit ?? (marker ?? skill).commit;
+  const extra = pin === undefined ? {} : { pin };
+  if (pinned !== skill.commit) {
+    const note = `skills: ${skill.name} is pinned to ${pinned}; this harnessd ships ${skill.commit}. ${fix} to update.`;
+    return { action: marker === undefined ? "skip" : "keep", note, ...extra };
+  }
+  if (marker === undefined) return { action: "install", ...extra };
+  return { action: marker.commit === pinned ? "keep" : "update", ...extra };
+}
+
+/**
+ * Installs the default skill pack into `<global>/skills/` (D-016) and records a pin in
+ * config.toml for each skill that has none. A skill folder changes only when its pin
+ * names the commit this build ships, so an upgrade never reaches agents without a
+ * config change. Folders init did not install are never touched. false: it failed.
+ */
+async function installSkills({ io, sys }: Step): Promise<boolean> {
+  const globalDir = globalDirFor(sys);
+  const skillsDir = join(globalDir, "skills");
+  const configFile = join(globalDir, "config.toml");
+  const manifest = await sys.fs.read(join(sys.packDir, PACK_MANIFEST));
+  if (manifest === undefined) {
+    io.err(`harnessd init: no skill pack in ${sys.packDir}; reinstall @harnessd/cli.`);
+    return false;
+  }
+  const pack = JSON.parse(manifest) as PackSkill[];
+  const configText = (await sys.fs.read(configFile)) ?? "";
+  let tables: Record<string, SkillSettings>;
+  try {
+    tables = parseConfigText(configText, configFile).skills ?? {};
+  } catch (e) {
+    if (!(e instanceof ConfigError)) throw e;
+    io.err(`harnessd init: ${e.message}`);
+    return false;
+  }
+
+  const plans: Array<{ skill: PackSkill; dest: string; plan: SkillPlan }> = [];
+  for (const skill of pack) {
+    const dest = join(skillsDir, skill.name);
+    const present = await sys.fs.exists(dest);
+    const marker = parseMarker(await sys.fs.read(join(dest, PACK_MARKER)));
+    plans.push({
+      skill,
+      dest,
+      plan: planSkill(skill, present, marker, tables[skill.name], configFile),
+    });
+  }
+
+  // Pins first: a folder is never installed without its pin on disk.
+  const newPins = plans.flatMap(({ skill, plan }) =>
+    "pin" in plan && plan.pin !== undefined ? [pinTable(skill.name, plan.pin)] : [],
+  );
+  if (newPins.length > 0) {
+    const sep = configText === "" || configText.endsWith("\n") ? "" : "\n";
+    const next = `${configText}${sep}\n${PIN_HEADER}\n${newPins.join("\n\n")}\n`;
+    try {
+      parseConfigText(next, configFile);
+    } catch (e) {
+      if (!(e instanceof ConfigError)) throw e;
+      io.err(`harnessd init: cannot add skill pins to ${configFile}: ${e.message}`);
+      return false;
+    }
+    await sys.fs.write(configFile, next);
+  }
+
+  const done = { install: [] as string[], update: [] as string[], keep: [] as string[] };
+  for (const { skill, dest, plan } of plans) {
+    if (plan.action === "foreign") {
+      io.out(`skills: kept ${dest}; init did not install it`);
+      continue;
+    }
+    if (plan.note !== undefined) io.out(plan.note);
+    if (plan.action === "skip") continue;
+    if (plan.action !== "keep") {
+      await sys.fs.mkdirp(skillsDir);
+      await sys.fs.copyDir(join(sys.packDir, skill.name), dest);
+    }
+    done[plan.action].push(skill.name);
+  }
+  for (const [verb, names] of [
+    ["installed", done.install],
+    ["updated", done.update],
+    ["kept", done.keep],
+  ] as const) {
+    if (names.length > 0) io.out(`skills: ${verb} ${names.join(", ")} in ${skillsDir}`);
+  }
+  const pinned = plans.filter(({ plan }) => "pin" in plan && plan.pin !== undefined);
+  if (pinned.length > 0) {
+    io.out(`skills: pinned ${pinned.map((p) => p.skill.name).join(", ")} in ${configFile}`);
+  }
+  return true;
+}
+
 const BOOTSTRAP_ATTEMPTS = 3;
 
 /** Writes the plist and (re)loads it. false: launchctl failed. */
@@ -360,6 +500,7 @@ export async function runInit(
   const found = await detect(step);
   let ok = await installMissing(step, args, found);
   await writeConfig(step);
+  ok = (await installSkills(step)) && ok;
 
   if (!args.service) io.out("service: skipped (--no-service)");
   else if (sys.platform !== "darwin")
@@ -420,6 +561,7 @@ export function nodeSystem(): InitSystem {
     cwd: process.cwd(),
     env: process.env,
     nodePath: process.execPath,
+    packDir: fileURLToPath(new URL("./pack", import.meta.url)),
     fs: {
       read: (path) => readFile(path, "utf8").catch(() => undefined),
       write: (path, data) => writeFile(path, data, "utf8"),
@@ -436,6 +578,14 @@ export function nodeSystem(): InitSystem {
           () => true,
           () => false,
         ),
+      copyDir: async (from, to) => {
+        // A dot name, so the config loader never reads a half-copied folder as a skill.
+        const tmp = join(dirname(to), `.${basename(to)}.harnessd-tmp`);
+        await rm(tmp, { recursive: true, force: true });
+        await cp(from, tmp, { recursive: true });
+        await rm(to, { recursive: true, force: true });
+        await rename(tmp, to);
+      },
     },
     exec: execNode,
     ...(process.stdin.isTTY && process.stdout.isTTY ? { confirm: askTty } : {}),

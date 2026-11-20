@@ -1,4 +1,4 @@
-// Serves the built UI (D-020). Each file is an exact GET route, read once at start, so
+// Serves the built UI (D-024). Each file is an exact GET route, read once at start, so
 // nothing outside the build folder is ever reachable.
 import { readdir, readFile } from "node:fs/promises";
 import { extname, join, relative, sep } from "node:path";

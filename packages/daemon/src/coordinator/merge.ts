@@ -12,7 +12,7 @@
 import type { Issue, LinkedIssue, MergeConfig } from "@harnessd/shared";
 import type { GitHub, PullRequestCheck, PullRequestStatus } from "../github/client.ts";
 import type { LinearClient } from "../linear/client.ts";
-import type { Notifier } from "./notifier.ts";
+import type { Notice, NoticeIssue, NoticePr, Notifier } from "./notifier.ts";
 import type { PrReview } from "./qa.ts";
 import { isWorkPart } from "./split.ts";
 import type { LoopState, MergePr, PendingMerge } from "./state.ts";
@@ -171,6 +171,15 @@ interface GateFailure {
   failing: string[];
 }
 
+/** The issue a merge notice links: the parent the owner follows. */
+function parentIssue(entry: PendingMerge): NoticeIssue {
+  return { key: entry.parentKey, url: entry.parentUrl };
+}
+
+function noticePr(pr: { number: number; url: string }): NoticePr {
+  return { number: pr.number, url: pr.url };
+}
+
 /**
  * Advances every recorded QA approval by one step (see the file comment). Never throws:
  * a `gh` or Linear error is logged and the PR is looked at again next tick.
@@ -203,11 +212,11 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
   };
 
   /** One ping per PR, ever: recorded and saved before it is sent. */
-  async function pingOnce(pr: MergePr, text: string): Promise<void> {
+  async function noticeOnce(pr: MergePr, notice: Notice): Promise<void> {
     if (state.humanPings[pr.url] !== undefined) return;
     state.humanPings[pr.url] = now().toISOString();
     await deps.save();
-    await safely("send the ping", () => deps.notifier.notify(text));
+    await safely("send the notice", () => deps.notifier.notify(notice));
   }
 
   async function label(pr: MergePr): Promise<void> {
@@ -249,10 +258,20 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
     await safely(`move ${entry.parentKey} to Needs input`, () =>
       deps.linear.moveTo(entry.parentId, "Needs input"),
     );
-    await pingOnce(pr, `${pr.partKey} needs a human (${reason}): PR #${pr.number} ${pr.url}`);
+    await noticeOnce(pr, {
+      kind: "needs_human",
+      issue: parentIssue(entry),
+      part: pr.partKey,
+      prs: [noticePr(pr)],
+      reason,
+    });
   }
 
-  async function merged(pr: MergePr, by: "harnessd" | "a human"): Promise<void> {
+  async function merged(
+    entry: PendingMerge,
+    pr: MergePr,
+    by: "harnessd" | "a human",
+  ): Promise<void> {
     pr.mergedAt = now().toISOString();
     await deps.save();
     if (by === "harnessd") report.merged.push(pr.partKey);
@@ -267,7 +286,12 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
     await safely(`move ${pr.partKey} to Done`, () => deps.linear.moveTo(pr.partId, "Done"));
     // D-015: one line per merge.
     await safely("send the merge line", () =>
-      deps.notifier.notify(`${pr.partKey} merged: PR #${pr.number} ${pr.url}`),
+      deps.notifier.notify({
+        kind: "merged",
+        issue: parentIssue(entry),
+        part: pr.partKey,
+        prs: [noticePr(pr)],
+      }),
     );
   }
 
@@ -313,10 +337,13 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
       await safely(`move ${entry.parentKey} to Needs input`, () =>
         deps.linear.moveTo(entry.parentId, "Needs input"),
       );
-      await safely("send the ping", () =>
-        deps.notifier.notify(
-          `${entry.parentKey} needs input (merge gate failed ${times(count)}): ${failures.map((f) => `PR #${f.pr.number}`).join(", ")} ${entry.parentUrl}`,
-        ),
+      await safely("send the notice", () =>
+        deps.notifier.notify({
+          kind: "needs_input",
+          issue: parentIssue(entry),
+          prs: failures.map(({ pr }) => noticePr(pr)),
+          reason: `merge gate failed ${times(count)}`,
+        }),
       );
       log(`${entry.parentKey}: merge gate failed ${times(count)}, Needs input`);
       return;
@@ -398,7 +425,7 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
         continue;
       }
       if (status.state === "MERGED") {
-        await merged(pr, "a human");
+        await merged(entry, pr, "a human");
         continue;
       }
       if (status.state === "CLOSED") {
@@ -464,7 +491,7 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
         await needsHuman(entry, pr, "GitHub refused the merge", [oneLine(message(error))]);
         continue;
       }
-      await merged(pr, "harnessd");
+      await merged(entry, pr, "harnessd");
     }
     if (failures.length > 0) {
       await sendBack(entry, failures);

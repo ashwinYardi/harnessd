@@ -1,4 +1,15 @@
-import { lstat, mkdir, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readFile,
+  readlink,
+  rename,
+  rm,
+  stat as statFile,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { SyncFile } from "./generate.ts";
 
@@ -40,12 +51,24 @@ export async function writeSyncFiles(root: string, files: readonly SyncFile[]): 
       if (stat !== undefined) await rm(full);
       await symlink(file.symlinkTarget, full);
     } else {
-      if (stat?.isFile() && (await readFile(full, "utf8")) === file.content) continue;
+      let content: string | Buffer;
+      let mode: number | undefined;
+      if ("copyFrom" in file) {
+        content = await readFile(file.copyFrom);
+        mode = (await statFile(file.copyFrom)).mode & 0o777;
+        const same =
+          stat?.isFile() && (stat.mode & 0o777) === mode && content.equals(await readFile(full));
+        if (same) continue;
+      } else {
+        content = file.content;
+        if (stat?.isFile() && (await readFile(full, "utf8")) === content) continue;
+      }
       await mkdir(dirname(full), { recursive: true });
       // A symlink here would make writeFile follow it; replace the link itself.
       if (stat?.isSymbolicLink()) await rm(full);
       const tmp = `${full}.harnessd-tmp`;
-      await writeFile(tmp, file.content);
+      await writeFile(tmp, content);
+      if (mode !== undefined) await chmod(tmp, mode);
       await rename(tmp, full);
     }
     changed.push(file.path);

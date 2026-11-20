@@ -3,7 +3,8 @@ import { VaultError, writeNote } from "./vault.ts";
 
 export type { DecisionNote };
 
-const ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
+/** An issue key such as `MET-11`. */
+export const ISSUE_KEY = /^[A-Z][A-Z0-9]*-\d+$/;
 
 /** `Pick the DB, now!` becomes `pick-the-db-now`. At most 60 characters. */
 export function slugify(title: string): string {
