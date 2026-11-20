@@ -16,6 +16,13 @@ One developer, or a small team lead, who runs harnessd on their own Mac. They ar
 - The agent list: each agent's current task, elapsed time and budget used.
 - A live log pane.
 - A pause and resume control. It is the kill switch (D-014), so it must always be visible and must give feedback within 1 second.
+- Settings pages. They make setup a few clicks:
+  - **Harnesses:** one card per harness CLI. The card shows found or not found, version, binary path and signed-in state. It warns on a known-bad version and has Install and Update buttons.
+  - **Connections:** one row per connection (GitHub, Linear, Slack). Each row shows a live check result from `harnessd doctor` and the fix for a failure.
+  - **Team:** the agents. The user adds an agent, picks its role, and assigns it a harness and a model.
+
+## Setup pattern
+Follow the T3 Code (pingdotgg/t3code, MIT) Settings → Providers patterns for these pages. Copy the layout and behaviour, not its brand or copy. If code is reused, keep the MIT notice.
 
 ## Pinned aesthetic
 - Dense, quiet, professional. References: t3.code and cloudroom.dev.
