@@ -14,7 +14,7 @@ import {
 } from "@harnessd/shared";
 import type { GitHub, PullRequest, ReviewInput } from "../github/client.ts";
 import type { Worktree } from "../worktrees/index.ts";
-import type { Notifier } from "./notifier.ts";
+import { formatNotice, type Notifier } from "./notifier.ts";
 import {
   type CommandResult,
   type CommandRunner,
@@ -201,8 +201,8 @@ function settleDeps() {
   const moves: Array<{ issueId: string; state: WorkflowStateName }> = [];
   const pings: string[] = [];
   const notifier: Notifier = {
-    async notify(text) {
-      pings.push(text);
+    async notify(notice) {
+      pings.push(formatNotice(notice));
     },
   };
   const linear = {
@@ -381,7 +381,7 @@ test("the second failure escalates to the human once and sends nothing back", as
   assert.match(s.comments[0]?.body ?? "", /QA failed twice for MET-50, so this needs a human/);
   assert.match(s.comments[0]?.body ?? "", /- Avatars are served: nothing covers item 1/);
   assert.deepEqual(s.pings, [
-    "MET-50 needs input (QA failed twice): MET-53 could not approve MET-51 https://linear.test/MET-50",
+    "MET-50 needs input (QA failed twice): MET-53 could not approve MET-51 PR #7 https://github.test/o/r/pull/7 https://linear.test/MET-50",
   ]);
 });
 

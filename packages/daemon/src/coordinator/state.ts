@@ -9,6 +9,8 @@ import type { AgentRole } from "@harnessd/shared";
 export interface InFlightRun {
   issueId: string;
   issueKey: string;
+  /** The Linear url, for notices. Older state files lack it. */
+  issueUrl?: string;
   role: AgentRole;
   /** Agent name from the config. */
   agent: string;

@@ -15,7 +15,7 @@ import {
 } from "@harnessd/shared";
 import type { DecisionSink } from "./decisions.ts";
 import { extractJson, type GrillDeps, grillIssue, parseGrillReply } from "./grill.ts";
-import type { Notifier } from "./notifier.ts";
+import { formatNotice, type Notifier } from "./notifier.ts";
 import type { GrillContext } from "./prompt.ts";
 
 const issues = JSON.parse(
@@ -77,8 +77,8 @@ function recorder() {
     },
   };
   const notifier: Notifier = {
-    async notify(text) {
-      pings.push(text);
+    async notify(notice) {
+      pings.push(formatNotice(notice));
     },
   };
   const decisions: DecisionSink = {
