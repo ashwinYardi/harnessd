@@ -1,25 +1,60 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { loadConfig } from "@harnessd/daemon";
+import { loadConfig, syncRepo } from "@harnessd/daemon";
 import { run } from "./index.ts";
 import {
   CONFIG_TEMPLATE,
   type ExecResult,
   type InitSystem,
   LAUNCHD_LABEL,
+  nodeSystem,
   parseInitArgs,
   renderPlist,
   runInit,
 } from "./init.ts";
+import { buildPack } from "./pack.ts";
 
 const HOME = "/Users/ada";
 const PLIST = `${HOME}/Library/LaunchAgents/dev.harnessd.daemon.plist`;
 const CONFIG = `${HOME}/.harnessd/config.toml`;
 const REPO = `${HOME}/code/app`;
 const BIN = "/opt/homebrew/bin";
+const PACK_DIR = "/pack";
+const SKILLS = `${HOME}/.harnessd/skills`;
+const A = "a".repeat(40);
+const B = "b".repeat(40);
+
+/** A two-skill pack as the build lays it out, shipping `commit` for tdd. */
+function pack(commit = A): Record<string, string> {
+  const marker = (upstream: string, c: string) => `${JSON.stringify({ upstream, commit: c })}\n`;
+  return {
+    [`${PACK_DIR}/pack.json`]: JSON.stringify([
+      { name: "tdd", upstream: "mattpocock/skills", commit },
+      { name: "impeccable", upstream: "pbakaus/impeccable", commit: B, version: "4.10.0" },
+    ]),
+    [`${PACK_DIR}/tdd/SKILL.md`]: `tdd at ${commit}`,
+    [`${PACK_DIR}/tdd/LICENSE`]: "MIT",
+    [`${PACK_DIR}/tdd/.harnessd-pack`]: marker("mattpocock/skills", commit),
+    [`${PACK_DIR}/impeccable/SKILL.md`]: "impeccable",
+    [`${PACK_DIR}/impeccable/LICENSE`]: "Apache",
+    [`${PACK_DIR}/impeccable/.harnessd-pack`]: marker("pbakaus/impeccable", B),
+  };
+}
+
+const PINS = `
+# Default skill pack (docs/CONFIG.md "Skills"). init installs only the pinned commit.
+[skills.tdd]
+upstream = "mattpocock/skills"
+commit = "${A}"
+
+[skills.impeccable]
+upstream = "pbakaus/impeccable"
+commit = "${B}"
+version = "4.10.0"
+`;
 
 interface FakeOptions {
   platform?: NodeJS.Platform;
@@ -30,11 +65,13 @@ interface FakeOptions {
   /** Labels launchd has loaded. */
   loaded?: boolean;
   failInstall?: string;
+  /** The pack this harnessd ships; defaults to pack(). */
+  pack?: Record<string, string>;
 }
 
 /** An in-memory Mac (or Linux box): files in a map, commands recorded, npm and launchctl faked. */
 function fake(o: FakeOptions = {}) {
-  const files = new Map<string, string>(Object.entries(o.files ?? {}));
+  const files = new Map<string, string>(Object.entries({ ...(o.pack ?? pack()), ...o.files }));
   const bins = new Set(["npm", ...(o.installed ?? [])]);
   const calls: string[] = [];
   const asked: string[] = [];
@@ -54,13 +91,23 @@ function fake(o: FakeOptions = {}) {
     cwd: REPO,
     env: { PATH: `/Users/ada/.npm/_npx/abc/node_modules/.bin:${BIN}:/usr/bin` },
     nodePath: "/opt/homebrew/Cellar/node@24/24.1.0/bin/node",
+    packDir: PACK_DIR,
     fs: {
       read: async (p) => files.get(p),
       write: async (p, d) => {
         files.set(p, d);
       },
       mkdirp: async () => {},
-      exists: async (p) => files.has(p) || p === `${REPO}/.git`,
+      exists: async (p) =>
+        files.has(p) ||
+        p === `${REPO}/.git` ||
+        [...files.keys()].some((k) => k.startsWith(`${p}/`)),
+      copyDir: async (from, to) => {
+        for (const k of [...files.keys()]) if (k.startsWith(`${to}/`)) files.delete(k);
+        for (const [k, v] of [...files]) {
+          if (k.startsWith(`${from}/`)) files.set(`${to}${k.slice(from.length)}`, v);
+        }
+      },
       isExecutable: async (p) => p.startsWith(`${BIN}/`) && bins.has(p.slice(BIN.length + 1)),
     },
     exec: async (cmd, args) => {
@@ -110,8 +157,13 @@ test("fresh Mac with --yes: installs the CLIs, writes config and plist, bootstra
   assert.ok(f.out.includes(`run: ${BIN}/npm i -g @openai/codex`));
   assert.ok(f.out.includes(`run: launchctl bootstrap gui/501 ${PLIST}`));
   assert.ok(f.out.includes("Claude Code: 2.1.0 (Claude Code) (/opt/homebrew/bin/claude)"));
-  assert.equal(f.files.get(CONFIG), CONFIG_TEMPLATE);
+  assert.equal(f.files.get(CONFIG), CONFIG_TEMPLATE + PINS);
   assert.ok(f.out.includes(`config: wrote ${CONFIG}`));
+  assert.equal(f.files.get(`${SKILLS}/tdd/SKILL.md`), `tdd at ${A}`);
+  assert.equal(f.files.get(`${SKILLS}/tdd/LICENSE`), "MIT");
+  assert.equal(f.files.get(`${SKILLS}/impeccable/LICENSE`), "Apache");
+  assert.ok(f.out.includes(`skills: installed tdd, impeccable in ${SKILLS}`));
+  assert.ok(f.out.includes(`skills: pinned tdd, impeccable in ${CONFIG}`));
   assert.match(f.files.get(PLIST) ?? "", /<string>\/opt\/homebrew\/bin\/harnessd<\/string>/);
   assert.equal(f.out.at(-1), "init: done");
   assert.deepEqual(f.err, []);
@@ -133,8 +185,83 @@ test("re-run with nothing changed: no installs, config kept, service left alone"
 test("an existing config.toml is never overwritten", async () => {
   const f = fake({ installed: ALL, files: { [CONFIG]: "[linear]\nteam_id = 'MET'\n" } });
   assert.equal(await runInit(["--no-service"], f.io, f.sys), 0);
-  assert.equal(f.files.get(CONFIG), "[linear]\nteam_id = 'MET'\n");
   assert.ok(f.out.includes(`config: kept existing ${CONFIG}`));
+  // Pins are appended; the user's text stays as it was.
+  assert.equal(f.files.get(CONFIG), `[linear]\nteam_id = 'MET'\n${PINS}`);
+});
+
+test("re-run keeps installed skills and pins; an upgraded pack waits for a pin change", async () => {
+  const first = fake({ installed: ALL });
+  assert.equal(await runInit(["--no-service"], first.io, first.sys), 0);
+  const state = Object.fromEntries([...first.files].filter(([k]) => !k.startsWith(PACK_DIR)));
+
+  // A newer harnessd ships tdd at B. Nothing reaches the agents yet.
+  const upgraded = fake({ installed: ALL, files: state, pack: pack(B) });
+  assert.equal(await runInit(["--no-service"], upgraded.io, upgraded.sys), 0);
+  assert.equal(upgraded.files.get(`${SKILLS}/tdd/SKILL.md`), `tdd at ${A}`);
+  assert.equal(upgraded.files.get(CONFIG), CONFIG_TEMPLATE + PINS);
+  assert.ok(
+    upgraded.out.includes(
+      `skills: tdd is pinned to ${A}; this harnessd ships ${B}. Set skills.tdd.commit = "${B}" in ${CONFIG} to update.`,
+    ),
+  );
+  assert.ok(upgraded.out.includes(`skills: kept tdd, impeccable in ${SKILLS}`));
+
+  // The owner changes the pin: the next init updates the folder.
+  const config = (upgraded.files.get(CONFIG) ?? "").replace(`commit = "${A}"`, `commit = "${B}"`);
+  const repinned = fake({
+    installed: ALL,
+    files: { ...Object.fromEntries(upgraded.files), [CONFIG]: config },
+    pack: pack(B),
+  });
+  assert.equal(await runInit(["--no-service"], repinned.io, repinned.sys), 0);
+  assert.equal(repinned.files.get(`${SKILLS}/tdd/SKILL.md`), `tdd at ${B}`);
+  assert.equal(repinned.files.get(CONFIG), config);
+  assert.ok(repinned.out.includes(`skills: updated tdd in ${SKILLS}`));
+});
+
+test("a pin init cannot meet installs nothing for that skill", async () => {
+  const pinned = `[skills.tdd]\ncommit = "${"c".repeat(40)}"\n`;
+  const f = fake({ installed: ALL, files: { [CONFIG]: pinned } });
+  assert.equal(await runInit(["--no-service"], f.io, f.sys), 0);
+  assert.ok(!f.files.has(`${SKILLS}/tdd/SKILL.md`));
+  assert.ok(f.files.has(`${SKILLS}/impeccable/SKILL.md`));
+  assert.ok(f.out.some((l) => l.startsWith(`skills: tdd is pinned to ${"c".repeat(40)}`)));
+  assert.ok(!(f.files.get(CONFIG) ?? "").includes("[skills.tdd]\nupstream"));
+});
+
+test("a skill folder init did not install is kept, and gets no pin", async () => {
+  const f = fake({ installed: ALL, files: { [`${SKILLS}/tdd/SKILL.md`]: "mine" } });
+  assert.equal(await runInit(["--no-service"], f.io, f.sys), 0);
+  assert.equal(f.files.get(`${SKILLS}/tdd/SKILL.md`), "mine");
+  assert.ok(!f.files.has(`${SKILLS}/tdd/LICENSE`));
+  assert.ok(f.out.includes(`skills: kept ${SKILLS}/tdd; init did not install it`));
+  assert.ok(!(f.files.get(CONFIG) ?? "").includes("[skills.tdd]"));
+});
+
+test("a removed pin table is written back from the installed folder", async () => {
+  const first = fake({ installed: ALL });
+  await runInit(["--no-service"], first.io, first.sys);
+  const state = Object.fromEntries(first.files);
+  state[CONFIG] = "# mine\n";
+  const again = fake({ installed: ALL, files: state, pack: pack(B) });
+  assert.equal(await runInit(["--no-service"], again.io, again.sys), 0);
+  assert.match(
+    again.files.get(CONFIG) ?? "",
+    new RegExp(`\\[skills.tdd\\]\nupstream = "mattpocock/skills"\ncommit = "${A}"`),
+  );
+  assert.equal(again.files.get(`${SKILLS}/tdd/SKILL.md`), `tdd at ${A}`);
+});
+
+test("a build without the pack, or a broken config.toml, fails the skills step", async () => {
+  const none = fake({ installed: ALL, pack: {} });
+  assert.equal(await runInit(["--no-service"], none.io, none.sys), 1);
+  assert.match(none.err.join("\n"), /no skill pack in \/pack/);
+
+  const broken = fake({ installed: ALL, files: { [CONFIG]: "[skills\n" } });
+  assert.equal(await runInit(["--no-service"], broken.io, broken.sys), 1);
+  assert.match(broken.err.join("\n"), /config\.toml: invalid TOML at line 1/);
+  assert.equal(broken.files.get(CONFIG), "[skills\n");
 });
 
 test("a changed plist is rewritten and the loaded service is booted out and back in", async () => {
@@ -186,7 +313,7 @@ test("a failed install exits 1 and still writes the config", async () => {
   const f = fake({ installed: ["harnessd", "claude"], failInstall: "@openai/codex" });
   assert.equal(await runInit(["--yes", "--no-service"], f.io, f.sys), 1);
   assert.match(f.err[0] ?? "", /npm i -g @openai\/codex" exited 1/);
-  assert.equal(f.files.get(CONFIG), CONFIG_TEMPLATE);
+  assert.equal(f.files.get(CONFIG), CONFIG_TEMPLATE + PINS);
 });
 
 test("no global harnessd: the service is skipped", async () => {
@@ -297,10 +424,68 @@ after(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
-test("the config template loads as a valid, empty global config", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "harnessd-cli-init-"));
-  roots.push(dir);
-  await writeFile(join(dir, "config.toml"), CONFIG_TEMPLATE);
-  const config = await loadConfig({ globalDir: dir, workspaceDir: join(dir, "none") });
-  assert.equal(config.linear.team_id, undefined);
+test("end to end on disk: init installs the pack, re-run keeps it, sync gives it to every harness", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-cli-init-"));
+  roots.push(root);
+  const packDir = join(root, "pack");
+  await buildPack(join(import.meta.dirname, "../../../.claude/skills"), packDir);
+  const home = join(root, "home");
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  for (const tool of ["npm", ...ALL]) await writeFile(join(bin, tool), "", { mode: 0o755 });
+  const real = nodeSystem();
+  const sys: InitSystem = {
+    ...real,
+    platform: "linux",
+    homedir: home,
+    cwd: root,
+    env: { PATH: bin },
+    packDir,
+    exec: async () => ({ code: 0, stdout: "1.0.0\n", stderr: "" }),
+  };
+  delete sys.confirm;
+  const out: string[] = [];
+  const io = { out: (l: string) => out.push(l), err: (l: string) => out.push(l) };
+  assert.equal(await runInit(["--no-service"], io, sys), 0, out.join("\n"));
+  const globalDir = join(home, ".harnessd");
+  const config = await readFile(join(globalDir, "config.toml"), "utf8");
+  assert.ok(config.startsWith(CONFIG_TEMPLATE));
+  assert.match(
+    config,
+    /\[skills\.impeccable\]\nupstream = "pbakaus\/impeccable"\ncommit = "b49177d/,
+  );
+  assert.equal(config.match(/^\[skills\./gm)?.length, 14);
+
+  // Re-run: the same bytes, the same skills.
+  out.length = 0;
+  assert.equal(await runInit(["--no-service"], io, sys), 0, out.join("\n"));
+  assert.equal(await readFile(join(globalDir, "config.toml"), "utf8"), config);
+  assert.ok(out.some((l) => l.startsWith("skills: kept code-review, ")));
+
+  const merged = await loadConfig({ globalDir, workspaceDir: join(root, "none") });
+  assert.equal(merged.skills.length, 14);
+
+  // A repo that turns impeccable off, and that hand-vendors its own tdd.
+  const repo = join(root, "repo");
+  await mkdir(join(repo, ".harnessd"), { recursive: true });
+  await writeFile(join(repo, ".harnessd", "config.toml"), "[skills.impeccable]\nenabled = false\n");
+  await mkdir(join(repo, ".claude", "skills", "tdd"), { recursive: true });
+  await writeFile(join(repo, ".claude", "skills", "tdd", "SKILL.md"), "hand-vendored\n");
+  const { skipped } = await syncRepo({ repoDir: repo, globalDir });
+  assert.deepEqual(skipped, [".claude/skills/tdd"]);
+  for (const root of [".claude/skills", ".agents/skills"]) {
+    assert.match(await readFile(join(repo, root, "domain-modeling", "LICENSE"), "utf8"), /MIT/);
+    assert.ok((await readdir(join(repo, root, "code-review"))).length > 1);
+    assert.match(
+      await readFile(join(repo, root, "grill-with-docs", "SKILL.md"), "utf8"),
+      /^disable-model-invocation: true$/m,
+    );
+    await assert.rejects(stat(join(repo, root, "impeccable")));
+    await assert.rejects(stat(join(repo, root, "code-review", ".harnessd-pack")));
+  }
+  assert.equal(
+    await readFile(join(repo, ".claude", "skills", "tdd", "SKILL.md"), "utf8"),
+    "hand-vendored\n",
+  );
+  assert.ok((await stat(join(repo, ".agents", "skills", "tdd", "tests.md"))).isFile());
 });

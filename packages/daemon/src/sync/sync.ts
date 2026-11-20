@@ -1,7 +1,7 @@
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig } from "../config/load.ts";
-import { generateSyncFiles } from "./generate.ts";
+import { GENERATED_NOTE, generateSyncFiles, SKILL_ROOTS, type SyncFile } from "./generate.ts";
 import { writeSyncFiles } from "./write.ts";
 
 export interface SyncOptions {
@@ -16,6 +16,47 @@ export interface SyncOptions {
 export interface SyncResult {
   /** Repo-relative paths that were written; [] when everything was up to date. */
   changed: string[];
+  /** Skill folders left alone because sync did not generate them, such as `.claude/skills/tdd`. */
+  skipped: string[];
+}
+
+/** The skill folder a path belongs to, such as `.claude/skills/tdd`, or undefined. */
+function skillFolder(path: string): string | undefined {
+  for (const root of SKILL_ROOTS) {
+    if (!path.startsWith(`${root}/`)) continue;
+    const name = path.slice(root.length + 1).split("/")[0];
+    return `${root}/${name}`;
+  }
+  return undefined;
+}
+
+/**
+ * A skill folder is sync's own when it is absent or its SKILL.md holds the generated note.
+ * Anything else (a hand-vendored skill, say) is never written into.
+ */
+async function isOwnSkillFolder(repoDir: string, folder: string): Promise<boolean> {
+  const exists = await stat(join(repoDir, folder)).then(
+    () => true,
+    () => false,
+  );
+  if (!exists) return true;
+  const md = await readFile(join(repoDir, folder, "SKILL.md"), "utf8").catch(() => "");
+  return md.includes(GENERATED_NOTE);
+}
+
+async function dropForeignSkills(repoDir: string, files: SyncFile[]) {
+  const own = new Map<string, boolean>();
+  const kept: SyncFile[] = [];
+  for (const file of files) {
+    const folder = skillFolder(file.path);
+    if (folder !== undefined) {
+      if (!own.has(folder)) own.set(folder, await isOwnSkillFolder(repoDir, folder));
+      if (!own.get(folder)) continue;
+    }
+    kept.push(file);
+  }
+  const skipped = [...own].filter(([, mine]) => !mine).map(([folder]) => folder);
+  return { files: kept, skipped };
 }
 
 /** Loads global + workspace config, generates every native file and writes what changed. */
@@ -35,5 +76,6 @@ export async function syncRepo(options: SyncOptions): Promise<SyncResult> {
     workspaceDir,
     ...(options.home === undefined ? {} : { home: options.home }),
   });
-  return { changed: await writeSyncFiles(options.repoDir, generateSyncFiles(config)) };
+  const { files, skipped } = await dropForeignSkills(options.repoDir, generateSyncFiles(config));
+  return { changed: await writeSyncFiles(options.repoDir, files), skipped };
 }

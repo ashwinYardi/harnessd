@@ -219,15 +219,40 @@ test("a skill folder without SKILL.md is rejected", async () => {
   );
 });
 
+test("a skill keeps its other frontmatter lines and lists its other files", async () => {
+  const f = await fixture({
+    "home/.harnessd/skills/ui/SKILL.md":
+      "---\nname: ui\ndescription: Design\nuser-invocable: true\nargument-hint: >\n  [target]\n---\nBody\n",
+    "home/.harnessd/skills/ui/LICENSE": "Apache",
+    "home/.harnessd/skills/ui/reference/craft.md": "craft",
+    "home/.harnessd/skills/ui/.harnessd-pack": "pbakaus/impeccable b49177d\n",
+  });
+  const layer = await loadLayer(f.globalDir, "global", f.home);
+  const skill = layer.skills[0];
+  assert.deepEqual(skill?.frontmatter, ["user-invocable: true", "argument-hint: >", "  [target]"]);
+  assert.deepEqual(skill?.files, ["LICENSE", "reference/craft.md"]);
+});
+
+test("a [skills.<name>] table loads into the layer", async () => {
+  const f = await fixture({ "repo/.harnessd/config.toml": "[skills.tdd]\nenabled = false\n" });
+  const layer = await loadLayer(f.workspaceDir, "workspace", f.home);
+  assert.deepEqual(layer.skillSettings, { tdd: { enabled: false } });
+});
+
 test("parseFrontmatter handles quotes, comments and missing frontmatter", () => {
   assert.deepEqual(
     parseFrontmatter("---\n# c\nname: 'a b'\ndescription: \"x: y\"\n---\nbody", "f"),
     {
       data: { name: "a b", description: "x: y" },
+      lines: { name: ["name: 'a b'"], description: ['description: "x: y"'] },
       body: "body",
     },
   );
-  assert.deepEqual(parseFrontmatter("no frontmatter", "f"), { data: {}, body: "no frontmatter" });
+  assert.deepEqual(parseFrontmatter("no frontmatter", "f"), {
+    data: {},
+    lines: {},
+    body: "no frontmatter",
+  });
   assert.throws(
     () => parseFrontmatter("---\nname: a\n", "f"),
     configError("f: frontmatter has no closing ---"),
