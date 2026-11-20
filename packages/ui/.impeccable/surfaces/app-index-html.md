@@ -5,14 +5,14 @@ primary_target: "app/index.html"
 related_targets: []
 ---
 
-# Surface brief: harnessd live board (packages/ui)
+# Surface brief: harnessd app shell (packages/ui)
 
-Mode: Operate. Visitor: the owner, a developer who checks in a few times a day. Job: see what runs, what is blocked and what needs them; stop everything at once if needed. Constraints: PRODUCT.md pinned aesthetic (dense, quiet, t3.code and cloudroom.dev craft bar; no gradients, emoji, filler copy). Loopback only, strict CSP, no web fonts.
+Mode: Operate. Visitor: the owner, a developer who checks in a few times a day and uses T3 Code daily. Job: see what runs, what is blocked and what needs them; stop everything at once; reach any action by keyboard. Constraints: PRODUCT.md pinned aesthetic, D-025 stack and tokens, loopback only, strict CSP, no web fonts, no T3 Code brand.
 
 ## Direction contract
-THESIS: The board reads like the stock tables of a financial page: every state and figure sits in a fixed column, so a glance finds what changed. It refuses the decorated kanban: no avatars, no colored pills, no drop shadows. Rows are plain bordered quote lines.
-OWN-WORLD: Cool ink on newsprint grey, never cream. A deep ink header band carries the name, the connection and the kill switch; it turns amber while paused. One signal red is reserved for Needs you. Amber marks budgets past 80 percent. System sans at 13 px, tabular figures, mono only for keys and log lines, 1 px hairline rules, 4 px radius, no shadows.
-STORY: The owner opens the page, reads the Needs you column first, scans the state columns, checks each agent's task, time and budget, reads the log when something looks wrong, and pauses from the control that is always in the band.
-FIRST VIEWPORT: Header band 44 px across the top, pause control at its right edge. Board of six columns below it, Needs you at the left. Bottom third split: agent table left, live log right.
-FORM: financial-pages quote table, candidate 5 of 7. seed:90eeb77d10ca5ba4 (degraded roll, no challengers).
-SIGNATURE: quote-line rows: key, title and right-aligned tabular figures on one baseline grid, with the Needs you column set in the one signal ink.
+THESIS: harnessd feels like a sibling of T3 Code: the same sidebar, header, palette, controls and density, so the owner knows it on sight. It refuses the decorated kanban and the custom one-off look of MET-18.
+OWN-WORLD: T3 Code's zinc neutrals on near-white, true black in dark, one blue primary, 8 px controls, 12 px cards, soft overlay shadows, system sans at 14 px, lucide icons. Red belongs to Needs you alone; amber to budget and paused.
+STORY: The owner opens the app, reads the red Needs you count in the header and sidebar, scans the board, checks agents and logs from the sidebar, pauses from the header, and runs anything else from Cmd+K.
+FIRST VIEWPORT: 224 px sidebar left (Board, Agents, Logs, Settings; Commands at the foot). 52 px header with title, connection, Needs you button and the pause control at its right edge. Board columns fill the rest, Needs you first.
+FORM: T3 Code app shell, pinned by the owner. seed: none (pinned) "The owner wants the UI at T3 Code's level"; "Take T3 Code's tokens for color, type scale, spacing, radius and motion"; "Build an app shell: a left sidebar (Board, Agents, Logs, Settings), a header with the pause control always visible, and a Cmd+K command palette with every action."
+FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance

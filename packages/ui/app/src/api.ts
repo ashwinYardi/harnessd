@@ -3,11 +3,9 @@ import type { AgentsSnapshot, BoardSnapshot, LogLine, LogSnapshot } from "@harne
 import { useCallback, useEffect, useState } from "react";
 import { appendLines } from "./lib/log.ts";
 
-export interface PauseState {
-  paused: boolean;
-  since?: string;
-  reason?: string;
-}
+import type { PauseState } from "./lib/pause.ts";
+
+export type { PauseState };
 
 export type Load<T> =
   | { status: "loading" }
@@ -113,6 +111,7 @@ export function useHarnessd() {
     pause,
     connection,
     setPause,
+    reloadPause: loadPause,
     retry: { board: loadBoard, agents: loadAgents, logs: loadLogs },
   };
 }
@@ -123,3 +122,13 @@ export interface PauseResult extends PauseState {
 
 export const pauseAll = () => post<PauseResult>("/api/pause", {});
 export const resumeAll = () => post<PauseState>("/api/resume", {});
+
+/** One line of `harnessd doctor` (D-023). */
+export interface Check {
+  id: string;
+  state: "ok" | "warn" | "fail" | "missing";
+  detail: string;
+  fix: string;
+}
+
+export const readStatus = () => request<{ checks: Check[] }>("/api/status");

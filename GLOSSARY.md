@@ -43,3 +43,7 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 **Event stream**: the server-sent events at `GET /api/events` that push pause, board, agent and log changes to the UI (D-024).
 
 **Held update**: a live change the UI keeps back while the pointer or focus is in that region, so content never moves under the cursor.
+
+**Command palette**: the dialog that Cmd+K (Ctrl+K) opens. It lists every action in the app and runs the one you pick (D-025). _Avoid_: command menu, quick open.
+
+**Optimistic pause**: the pause control shows the new state on the click, before the daemon answers, and rolls back if the call fails (DESIGN.md).

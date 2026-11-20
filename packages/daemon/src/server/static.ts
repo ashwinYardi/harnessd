@@ -16,11 +16,15 @@ const TYPES: Record<string, string> = {
   ".txt": "text/plain; charset=utf-8",
 };
 
-/** The page loads only its own files and talks only to this daemon. */
+/**
+ * The page loads only its own files and talks only to this daemon. The one style hash is the
+ * fixed scrollbar rule that Base UI renders as an inline <style> (D-025); packages/ui's
+ * csp.test.ts fails when a Base UI update changes it.
+ */
 export const UI_CSP = [
   "default-src 'self'",
   "script-src 'self'",
-  "style-src 'self'",
+  "style-src 'self' 'sha256-kLmvWqfziFavKtqHqRsb90f006UAK2Dmd0It5Iz2KFA='",
   "img-src 'self' data:",
   "font-src 'self' data:",
   "connect-src 'self'",
