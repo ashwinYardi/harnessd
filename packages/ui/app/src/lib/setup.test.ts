@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { Check } from "./checks.ts";
-import { blockingAreas, connectionCards, envFix, harnessSummary, isWaiting } from "./setup.ts";
+import {
+  blockingAreas,
+  connectionCards,
+  envFix,
+  harnessSummary,
+  isWaiting,
+  startState,
+} from "./setup.ts";
 
 const c = (id: string, state: Check["state"], detail = "", fix = ""): Check => ({
   id,
@@ -105,4 +112,31 @@ test("isWaiting marks a check that only waits on another one", () => {
     true,
   );
   assert.equal(isWaiting(c("linear.key", "missing", "LINEAR_API_KEY is not set")), false);
+});
+
+test("startState is ready only when the checks loaded, nothing blocks, and the daemon agrees", () => {
+  const ok = [c("node", "ok")];
+  assert.deepEqual(startState(undefined, { state: "setup", blocking: [] }), {
+    ready: false,
+    areas: [],
+    loading: true,
+  });
+  assert.deepEqual(startState(ok, { state: "setup", blocking: [] }), {
+    ready: true,
+    areas: [],
+    loading: false,
+  });
+  assert.deepEqual(startState(ok, { state: "setup", blocking: ["linear.key"] }), {
+    ready: false,
+    areas: ["Linear"],
+    loading: false,
+  });
+  assert.deepEqual(
+    startState([c("harness.codex.auth", "fail")], { state: "setup", blocking: ["linear.key"] }),
+    {
+      ready: false,
+      areas: ["Codex", "Linear"],
+      loading: false,
+    },
+  );
 });

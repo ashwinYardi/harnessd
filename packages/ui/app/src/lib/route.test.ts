@@ -36,7 +36,7 @@ test("firstRoute opens Settings → Harnesses on first launch while a required c
   });
   assert.deepEqual(firstRoute("", { state: "setup", blocking: ["linear.key"] }), {
     view: "settings",
-    page: "connections",
+    page: "harnesses",
   });
   assert.equal(
     firstRoute("#/logs", { state: "setup", blocking: ["linear.key"] }),

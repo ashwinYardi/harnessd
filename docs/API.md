@@ -11,7 +11,7 @@
 
 | Status | Code |
 |---|---|
-| 400 | `invalid_json`, `invalid_body` (a form error adds `"fields": { "<row>.<field>": "…" }`), `invalid_config` (a config.toml the validator rejects), `unsupported` |
+| 400 | `invalid_json`, `invalid_body` (a form error adds `"fields": { "<row>.<field>": "…" }`), `invalid_config` (a config.toml on disk that the validator rejects; a write that would make one is `invalid_body`), `unsupported` |
 | 403 | `forbidden_host` |
 | 404 | `not_found` |
 | 409 | `busy`, `setup_incomplete` |

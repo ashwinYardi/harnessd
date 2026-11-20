@@ -32,12 +32,11 @@ export interface LoopState {
 }
 
 /**
- * On first launch, a blocking check opens the Settings page that fixes it: Harnesses for a
- * harness check, else Connections. A view the owner chose in the URL stays.
+ * On first launch, a blocking check opens Settings → Harnesses (MET-28). A view the owner
+ * chose in the URL stays.
  */
 export function firstRoute(hash: string, loop: LoopState): Route | undefined {
   if (hash !== "" && hash !== "#" && hash !== "#/") return undefined;
   if (loop.state !== "setup" || loop.blocking.length === 0) return undefined;
-  const harness = loop.blocking.some((id) => id.startsWith("harness."));
-  return { view: "settings", page: harness ? "harnesses" : "connections" };
+  return { view: "settings", page: "harnesses" };
 }

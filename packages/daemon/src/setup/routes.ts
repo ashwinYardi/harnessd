@@ -250,7 +250,11 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
       loadConfig({
         globalDir: options.globalDir,
         workspaceDir: join(options.repoDir, ".harnessd"),
-      }).catch(() => undefined),
+      }).catch((e: unknown) => {
+        // A broken config is named, not hidden behind "no agent uses it".
+        if (e instanceof ConfigError) throw new HttpError(400, "invalid_config", e.message);
+        throw e;
+      }),
     ]);
     const used = new Set(Object.values(config?.agents ?? {}).map((a) => a.harness));
     return {

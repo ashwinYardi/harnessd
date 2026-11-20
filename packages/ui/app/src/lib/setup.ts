@@ -1,5 +1,6 @@
 // Reads the status engine's checks into what the Settings cards show (MET-28).
 import type { Check } from "./checks.ts";
+import type { LoopState } from "./route.ts";
 
 const RANK: Record<Check["state"], number> = { ok: 0, warn: 1, missing: 2, fail: 3 };
 
@@ -116,4 +117,23 @@ export function blockingAreas(checks: readonly Check[]): string[] {
     if (bad.some((c) => c.id.startsWith(prefix))) out.push(name);
   }
   return out;
+}
+
+/**
+ * Whether Start can be pressed. It is ready only when the checks have loaded, none blocks,
+ * and the daemon names no blocker of its own (such as a missing LINEAR_API_KEY).
+ */
+export function startState(
+  checks: readonly Check[] | undefined,
+  loop: LoopState,
+): { ready: boolean; areas: string[]; loading: boolean } {
+  if (checks === undefined) return { ready: false, areas: [], loading: true };
+  const areas = blockingAreas(checks);
+  for (const id of loop.blocking) {
+    const area = blockingAreas([{ id, state: "fail", detail: "", fix: "" }])[0];
+    if (area && !areas.includes(area)) areas.push(area);
+  }
+  const order = AREA.map(([, name]) => name);
+  areas.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+  return { ready: areas.length === 0, areas, loading: false };
 }

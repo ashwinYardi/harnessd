@@ -13,7 +13,7 @@ import { needsYou } from "./lib/board.ts";
 import type { Command } from "./lib/commands.ts";
 import type { View } from "./lib/route.ts";
 import { firstRoute, type SettingsPage } from "./lib/route.ts";
-import { blockingAreas } from "./lib/setup.ts";
+import { blockingAreas, startState } from "./lib/setup.ts";
 import { goToView, isPaletteShortcut, isTypingTarget } from "./lib/shortcut.ts";
 import { AppHeader } from "./shell/AppHeader.tsx";
 import { AppSidebar } from "./shell/AppSidebar.tsx";
@@ -267,7 +267,10 @@ export function App() {
             // On Settings the banner carries Start, so the header does not repeat it.
             loop.loop?.state === "setup" && route.view !== "settings"
               ? {
-                  ready: failingChecks === 0,
+                  ready: startState(
+                    status.status.status === "ready" ? status.status.data : undefined,
+                    loop.loop,
+                  ).ready,
                   starting: loop.starting,
                   onStart: () => void loop.start(),
                   onFinish: () => go({ view: "settings", page: "harnesses" }),

@@ -37,17 +37,16 @@ interface Block {
 }
 
 /** A TOML basic string. JSON's escapes are valid TOML escapes. */
-const str = (value: string) => JSON.stringify(value);
+const tomlString = (value: string) => JSON.stringify(value);
 
 function unquote(name: string): string {
   const m = /^"(.*)"$/.exec(name) ?? /^'(.*)'$/.exec(name);
   return m ? (m[1] ?? "") : name;
 }
 
-/** The line index after which a key line of `block` ends, skipping multi-line strings. */
-function scan(lines: readonly string[]): { blocks: Block[]; headers: number[] } {
+/** Finds each [agents.<name>] table and its key lines, skipping multi-line string bodies. */
+function scan(lines: readonly string[]): { blocks: Block[] } {
   const blocks: Block[] = [];
-  const headers: number[] = [];
   let open: '"""' | "'''" | null = null;
   let current: Block | undefined;
   let rootKeys = true;
@@ -60,7 +59,6 @@ function scan(lines: readonly string[]): { blocks: Block[]; headers: number[] } 
     const header = HEADER.exec(line);
     if (header && !line.trimStart().startsWith("[[")) {
       rootKeys = false;
-      headers.push(i);
       const path = header[1] ?? "";
       if (current) current.end = i;
       current = undefined;
@@ -112,19 +110,19 @@ function scan(lines: readonly string[]): { blocks: Block[]; headers: number[] } 
     while (end > b.header + 1 && COMMENT_OR_BLANK.test(lines[end - 1] ?? "")) end--;
     b.end = end;
   }
-  return { blocks, headers };
+  return { blocks };
 }
 
 function keyLine(key: string, value: string, old: string | undefined): string {
   const indent = old ? (/^\s*/.exec(old)?.[0] ?? "") : "";
   const comment = old ? (/\s+#[^"']*$/.exec(old)?.[0] ?? "") : "";
-  return `${indent}${key} = ${str(value)}${comment}`;
+  return `${indent}${key} = ${tomlString(value)}${comment}`;
 }
 
 function tableText(name: string, entry: TeamEntry): string[] {
-  const out = [`[agents.${/^[A-Za-z0-9_-]+$/.test(name) ? name : str(name)}]`];
-  out.push(`role = ${str(entry.role)}`, `harness = ${str(entry.harness)}`);
-  if (entry.model) out.push(`model = ${str(entry.model)}`);
+  const out = [`[agents.${/^[A-Za-z0-9_-]+$/.test(name) ? name : tomlString(name)}]`];
+  out.push(`role = ${tomlString(entry.role)}`, `harness = ${tomlString(entry.harness)}`);
+  if (entry.model) out.push(`model = ${tomlString(entry.model)}`);
   return out;
 }
 
@@ -138,7 +136,6 @@ export function applyTeam(text: string, change: TeamChange): string {
   for (const [name, entry] of Object.entries(change.set)) {
     const block = byName.get(name);
     if (!block) continue;
-    let after = Math.max(block.header, ...block.keys.values());
     const missing: string[] = [];
     for (const key of EDITED_KEYS) {
       const value = entry[key];
@@ -150,12 +147,12 @@ export function applyTeam(text: string, change: TeamChange): string {
             : { at, remove: 1, insert: [] },
         );
       } else if (value) {
-        missing.push(`${key} = ${str(value)}`);
+        missing.push(`${key} = ${tomlString(value)}`);
       }
     }
     if (missing.length > 0) {
       // A new key goes right after the header's existing simple keys.
-      after = block.keys.size > 0 ? Math.max(...block.keys.values()) : block.header;
+      const after = block.keys.size > 0 ? Math.max(...block.keys.values()) : block.header;
       edits.push({ at: after + 1, remove: 0, insert: missing });
     }
   }

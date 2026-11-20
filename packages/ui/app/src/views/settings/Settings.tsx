@@ -5,9 +5,10 @@ import { Button } from "../../components/ui/button.tsx";
 import { Spinner } from "../../components/ui/spinner.tsx";
 import type { Loop } from "../../hooks/useLoop.ts";
 import type { Status } from "../../hooks/useStatus.ts";
+import type { Check } from "../../lib/checks.ts";
 import { cn } from "../../lib/cn.ts";
 import { hrefFor, type SettingsPage } from "../../lib/route.ts";
-import { blockingAreas, worst } from "../../lib/setup.ts";
+import { startState, worst } from "../../lib/setup.ts";
 import { Connections } from "./Connections.tsx";
 import { Harnesses } from "./Harnesses.tsx";
 import { Team } from "./Team.tsx";
@@ -22,9 +23,9 @@ const PAGES: ReadonlyArray<{ page: SettingsPage; title: string; about: string }>
   { page: "team", title: "Team", about: "Each agent's role, harness and model." },
 ];
 
-function StartBanner({ loop, areas }: { loop: Loop; areas: string[] }) {
+function StartBanner({ loop, checks }: { loop: Loop; checks: readonly Check[] | undefined }) {
   if (loop.loop?.state !== "setup") return null;
-  const ready = areas.length === 0;
+  const { ready, areas, loading } = startState(checks, loop.loop);
   return (
     <div
       className={cn(
@@ -40,9 +41,11 @@ function StartBanner({ loop, areas }: { loop: Loop; areas: string[] }) {
         />
       )}
       <p className="min-w-0 flex-1 text-sm">
-        {ready
-          ? "Every required check passes. Start the loop to pick up Ready issues."
-          : `The loop waits. Fix ${areas.length === 1 ? "one thing" : `${areas.length} things`}: ${areas.join(", ")}.`}
+        {loading
+          ? "Running the checks."
+          : ready
+            ? "Every required check passes. Start the loop to pick up Ready issues."
+            : `The loop waits. Fix ${areas.length === 1 ? "one thing" : `${areas.length} things`}: ${areas.join(", ")}.`}
       </p>
       <Button disabled={!ready || loop.starting} onClick={() => void loop.start()}>
         {loop.starting ? <Spinner /> : <PlayIcon aria-hidden="true" />}
@@ -117,7 +120,10 @@ export function Settings({
               </a>
             ))}
           </nav>
-          <StartBanner areas={blockingAreas(checks)} loop={loop} />
+          <StartBanner
+            checks={status.status.status === "ready" ? status.status.data : undefined}
+            loop={loop}
+          />
           <header className="mb-3">
             <h2 className="font-semibold text-base">{current?.title}</h2>
             <p className="text-muted-foreground text-sm">{current?.about}</p>

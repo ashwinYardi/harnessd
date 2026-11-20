@@ -57,7 +57,7 @@ function JobOutput({ job }: { job: Job }) {
       )}
       {job.state === "failed" && (
         <div className="flex items-center gap-2 border-t px-3 py-2 text-xs">
-          <span className="text-destructive-foreground">Run it yourself in a terminal:</span>
+          <span className="text-muted-foreground">Run it yourself in a terminal:</span>
           <code className="font-mono">{job.command}</code>
           <Button
             aria-label="Copy the command"
@@ -159,6 +159,8 @@ function HarnessCardView({
   checking: boolean;
 }) {
   const s = harnessSummary(card.id, card.checks);
+  // Red only for a harness an agent uses: an unused one blocks nothing, so it shows amber.
+  const tone = !card.required && (s.state === "fail" || s.state === "missing") ? "warn" : s.state;
   const busy = job?.state === "running";
   const status = !s.found
     ? "Not found"
@@ -180,7 +182,7 @@ function HarnessCardView({
         <div className="min-w-0 flex-1">
           <CardTitle className="flex items-center gap-2">
             {card.name}
-            <StateBadge state={s.state}>{status}</StateBadge>
+            <StateBadge state={tone}>{status}</StateBadge>
           </CardTitle>
           <p className="mt-0.5 text-muted-foreground text-xs">
             {card.required
@@ -206,7 +208,11 @@ function HarnessCardView({
             {s.signedIn ? (
               `Yes, ${s.signIn.replace(/^signed in ?/, "").replace(/^\((.*)\)$/, "$1") || "with the CLI"}`
             ) : (
-              <span className="text-destructive-foreground">
+              <span
+                className={
+                  tone === "warn" ? "text-warning-foreground" : "text-destructive-foreground"
+                }
+              >
                 {s.found ? "No" : "Install first"}
               </span>
             )}
