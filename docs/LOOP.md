@@ -9,6 +9,7 @@ LINEAR_API_KEY=lin_api_... harnessd run [dir] [--once] [--interval <seconds>] [-
 - The key comes only from `LINEAR_API_KEY`. The command stops with an error when it is missing.
 - GitHub goes through the `gh` CLI (D-002), with whatever auth `gh` has: `GH_TOKEN`, `GITHUB_TOKEN` or `gh auth login`. harnessd never reads or stores a GitHub token. `HARNESSD_GH_BIN` points at another `gh` binary.
 - `linear.team_id` (a team key such as `MET`, or its UUID) is required. `linear.project` (a name or UUID) is optional. Both live in `.harnessd/config.toml`.
+- **Checks at start.** Before the API and the loop start, `harnessd run` runs the checks of `harnessd doctor` (docs/INSTALL.md). On any `fail` or `missing` it prints each one with its fix and exits 1. A `warn` is printed and the loop starts (D-021).
 - The loop ticks every 30 s by default. `--once` runs one tick and waits for its runs to finish.
 - Agents run with `--permission-mode auto` by default: nobody is there to approve prompts, and auto mode still screens risky actions. Each agent works in its own worktree (D-012), which keeps branches apart but is not a sandbox. `--permission-mode` overrides the default.
 - The local API (docs/API.md) starts with the loop on `127.0.0.1:<daemon.port>` (default 4747). Its url goes to `~/.harnessd/state/daemon.json`, which is removed on a clean stop. A port already in use stops the command with an error; give a second loop its own `daemon.port`.

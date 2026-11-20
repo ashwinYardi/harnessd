@@ -17,10 +17,13 @@ import {
   type ListReadyOptions,
   loadConfig,
   removeDaemonInfo,
+  runStatus,
   startDaemon,
+  statusRoutes,
   writeDaemonInfo,
 } from "@harnessd/daemon";
 import { ConfigError } from "@harnessd/shared";
+import { type RunChecks, refusalLines, statusOptions } from "./doctor.ts";
 
 /** Read at the edge only; never written to disk or logs. */
 export const LINEAR_API_KEY_ENV = "LINEAR_API_KEY";
@@ -75,6 +78,8 @@ export interface LoopIO {
   env?: NodeJS.ProcessEnv;
   /** Resolves when the loop should stop. Default: SIGINT or SIGTERM. */
   stopSignal?: () => Promise<string>;
+  /** Runs the status checks (MET-27). Default: the real machine. */
+  checks?: RunChecks;
 }
 
 function untilSignal(): Promise<string> {
@@ -151,12 +156,26 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     return 1;
   }
 
+  // Every harness and connection, before anything is dispatched (MET-27, D-021).
+  const checks = io.checks ?? runStatus;
+  const options = statusOptions(repoDir, env);
+  const startChecks = await checks(options);
+  const refusal = refusalLines(startChecks);
+  if (refusal.length > 1) {
+    for (const line of refusal) io.err(line);
+    return 1;
+  }
+  for (const c of startChecks.filter((c) => c.state === "warn")) {
+    io.err(`harnessd run: warn ${c.id}: ${c.detail}`);
+  }
+
   // The local API (docs/API.md), so `harnessd pause` and the UI reach this loop at once.
   let daemon: Daemon;
   try {
     daemon = await startDaemon({
       port,
       pause: createPauseController({ store: pauseStore, loops: [loop] }),
+      routes: statusRoutes(() => checks({ ...options, servingPort: true })),
     });
   } catch (e) {
     const busy = (e as NodeJS.ErrnoException).code === "EADDRINUSE";

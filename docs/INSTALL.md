@@ -45,6 +45,42 @@ Steps:
 
 The exit code is 0 when everything it tried worked, even if you declined an install; the last line lists what is not installed. It is 1 when an install, the skills step or `launchctl` failed, and 2 for a usage error.
 
+## harnessd doctor
+```
+harnessd doctor [dir] [--json]
+```
+It checks the machine and the workspace at `dir` (default: the current directory), and prints one row per check: state, id, detail and fix. `--json` prints `{ "checks": [...] }`. `harnessd run` runs the same checks at start, and `GET /api/status` returns them (docs/API.md).
+
+| State | Meaning | Blocks `harnessd run` |
+|---|---|---|
+| `ok` | It works. | no |
+| `warn` | It works, but something is off. | no |
+| `fail` | It is there but broken. | yes |
+| `missing` | It is required and absent, or a check it needs failed first. | yes |
+
+The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for a usage error.
+
+| Check | How | Not ok |
+|---|---|---|
+| `node` | the running Node | `fail` below 24. Fix: `nvm install 24 && nvm alias default 24`, or `brew install node@24` |
+| `config` | loads global and workspace config.toml | `fail` with the file and key |
+| `harness.<id>.cli` | `$HARNESSD_CLAUDE_BIN` or `claude` on PATH, then `--version` | `missing` when not found |
+| `harness.<id>.auth` | `claude auth status --json`; `codex login status` | `fail` when signed out; `warn` when the status cannot be read |
+| `harness.<id>.version` | the version against a list of known-bad releases | `warn` |
+| `github.cli` | `$HARNESSD_GH_BIN` or `gh` on PATH | `missing` |
+| `github.auth` | `gh auth status --active` | `fail`: run `gh auth login` |
+| `github.push` | `gh repo view --json viewerPermission` | `fail` below WRITE, or with no GitHub remote |
+| `github.ci` | `gh api repos/{owner}/{repo}/rules/branches/<default>` | `warn` when no check is required |
+| `linear.key` | one GraphQL read with `LINEAR_API_KEY` | `missing` when unset; `fail` when rejected or unreachable |
+| `linear.team` | `linear.team_id`, as a key or a UUID | `missing` when unset; `fail` when unknown |
+| `linear.states` | Ready, In Progress, In Review, Done and Needs input | `fail`, with the missing names |
+| `slack.webhook` | `SLACK_WEBHOOK_URL` is set | `warn` only |
+| `git.worktrees` | `git worktree list` in the workspace | `fail` outside a git clone |
+| `daemon.port` | binds `127.0.0.1:<daemon.port>` | `fail` when in use |
+| `skills.pack` | each default skill in `~/.harnessd/skills/` | `warn`: run `harnessd init` |
+
+Harnesses are checked once for each harness an agent uses. Checks run in parallel, each group within 5 s, so `doctor` returns within a few seconds. No check spends tokens. Output never shows a key, a token or a webhook: values of environment variables with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in the name are replaced by `***`.
+
 ## The launchd service
 | | |
 |---|---|

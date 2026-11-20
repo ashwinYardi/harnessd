@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { defaultGlobalDir, findRepoRoot, serveMemory, syncRepo, vaultDirs } from "@harnessd/daemon";
 import { ConfigError, VERSION } from "@harnessd/shared";
+import { type RunChecks, runDoctor } from "./doctor.ts";
 import { type InitSystem, runInit } from "./init.ts";
 import { runLoop } from "./loop.ts";
 import { runPause, runResume } from "./pause.ts";
@@ -18,6 +19,8 @@ export interface CliIO {
   stdout?: Writable;
   /** OS effects for `init`. Defaults to the real machine. */
   system?: InitSystem;
+  /** Runs the status checks for `doctor` and `run`. Defaults to the real machine. */
+  checks?: RunChecks;
 }
 
 const USAGE = `harnessd ${VERSION}
@@ -29,6 +32,9 @@ Commands:
                Set up this machine: harness CLIs, ~/.harnessd/config.toml, the
                default skill pack and, on macOS, the launchd service
                (docs/INSTALL.md). Safe to re-run
+  doctor [dir] [--json]
+               Check Node, each harness, GitHub, Linear, Slack, git, the port and
+               the skill pack. Exits 1 on any "fail" or "missing"
   sync [dir]   Write AGENTS.md and each harness's native files from .harnessd/
   run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
                Run the coordinator loop: split Ready issues and dispatch agents.
@@ -92,6 +98,8 @@ export async function run(argv: readonly string[], io: CliIO): Promise<number> {
   switch (command) {
     case "init":
       return runInit(rest, io, io.system);
+    case "doctor":
+      return runDoctor(rest, io);
     case "sync":
       return sync(rest, io);
     case "mcp":
