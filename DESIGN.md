@@ -1,13 +1,15 @@
 ---
 name: harnessd
-description: Dense, quiet operator UI for a local team of coding agents, on T3 Code's stack and tokens (D-025).
+description: Dense, quiet, keyboard-first operator UI for a local team of coding agents (D-025, D-029).
 colors:
   background: "zinc-25 oklch(99.2% 0 0)"
   foreground: "zinc-900"
   card: "white"
   popover: "white"
-  primary: "oklch(0.488 0.217 264)"
-  primary-foreground: "white"
+  brand: "light-dark(oklch(0.488 0.217 264), oklch(0.571 0.21 264))"
+  brand-foreground: "white"
+  primary: "brand"
+  primary-foreground: "brand-foreground"
   secondary: "zinc-50"
   muted: "zinc-50"
   muted-foreground: "zinc-600"
@@ -15,7 +17,7 @@ colors:
   accent: "zinc-100"
   border: "zinc-200"
   input: "zinc-300"
-  ring: "primary"
+  ring: "brand"
   destructive: "red-600"
   error: "red-500"
   error-foreground: "red-700"
@@ -32,7 +34,6 @@ colors:
   dark-background: "#000"
   dark-foreground: "neutral-100"
   dark-card: "neutral-950 + 3% white"
-  dark-primary: "oklch(0.571 0.21 264)"
   dark-muted-foreground: "neutral-400"
   dark-border: "white at 8%"
   dark-input: "white at 14%"
@@ -75,6 +76,7 @@ motion:
   reduced: "prefers-reduced-motion stops every transition and animation"
 components:
   button: "components/ui/button.tsx: default, outline, secondary, ghost, ghost-muted, destructive, warning-outline, link"
+  service-logo: "components/service-logo.tsx: ServiceLogo and HarnessName"
   badge: "components/ui/badge.tsx"
   card: "components/ui/card.tsx"
   dialog: "components/ui/dialog.tsx"
@@ -92,11 +94,12 @@ components:
 ---
 
 ## Overview
-harnessd's UI is an Operate surface (PRODUCT.md). It answers three questions fast: what runs, what is blocked, and what needs the owner. Since D-025 it is built on T3 Code's stack (Tailwind v4, Base UI, CVA, lucide-react) and takes T3 Code's tokens, so it feels like the tool the owner already uses (Jakob's law). harnessd keeps its own name, copy and one signature: **Needs you** is the only loud thing on screen.
+harnessd's UI is an Operate surface (PRODUCT.md). It answers three questions fast: what runs, what is blocked, and what needs the owner. It is dense, quiet, keyboard-first and professional. It is built on Tailwind v4, Base UI, CVA and lucide-react (D-025). The primitives come from the shadcn/ui Base UI registry, with harnessd's changes (D-029). One signature: **Needs you** is the only loud thing on screen.
 
 ## Colors
-Restrained, after T3 Code: zinc neutrals in light, true black and neutral in dark, one blue primary, and three state colors that each do one job.
-- **Primary** (blue): the default button, focus rings, the switch, the budget bar under 80 percent. Nothing else.
+Restrained: zinc neutrals in light, true black and neutral in dark, one accent, and three state colors that each do one job.
+- **Brand** (blue for now): the `--brand` token family in `index.css`. `--primary` and `--ring` read it. It fills the default button, focus rings, the switch and the budget bar under 80 percent. Nothing else. The brand accent replaces it by changing the one `--brand` line (light value, then dark value) and, if needed, `--brand-foreground`. `lib/tokens.test.ts` checks AA for both values.
+- **Service logos**: GitHub, Linear, Slack, Claude, OpenAI and git, in the current text color. Never in a brand color, so the state colors keep their meaning.
 - **Destructive and error** (red): only Needs you, Blocked, blocking checks (fail and missing, D-023) and failed calls. The Needs you column, its count in the sidebar and the header button are red. Nothing else is red.
 - **Warning** (amber): budgets at 80 percent or more, stopping runs, warning log lines, warn checks, and the header while paused.
 - **Success** (emerald): the live connection dot, the running-agent dot, ok checks and success toasts.
@@ -109,13 +112,13 @@ Text contrast, computed from the Tailwind v4 oklch values (WCAG 2.1, sRGB compos
 | muted-foreground on background | 7.6 | 8.1 |
 | muted-foreground on accent or card | 7.0 | 7.3 |
 | placeholder on background | 4.7 | 8.1 |
-| white on primary | 6.7 | 4.6 |
+| white on brand | 6.7 | 4.6 |
 | white on destructive | 4.8 | 4.8 |
 | error-foreground on error-surface | 5.7 | 6.4 |
 | warning-foreground on warning-surface | 6.7 | 10.0 |
 | success-foreground on success surface | 5.0 | 10.9 |
 
-Three tokens are one step darker than T3 Code's, so every pair passes 4.5:1: muted-foreground (zinc-600), warning-foreground (amber-800) and destructive (red-600).
+Three tokens take the darker step so every pair passes 4.5:1: muted-foreground (zinc-600), warning-foreground (amber-800) and destructive (red-600). A service logo takes the text color around it, so it keeps that text's contrast.
 
 ## Typography
 One system sans. 14 px (`text-sm`) for anything a person reads, 12 px (`text-xs`) for meta, 11 px (`text-2xs`) for tags. Weight makes hierarchy: 600 for headings and column heads, 500 for buttons and active nav. Monospace only for data: issue keys, check ids, log lines and tool actions. All figures are tabular.
@@ -129,7 +132,7 @@ One system sans. 14 px (`text-sm`) for anything a person reads, 12 px (`text-xs`
 - Spacing is Tailwind's 4 px scale. Views have 16 px gutters.
 
 ## Elevation and depth
-After T3 Code: a 1 px border and a change of surface first. Controls take a faint `shadow-xs/5`. Overlays (dialog, popover, select, toast, tooltip) take a soft drop shadow with a real offset. No glass, no backdrop blur, no glow.
+A 1 px border and a change of surface first. Controls take a faint `shadow-xs/5`. Overlays (dialog, popover, select, toast, tooltip) take a soft drop shadow with a real offset. No glass, no backdrop blur, no glow.
 
 ## Shapes
 8 px radius on controls and inputs, 12 px on cards and board columns, 16 px on dialogs and the command palette, 4 px on badges.
@@ -137,6 +140,7 @@ After T3 Code: a 1 px border and a change of surface first. Controls take a fain
 ## Components
 - **Button** (CVA): default (primary), outline, secondary, ghost, ghost-muted, destructive, warning-outline, link. Sizes default 32 px, sm 28 px, xs 24 px, icon 32 px. Press scales to 0.97.
 - **Pause control:** always in the header at the right. Outline with a pause icon while running; primary "Resume" while paused. The click changes the header and the label at once (optimistic). The daemon's answer confirms it. A failure rolls back and shows an error toast. Never a confirmation.
+- **Service logo** (`components/service-logo.tsx`): a 16 px Simple Icons mark in `currentColor`, before the service's name on Harnesses and Connections cards; 14 px before the harness id in the agent list and the Team table. The text label is always there, so the logo is `aria-hidden`; `named` gives it its own accessible name where no text sits next to it. Port, skills and harnesses without a mark show text only.
 - **Command palette:** Cmd+K or Ctrl+K, or Commands in the sidebar. It lists every action: pause or resume, each view, run the checks again, read the board again, load the log again, and the three themes. Up, Down, Home, End, Enter, Esc.
 - **Toasts:** bottom right, at most four, 5 s. Every async result gets one: pause, resume, check again.
 - **Held updates:** while the pointer or focus is in the board or the agent table, live changes wait. A "Show N updates" button applies them.
@@ -150,14 +154,14 @@ Each item is met where it says. Check it again on every UI change.
 | Nielsen 1, visibility of system status | Header: connection dot, last poll, paused band. Sidebar counts. Toasts for each result. Skeletons while loading. |
 | Nielsen 2, match with the real world | The words of the domain (GLOSSARY.md): Needs you, Blocked, run, budget used, check. |
 | Nielsen 3, user control and freedom | Resume undoes Pause. Esc closes the palette and dialogs. Back and Forward move between views (hash routes). |
-| Nielsen 4, consistency and standards | One set of primitives; T3 Code's controls, keys and density. |
+| Nielsen 4, consistency and standards | One set of primitives from shadcn/ui; the platform's own keys (Cmd+K, Esc, arrows); one density. |
 | Nielsen 5, error prevention | Pause never needs a confirm, but a second click while a call is in flight does nothing (`aria-disabled`). Disabled palette items do not run. |
 | Nielsen 6, recognition over recall | Sidebar with labels; palette lists every action with its group; key hints at the foot of the palette. |
 | Nielsen 7, flexibility and efficiency | Cmd+K palette; skip link; every control works by keyboard. |
 | Nielsen 8, aesthetic and minimal design | One loud color for Needs you; no decoration; meta in muted text. |
 | Nielsen 9, help users recover from errors | Error cards name the problem and offer Retry. Failed checks show their fix. Failed pause says the agents still run. |
 | Nielsen 10, help and documentation | Tooltips on the icon rail and the connection dot; the Settings view states it runs the doctor checks. |
-| Jakob's law | T3 Code's sidebar, header height, palette, buttons, badges and tokens. |
+| Jakob's law | The layout developers know from their tools: a left sidebar, a header with status, Cmd+K for every action. Each service shows its own logo. |
 | Fitts's law | The pause control is a 32 px button at the header's right edge, at least 112 px wide. The Needs you button sits next to it. Sidebar rows span the full rail width. On coarse pointers every control has a 44 px hit area. |
 | Hick's law | Four views. The palette narrows by typed words. Each view shows one primary action at most. |
 | Gestalt grouping | Board columns are bounded cards; agent rows share one table; palette items sit under group headings. |
@@ -176,4 +180,6 @@ Each item is met where it says. Check it again on every UI change.
 - Don't add gradients, glass, backdrop blur, emoji, eyebrow labels or decorative illustration.
 - Don't move content under the cursor: hold it, or append below the visible area.
 - Don't add a modal or a confirmation to pause; it is the kill switch and must act at once.
-- Don't use T3 Code's name, logo or brand.
+- Do put a service's logo next to its name, in one color.
+- Don't copy another product's name, logo, copy or screenshots into the UI or its docs (AGENTS.md, "What goes in this public repo").
+- Don't color a service logo, and don't use a logo without its name.

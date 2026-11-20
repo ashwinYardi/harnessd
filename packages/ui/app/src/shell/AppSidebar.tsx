@@ -13,7 +13,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "../components/ui/sidebar.tsx";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip.tsx";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { hrefFor, type View } from "../lib/route.ts";
 import { NAV } from "./nav.ts";
 
@@ -100,9 +100,9 @@ export function AppSidebar({
                       <span className="sr-only md:hidden">{title}</span>
                       {badge[v] && <SidebarMenuBadge>{badge[v]}</SidebarMenuBadge>}
                     </TooltipTrigger>
-                    <TooltipPopup side="right" className="md:hidden">
+                    <TooltipContent side="right" className="md:hidden">
                       {title}
-                    </TooltipPopup>
+                    </TooltipContent>
                   </Tooltip>
                 </SidebarMenuItem>
               ))}
@@ -130,7 +130,7 @@ export function AppSidebar({
               </KbdGroup>
             </SidebarMenuBadge>
           </TooltipTrigger>
-          <TooltipPopup side="right">Commands ({modKey}+K)</TooltipPopup>
+          <TooltipContent side="right">Commands ({modKey}+K)</TooltipContent>
         </Tooltip>
       </SidebarFooter>
     </Sidebar>

@@ -1,6 +1,7 @@
 // Each agent's run: task, latest action, elapsed time, budget used and tokens (MET-18).
 import type { AgentsSnapshot, AgentView, RunView } from "@harnessd/shared";
 import type { Load } from "../api.ts";
+import { HarnessName } from "../components/service-logo.tsx";
 import { Badge } from "../components/ui/badge.tsx";
 import { Card } from "../components/ui/card.tsx";
 import { ScrollArea } from "../components/ui/scroll-area.tsx";
@@ -46,9 +47,9 @@ function AgentName({ agent }: { agent: AgentView }) {
       scope="row"
     >
       <span className="block text-sm">{agent.name}</span>
-      <span className="block font-normal text-muted-foreground text-xs">
+      <span className="flex items-center gap-1 font-normal text-muted-foreground text-xs">
         {agent.role === agent.name ? "" : `${agent.role}, `}
-        {agent.harness}
+        <HarnessName harness={agent.harness} />
       </span>
     </th>
   );

@@ -1,5 +1,5 @@
 // Joins class names and resolves Tailwind conflicts, so a caller's class wins over a default.
-// After T3 Code's cn() in apps/web/src/lib/utils.ts (MIT, see THIRD_PARTY_NOTICES.md).
+// The shadcn/ui cn() helper (MIT; see THIRD_PARTY_NOTICES.md), with cva's cx in place of clsx.
 import { type CxOptions, cx } from "class-variance-authority";
 import { extendTailwindMerge } from "tailwind-merge";
 

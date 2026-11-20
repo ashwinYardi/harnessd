@@ -1,10 +1,8 @@
 /* biome-ignore-all lint/complexity/noImportantStyles: reduced motion must win over every utility */
 /*
- * harnessd design tokens (D-025, DESIGN.md).
- * The color roles, type steps, radius scale and motion follow T3 Code's apps/web/src/index.css
- * (https://github.com/pingdotgg/t3code), Copyright (c) 2026 T3 Tools Inc., MIT License.
- * See packages/ui/THIRD_PARTY_NOTICES.md. Changes: the contrast, glass, composer, terminal and
- * theme-editor layers are left out; harnessd adds the signal and pause roles.
+ * harnessd design tokens (D-025, D-029, DESIGN.md). The role names follow the shadcn/ui
+ * convention, so the primitives in components/ui read them unchanged. The accent is the
+ * --brand family; primary and ring read it. lib/tokens.test.ts checks its contrast.
  */
 @import "tailwindcss";
 
@@ -33,6 +31,8 @@
   --color-card-foreground: var(--card-foreground);
   --color-popover: var(--popover);
   --color-popover-foreground: var(--popover-foreground);
+  --color-brand: var(--brand);
+  --color-brand-foreground: var(--brand-foreground);
   --color-primary: var(--primary);
   --color-primary-foreground: var(--primary-foreground);
   --color-secondary: var(--secondary);
@@ -100,12 +100,15 @@
   --card-foreground: var(--color-zinc-900);
   --popover: var(--color-white);
   --popover-foreground: var(--color-zinc-900);
-  --primary: oklch(0.488 0.217 264);
-  --primary-foreground: var(--color-white);
+  /* The accent: one line, light value then dark value. The brand accent drops in here. */
+  --brand: light-dark(oklch(0.488 0.217 264), oklch(0.571 0.21 264));
+  --brand-foreground: var(--color-white);
+  --primary: var(--brand);
+  --primary-foreground: var(--brand-foreground);
   --secondary: var(--color-zinc-50);
   --secondary-foreground: var(--color-zinc-800);
   --muted: var(--color-zinc-50);
-  /* zinc-600, one step darker than T3 Code's zinc-500, so meta text passes 4.5:1 on accent rows. */
+  /* zinc-600, so meta text passes 4.5:1 on accent rows. */
   --muted-foreground: var(--color-zinc-600);
   --placeholder: var(--color-zinc-500);
   --accent: var(--color-zinc-100);
@@ -113,7 +116,7 @@
   --error: var(--color-red-500);
   --error-foreground: var(--color-red-700);
   --error-surface: color-mix(in srgb, var(--error) 8%, transparent);
-  /* red-600, one step past T3 Code's red-500, so white text on it passes 4.5:1. */
+  /* red-600, so white text on it passes 4.5:1. */
   --destructive: var(--color-red-600);
   --destructive-foreground: var(--error-foreground);
   --warning: var(--color-amber-500);
@@ -125,7 +128,7 @@
   --info-foreground: var(--color-blue-700);
   --border: var(--color-zinc-200);
   --input: var(--color-zinc-300);
-  --ring: var(--primary);
+  --ring: var(--brand);
   --sidebar: var(--color-zinc-50);
   --sidebar-foreground: var(--foreground);
   --sidebar-muted-foreground: var(--muted-foreground);
@@ -143,7 +146,6 @@
     --card-foreground: var(--color-neutral-100);
     --popover: color-mix(in srgb, var(--color-neutral-950) 97%, var(--color-white));
     --popover-foreground: var(--color-neutral-100);
-    --primary: oklch(0.571 0.21 264);
     --secondary: --alpha(var(--color-white) / 3%);
     --secondary-foreground: var(--color-neutral-100);
     --muted: --alpha(var(--color-white) / 3%);

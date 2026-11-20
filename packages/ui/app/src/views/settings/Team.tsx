@@ -4,13 +4,14 @@ import { AGENT_ROLES, HARNESSES, validateTeam } from "@harnessd/shared";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import { ApiError, type Load } from "../../api.ts";
+import { HarnessName } from "../../components/service-logo.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import { Card, CardFooter } from "../../components/ui/card.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import {
   Select,
+  SelectContent,
   SelectItem,
-  SelectPopup,
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select.tsx";
@@ -59,6 +60,7 @@ function Choice({
   onChange,
   invalid,
   describedBy,
+  show = (o) => o,
 }: {
   label: string;
   value: string;
@@ -66,6 +68,8 @@ function Choice({
   onChange: (v: string) => void;
   invalid: boolean;
   describedBy: string | undefined;
+  /** How an option reads in the list and the trigger. */
+  show?: (option: string) => React.ReactNode;
 }) {
   return (
     <Select value={value} onValueChange={(v) => onChange(String(v))}>
@@ -76,15 +80,15 @@ function Choice({
         size="sm"
         className="min-w-0"
       >
-        <SelectValue />
+        <SelectValue>{(v: string) => show(v)}</SelectValue>
       </SelectTrigger>
-      <SelectPopup>
+      <SelectContent>
         {options.map((o) => (
           <SelectItem key={o} value={o}>
-            {o}
+            {show(o)}
           </SelectItem>
         ))}
-      </SelectPopup>
+      </SelectContent>
     </Select>
   );
 }
@@ -197,9 +201,9 @@ export function Team() {
         <div className="overflow-x-auto">
           <table className="w-full min-w-[40rem] table-fixed border-collapse text-sm">
             <colgroup>
-              <col className="w-[28%]" />
-              <col className="w-[22%]" />
-              <col className="w-[22%]" />
+              <col className="w-[24%]" />
+              <col className="w-[20%]" />
+              <col className="w-[26%]" />
               <col />
               <col className="w-12" />
             </colgroup>
@@ -267,6 +271,7 @@ export function Team() {
                           label={`Harness of ${row.name || "the new agent"}`}
                           onChange={(v) => update(i, { harness: v })}
                           options={HARNESSES}
+                          show={(h) => <HarnessName harness={h} />}
                           value={row.harness}
                         />
                       </Field>
