@@ -230,6 +230,19 @@ test("a pin init cannot meet installs nothing for that skill", async () => {
   assert.ok(!(f.files.get(CONFIG) ?? "").includes("[skills.tdd]\nupstream"));
 });
 
+test("a skill table without a commit gets no second table, and init says how to pin", async () => {
+  const f = fake({ installed: ALL, files: { [CONFIG]: "[skills.tdd]\nenabled = false\n" } });
+  assert.equal(await runInit(["--no-service"], f.io, f.sys), 0, f.err.join("\n"));
+  assert.ok(!f.files.has(`${SKILLS}/tdd/SKILL.md`));
+  assert.equal((f.files.get(CONFIG) ?? "").match(/\[skills\.tdd\]/g)?.length, 1);
+  assert.ok(
+    f.out.includes(
+      `skills: tdd has no commit in its table. Set skills.tdd.commit = "${A}" in ${CONFIG} to install it.`,
+    ),
+  );
+  assert.ok(f.files.has(`${SKILLS}/impeccable/SKILL.md`));
+});
+
 test("a skill folder init did not install is kept, and gets no pin", async () => {
   const f = fake({ installed: ALL, files: { [`${SKILLS}/tdd/SKILL.md`]: "mine" } });
   assert.equal(await runInit(["--no-service"], f.io, f.sys), 0);

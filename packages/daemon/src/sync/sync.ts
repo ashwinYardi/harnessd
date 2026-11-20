@@ -31,7 +31,8 @@ function skillFolder(path: string): string | undefined {
 }
 
 /**
- * A skill folder is sync's own when it is absent or its SKILL.md holds the generated note.
+ * A skill folder is sync's own when it is absent or its SKILL.md has the generated note
+ * right after the frontmatter.
  * Anything else (a hand-vendored skill, say) is never written into.
  */
 async function isOwnSkillFolder(repoDir: string, folder: string): Promise<boolean> {
@@ -41,7 +42,8 @@ async function isOwnSkillFolder(repoDir: string, folder: string): Promise<boolea
   );
   if (!exists) return true;
   const md = await readFile(join(repoDir, folder, "SKILL.md"), "utf8").catch(() => "");
-  return md.includes(GENERATED_NOTE);
+  // The note sits right after the frontmatter, exactly where skillMd puts it.
+  return md.includes(`\n---\n<!-- ${GENERATED_NOTE} -->\n`);
 }
 
 async function dropForeignSkills(repoDir: string, files: SyncFile[]) {

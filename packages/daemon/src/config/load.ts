@@ -138,10 +138,7 @@ export async function loadLayer(
   const configText = await readOptional(configPath);
   if (configText !== undefined) {
     const label = show(configPath);
-    const { agents, mcp, skills, ...settings } = parseConfigFile(
-      parseToml(configText, label),
-      label,
-    );
+    const { agents, mcp, skills, ...settings } = parseConfigText(configText, label);
     layer.settings = settings;
     layer.mcp = mcp ?? {};
     layer.skillSettings = skills ?? {};

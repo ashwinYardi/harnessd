@@ -98,6 +98,7 @@ The commits are in `.claude/skills/VENDORED.md`. Each folder is the whole upstre
 - If the pin is older than the shipped commit, init keeps the folder and prints the `commit` to set.
 - To update, set `commit` to the printed value and run `harnessd init` again.
 - init reads pins from the global file only.
+- A table without `commit` (only `enabled = false`, say) gets no pin. init then installs nothing for that skill and prints the `commit` to add.
 
 **Your own folders.** A folder in `~/.harnessd/skills/` without the marker is yours. init never changes it and gives it no pin.
 

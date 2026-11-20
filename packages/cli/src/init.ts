@@ -8,11 +8,11 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { PACK_MARKER, parseConfigText } from "@harnessd/daemon";
-import { ConfigError } from "@harnessd/shared";
+import { PACK_MARKER, parseConfigText, tomlKey, tomlString } from "@harnessd/daemon";
+import { ConfigError, type SkillSettings } from "@harnessd/shared";
 import { PACK_MANIFEST, type PackSkill } from "./pack.ts";
 
 export const INIT_USAGE = "Usage: harnessd init [--yes] [--no-service] [--workspace <dir>]";
@@ -304,18 +304,17 @@ async function writeConfig({ io, sys }: Step): Promise<void> {
 const PIN_HEADER =
   '# Default skill pack (docs/CONFIG.md "Skills"). init installs only the pinned commit.';
 
-function tomlString(value: string): string {
-  return JSON.stringify(value);
-}
+/** What a pin records: the upstream repo and commit, plus the release when known. */
+type SkillPin = Pick<PackSkill, "upstream" | "commit" | "version">;
 
-function pinTable(name: string, pin: { upstream: string; commit: string; version?: string }) {
-  const lines = [`[skills.${name}]`, `upstream = ${tomlString(pin.upstream)}`];
+function pinTable(name: string, pin: SkillPin): string {
+  const lines = [`[skills.${tomlKey(name)}]`, `upstream = ${tomlString(pin.upstream)}`];
   lines.push(`commit = ${tomlString(pin.commit)}`);
   if (pin.version !== undefined) lines.push(`version = ${tomlString(pin.version)}`);
   return lines.join("\n");
 }
 
-function parseMarker(text: string | undefined): { upstream: string; commit: string } | undefined {
+function parseMarker(text: string | undefined): SkillPin | undefined {
   if (text === undefined) return undefined;
   try {
     const m = JSON.parse(text);
@@ -323,6 +322,40 @@ function parseMarker(text: string | undefined): { upstream: string; commit: stri
   } catch {
     return undefined;
   }
+}
+
+/** What init does with one pack skill. Pure, so every case reads in one place. */
+type SkillPlan =
+  | { action: "foreign" }
+  | { action: "install" | "update" | "keep" | "skip"; pin?: SkillPin; note?: string };
+
+function planSkill(
+  skill: PackSkill,
+  present: boolean,
+  marker: SkillPin | undefined,
+  table: SkillSettings | undefined,
+  configFile: string,
+): SkillPlan {
+  if (present && marker === undefined) return { action: "foreign" };
+  const fix = `Set skills.${skill.name}.commit = "${skill.commit}" in ${configFile}`;
+  if (table !== undefined && table.commit === undefined) {
+    // A table exists (say `enabled = false`) but has no pin; init cannot append a second one.
+    if (marker !== undefined) return { action: "keep" };
+    return {
+      action: "skip",
+      note: `skills: ${skill.name} has no commit in its table. ${fix} to install it.`,
+    };
+  }
+  // No table: record what is installed, or what this build ships.
+  const pin = table === undefined ? (marker ?? skill) : undefined;
+  const pinned = table?.commit ?? (marker ?? skill).commit;
+  const extra = pin === undefined ? {} : { pin };
+  if (pinned !== skill.commit) {
+    const note = `skills: ${skill.name} is pinned to ${pinned}; this harnessd ships ${skill.commit}. ${fix} to update.`;
+    return { action: marker === undefined ? "skip" : "keep", note, ...extra };
+  }
+  if (marker === undefined) return { action: "install", ...extra };
+  return { action: marker.commit === pinned ? "keep" : "update", ...extra };
 }
 
 /**
@@ -342,52 +375,34 @@ async function installSkills({ io, sys }: Step): Promise<boolean> {
   }
   const pack = JSON.parse(manifest) as PackSkill[];
   const configText = (await sys.fs.read(configFile)) ?? "";
-  let pins: Record<string, { commit?: string }>;
+  let tables: Record<string, SkillSettings>;
   try {
-    pins = parseConfigText(configText, configFile).skills ?? {};
+    tables = parseConfigText(configText, configFile).skills ?? {};
   } catch (e) {
     if (!(e instanceof ConfigError)) throw e;
     io.err(`harnessd init: ${e.message}`);
     return false;
   }
 
-  const installed: string[] = [];
-  const updated: string[] = [];
-  const kept: string[] = [];
-  const newPins: string[] = [];
-  const pinned: string[] = [];
+  const plans: Array<{ skill: PackSkill; dest: string; plan: SkillPlan }> = [];
   for (const skill of pack) {
     const dest = join(skillsDir, skill.name);
     const present = await sys.fs.exists(dest);
     const marker = parseMarker(await sys.fs.read(join(dest, PACK_MARKER)));
-    if (present && marker === undefined) {
-      io.out(`skills: kept ${dest}; init did not install it`);
-      continue;
-    }
-    let pin = pins[skill.name]?.commit;
-    if (pin === undefined) {
-      // Record what is installed, or what this build ships.
-      const record = marker ?? skill;
-      newPins.push(pinTable(skill.name, record));
-      pinned.push(skill.name);
-      pin = record.commit;
-    }
-    if (pin !== skill.commit) {
-      io.out(
-        `skills: ${skill.name} is pinned to ${pin}; this harnessd ships ${skill.commit}. Set skills.${skill.name}.commit = "${skill.commit}" in ${configFile} to update.`,
-      );
-    }
-    if (marker?.commit === pin || pin !== skill.commit) {
-      if (marker !== undefined) kept.push(skill.name);
-      continue;
-    }
-    await sys.fs.mkdirp(skillsDir);
-    await sys.fs.copyDir(join(sys.packDir, skill.name), dest);
-    (marker === undefined ? installed : updated).push(skill.name);
+    plans.push({
+      skill,
+      dest,
+      plan: planSkill(skill, present, marker, tables[skill.name], configFile),
+    });
   }
 
+  // Pins first: a folder is never installed without its pin on disk.
+  const newPins = plans.flatMap(({ skill, plan }) =>
+    "pin" in plan && plan.pin !== undefined ? [pinTable(skill.name, plan.pin)] : [],
+  );
   if (newPins.length > 0) {
-    const next = `${configText}${configText === "" || configText.endsWith("\n") ? "" : "\n"}\n${PIN_HEADER}\n${newPins.join("\n\n")}\n`;
+    const sep = configText === "" || configText.endsWith("\n") ? "" : "\n";
+    const next = `${configText}${sep}\n${PIN_HEADER}\n${newPins.join("\n\n")}\n`;
     try {
       parseConfigText(next, configFile);
     } catch (e) {
@@ -397,14 +412,32 @@ async function installSkills({ io, sys }: Step): Promise<boolean> {
     }
     await sys.fs.write(configFile, next);
   }
+
+  const done = { install: [] as string[], update: [] as string[], keep: [] as string[] };
+  for (const { skill, dest, plan } of plans) {
+    if (plan.action === "foreign") {
+      io.out(`skills: kept ${dest}; init did not install it`);
+      continue;
+    }
+    if (plan.note !== undefined) io.out(plan.note);
+    if (plan.action === "skip") continue;
+    if (plan.action !== "keep") {
+      await sys.fs.mkdirp(skillsDir);
+      await sys.fs.copyDir(join(sys.packDir, skill.name), dest);
+    }
+    done[plan.action].push(skill.name);
+  }
   for (const [verb, names] of [
-    ["installed", installed],
-    ["updated", updated],
-    ["kept", kept],
+    ["installed", done.install],
+    ["updated", done.update],
+    ["kept", done.keep],
   ] as const) {
     if (names.length > 0) io.out(`skills: ${verb} ${names.join(", ")} in ${skillsDir}`);
   }
-  if (pinned.length > 0) io.out(`skills: pinned ${pinned.join(", ")} in ${configFile}`);
+  const pinned = plans.filter(({ plan }) => "pin" in plan && plan.pin !== undefined);
+  if (pinned.length > 0) {
+    io.out(`skills: pinned ${pinned.map((p) => p.skill.name).join(", ")} in ${configFile}`);
+  }
   return true;
 }
 
@@ -556,7 +589,8 @@ export function nodeSystem(): InitSystem {
           () => false,
         ),
       copyDir: async (from, to) => {
-        const tmp = `${to}.harnessd-tmp`;
+        // A dot name, so the config loader never reads a half-copied folder as a skill.
+        const tmp = join(dirname(to), `.${basename(to)}.harnessd-tmp`);
         await rm(tmp, { recursive: true, force: true });
         await cp(from, tmp, { recursive: true });
         await rm(to, { recursive: true, force: true });

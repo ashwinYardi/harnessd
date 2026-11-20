@@ -26,6 +26,7 @@ export * from "./memory/server.ts";
 export * from "./memory/vault.ts";
 export * from "./server/daemon.ts";
 export * from "./server/router.ts";
+export { tomlKey, tomlString } from "./sync/format.ts";
 export * from "./sync/generate.ts";
 export * from "./sync/sync.ts";
 export * from "./sync/write.ts";
