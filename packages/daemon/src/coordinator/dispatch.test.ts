@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { LinkedIssue, ResolvedAgentConfig } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
-import { agentForRole, budgetMs, buildPartPrompt, buildQaPrompt } from "./dispatch.ts";
+import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
 
 const limits = mergeLayers([]).limits;
 
@@ -67,14 +67,24 @@ test("the part prompt layers the instructions and the brief and ends with commit
   }
 });
 
-test("the default QA prompt lists the parts to verify", () => {
-  const prompt = buildQaPrompt({
-    agent: { ...agent, name: "qa", role: "qa" },
-    issue: { ...issue, key: "MET-43", title: "QA: avatars" },
-    branch: "met-43-qa",
-    parts: [{ ...issue, state: "In Review" }],
+test("a part sent back by QA gets the failing items and is told to update its open PR", () => {
+  const prompt = buildPartPrompt({
+    agent,
+    issue,
+    branch: "met-41-serve-avatars",
+    review: {
+      prUrl: "https://github.test/o/r/pull/7",
+      reviewUrl: "https://github.test/o/r/pull/7#pullrequestreview-1",
+      failing: ["Has tests: no test covers the 404 path"],
+    },
   });
-  assert.ok(prompt.includes('- MET-41 (In Review): Serve "avatars" https://linear.test/MET-41'));
-  assert.ok(prompt.includes("gh pr comment"));
-  assert.ok(prompt.includes('gh pr create --title "MET-43: QA: avatars"'));
+  for (const text of [
+    "## QA requested changes",
+    "PR: https://github.test/o/r/pull/7\nReview: https://github.test/o/r/pull/7#pullrequestreview-1",
+    "- Has tests: no test covers the 404 path",
+    "4. Your PR is already open (https://github.test/o/r/pull/7). Pushing updates it; do not open another.",
+  ]) {
+    assert.ok(prompt.includes(text), text);
+  }
+  assert.ok(!prompt.includes("gh pr create"));
 });

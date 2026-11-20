@@ -328,6 +328,75 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Wo
   });
 }
 
+export interface CheckoutWorktreeOptions {
+  repoDir: string;
+  /** The task that reads the checkout, e.g. the QA sub-issue. Names the folder. */
+  issueKey: string;
+  title: string;
+  /** Remote branch to fetch, e.g. a PR's head branch. */
+  branch: string;
+  /** Commit to check out (the PR head). It must be the branch's head or reachable locally. */
+  sha: string;
+  /** Default "origin". */
+  remote?: string;
+  root?: string;
+  pid?: number;
+}
+
+/**
+ * Checks out someone else's branch read-only: fetches `branch` from `remote` and adds
+ * `<root>/<repo-name>/<branchName(issueKey, title)>` with a detached HEAD at `sha`, so the
+ * branch itself stays free for its owner and is never moved. A leftover worktree at the
+ * same path (a crashed run) is replaced. If the fetch fails but `sha` is already present
+ * locally, the local commit is used; it is the same commit.
+ */
+export async function checkoutWorktree(options: CheckoutWorktreeOptions): Promise<Worktree> {
+  const root = resolve(options.root ?? defaultWorktreesRoot());
+  const repoDir = (await git(options.repoDir, ["rev-parse", "--show-toplevel"])).trim();
+  const path = join(root, basename(repoDir), branchName(options.issueKey, options.title));
+  const remote = options.remote ?? "origin";
+
+  let fetchError: unknown;
+  try {
+    await git(repoDir, ["fetch", "--quiet", remote, `refs/heads/${options.branch}`]);
+  } catch (error) {
+    fetchError = error;
+  }
+  try {
+    await git(repoDir, ["rev-parse", "--verify", "--quiet", `${options.sha}^{commit}`]);
+  } catch (error) {
+    throw fetchError ?? error;
+  }
+
+  return updateManifest(root, async (manifest) => {
+    await git(repoDir, ["worktree", "prune"]);
+    if ((await registeredWorktrees(repoDir)).has(await canonical(path))) {
+      await teardown(root, repoDir, path);
+    } else if (await exists(path)) {
+      throw new Error(`${path} exists but is not a git worktree; run recoverOnStartup first`);
+    }
+    upsert(manifest, {
+      issueKey: options.issueKey,
+      branch: options.branch,
+      path,
+      repoDir,
+      status: "active",
+      pid: options.pid ?? process.pid,
+      createdAt: new Date().toISOString(),
+    });
+    await writeManifest(root, manifest);
+    await mkdir(dirname(path), { recursive: true });
+    try {
+      await git(repoDir, ["worktree", "add", "--detach", path, options.sha]);
+    } catch (error) {
+      drop(manifest, path);
+      await writeManifest(root, manifest);
+      throw error;
+    }
+    return { path, branch: options.branch, resumed: false };
+  });
+}
+
 export interface RemoveWorktreeOptions {
   repoDir: string;
   path: string;
@@ -490,6 +559,13 @@ export async function recoverOnStartup(options: RecoverOptions = {}): Promise<Re
 /** The worktree operations the coordinator loop needs, bound to one repo. */
 export interface TaskWorktrees {
   create(input: { issueKey: string; title: string }): Promise<Worktree>;
+  /** A detached checkout of a remote branch at `sha` (checkoutWorktree), e.g. a PR to QA. */
+  checkout(input: {
+    issueKey: string;
+    title: string;
+    branch: string;
+    sha: string;
+  }): Promise<Worktree>;
   /** Removes the worktree; the branch stays for the PR and for a retry. */
   remove(path: string): Promise<void>;
   /** Startup reconciliation (recoverOnStartup). */
@@ -512,6 +588,11 @@ export function createGitWorktrees(options: GitWorktreesOptions): TaskWorktrees 
       if (root !== undefined) create.root = root;
       if (options.base !== undefined) create.base = options.base;
       return createWorktree(create);
+    },
+    checkout: (input) => {
+      const checkout: CheckoutWorktreeOptions = { repoDir: options.repoDir, ...input };
+      if (root !== undefined) checkout.root = root;
+      return checkoutWorktree(checkout);
     },
     remove: (path) => {
       const remove: RemoveWorktreeOptions = { repoDir: options.repoDir, path };

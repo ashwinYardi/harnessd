@@ -1,4 +1,4 @@
-// The autonomy loop (SPEC "Autonomy loop" steps 1-4, D-010, D-012, D-014). See docs/LOOP.md.
+// The autonomy loop (SPEC "Autonomy loop" steps 1-5, D-010, D-012, D-013, D-014). See docs/LOOP.md.
 //
 // Each tick: re-queue runs a previous process left behind, dispatch eligible sub-issues,
 // grill and split Ready issues, then dispatch again. Linear is the source of truth;
@@ -11,24 +11,21 @@ import {
   type Issue,
   type LinkedIssue,
   type MergedConfig,
+  type ResolvedAgentConfig,
   type RunResult,
   type Task,
 } from "@harnessd/shared";
 import { resolveAgentConfig } from "../config/merge.ts";
+import type { GitHub } from "../github/client.ts";
 import type { LinearClient, ListReadyOptions } from "../linear/client.ts";
 import type { TaskWorktrees } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
-import {
-  agentForRole,
-  budgetMs,
-  buildPartPrompt,
-  buildQaPrompt,
-  type QaPromptBuilder,
-} from "./dispatch.ts";
+import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
 import { grillIssue } from "./grill.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
 import { planIssue, type SplitPlan } from "./plan.ts";
 import { type GrillContext, loadGrillContext } from "./prompt.ts";
+import { type CommandRunner, type QaRunResult, runQa, settleQa } from "./qa.ts";
 import {
   formatSplitComment,
   isWorkPart,
@@ -49,6 +46,7 @@ export type LoopLinear = Pick<
   | "createBlocksRelation"
   | "moveTo"
   | "comment"
+  | "getIssue"
 >;
 
 export interface LoopClock {
@@ -77,6 +75,8 @@ export interface CoordinatorLoopOptions {
   /** One adapter per harness the agents use. */
   adapters: Partial<Record<HarnessId, HarnessAdapter>>;
   worktrees: TaskWorktrees;
+  /** QA finds and reviews PRs through it (the `gh` CLI, D-002). */
+  github: GitHub;
   store: LoopStore;
   clock?: LoopClock;
   /** The repo: grill and plan runs read it, and its docs are the spec context. */
@@ -91,11 +91,17 @@ export interface CoordinatorLoopOptions {
   intervalMs?: number;
   /** Pause check point (MET-15). While it returns true, the loop dispatches nothing. */
   paused?: () => boolean | Promise<boolean>;
-  /** Builds the QA run's prompt (MET-13 replaces the default). */
-  buildQaPrompt?: QaPromptBuilder;
+  /** Runs `qa.setup_command` and `qa.test_command` in QA worktrees. Default `sh -c`. */
+  runCommand?: CommandRunner;
   log?: (line: string) => void;
   /** Recorded as the owner of runs. Default this process. */
   pid?: number;
+}
+
+/** What a QA run checks: the parent's checklist and the parts that block QA. */
+interface QaContext {
+  parent: Issue;
+  parts: LinkedIssue[];
 }
 
 export interface TickReport {
@@ -132,12 +138,11 @@ function oneLine(text: string): string {
 }
 
 export function createCoordinatorLoop(options: CoordinatorLoopOptions): CoordinatorLoop {
-  const { config, linear, adapters, worktrees, store, repoDir, team } = options;
+  const { config, linear, adapters, worktrees, github, store, repoDir, team } = options;
   const clock = options.clock ?? systemClock;
   const notifier = options.notifier ?? new NullNotifier();
   const decisions = options.decisions ?? createFileDecisionSink(workspaceVaultDir(repoDir));
   const loadContext = options.context ?? (() => loadGrillContext(repoDir));
-  const qaPrompt = options.buildQaPrompt ?? buildQaPrompt;
   const log = options.log ?? (() => {});
   const pid = options.pid ?? process.pid;
   const intervalMs = options.intervalMs ?? DEFAULT_LOOP_INTERVAL_MS;
@@ -148,7 +153,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   let timer: unknown;
   let saving: Promise<void> = Promise.resolve();
   /** Runs started by this process, by sub-issue id. */
-  const live = new Map<string, { key: string; run: AdapterRun; done: Promise<void> }>();
+  const live = new Map<string, { key: string; run?: AdapterRun; done: Promise<void> }>();
 
   function init(): Promise<LoopState> {
     ready ??= (async () => {
@@ -236,6 +241,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const id = entry.issueId;
     if (result.status === "ok") {
       delete s.attempts[id];
+      delete s.qaFeedback[id];
       await safely(`move ${entry.issueKey} to In Review`, () => linear.moveTo(id, "In Review"));
       log(`${entry.issueKey}: done, In Review`);
     } else if (result.status === "cancelled") {
@@ -272,7 +278,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     s: LoopState,
     issue: LinkedIssue,
     role: SubIssueRole,
-    parts: LinkedIssue[],
+    qa: QaContext | undefined,
     report: TickReport,
   ): Promise<void> {
     const agentName = agentForRole(config, role);
@@ -326,16 +332,25 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     // Recorded before the worktree exists, so a crash from here on is re-queued.
     await save();
 
+    if (qa !== undefined) {
+      startQa(s, entry, issue, qa, agent, adapter, budget);
+      log(`${issue.key}: ${agentName} started QA of ${qa.parts.map((p) => p.key).join(", ")}`);
+      return;
+    }
+
     let run: AdapterRun;
     try {
       const worktree = await worktrees.create({ issueKey: issue.key, title: issue.title });
       entry.worktree = worktree.path;
       entry.branch = worktree.branch;
       await save();
-      const prompt =
-        role === "qa"
-          ? qaPrompt({ agent, issue, branch: worktree.branch, parts })
-          : buildPartPrompt({ agent, issue, branch: worktree.branch });
+      const review = s.qaFeedback[issue.id];
+      const prompt = buildPartPrompt({
+        agent,
+        issue,
+        branch: worktree.branch,
+        ...(review ? { review } : {}),
+      });
       const task: Task = {
         id: `${issue.key}-${(s.attempts[issue.id] ?? 0) + 1}`,
         title: `${issue.key}: ${issue.title}`,
@@ -356,6 +371,73 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     live.set(issue.id, { key: issue.key, run, done });
   }
 
+  /**
+   * One QA round (docs/LOOP.md "QA"): each part's PR is checked out, tested and reviewed,
+   * then settleQa moves the sub-issues. The round's worktree is recorded in the in-flight
+   * entry, so a restart cleans it up.
+   */
+  function startQa(
+    s: LoopState,
+    entry: InFlightRun,
+    issue: LinkedIssue,
+    qa: QaContext,
+    agent: ResolvedAgentConfig,
+    adapter: HarnessAdapter,
+    budget: number,
+  ): void {
+    const maxRounds = config.limits.qa_max_failures;
+    const done = (async () => {
+      let result: QaRunResult;
+      try {
+        result = await runQa(
+          {
+            qa: issue,
+            parent: qa.parent,
+            parts: qa.parts,
+            budgetMs: budget,
+            round: (s.qaFailures[qa.parent.id] ?? 0) + 1,
+            maxRounds,
+          },
+          {
+            github,
+            worktrees,
+            adapter,
+            agent,
+            commands: config.qa,
+            ...(options.runCommand ? { runCommand: options.runCommand } : {}),
+            now: () => clock.now().getTime(),
+            onWorktree: (path) => {
+              entry.worktree = path;
+              void save();
+            },
+            log,
+          },
+        );
+      } catch (error) {
+        result = {
+          outcome: "error",
+          reviews: qa.parts.map((part) => ({
+            part,
+            decision: "error" as const,
+            failing: [],
+            error: message(error),
+          })),
+        };
+      }
+      live.delete(issue.id);
+      s.inFlight = s.inFlight.filter((e) => e !== entry);
+      const settled = await settleQa(s, { qa: issue, parent: qa.parent }, result, {
+        linear,
+        notifier,
+        maxFailures: maxRounds,
+        log,
+      });
+      log(`${issue.key}: QA ${result.outcome}, ${settled}`);
+      await save();
+    })();
+    live.set(issue.id, { key: issue.key, done });
+  }
+
   /** Ready sub-issues in priority order; parts must be unblocked, QA needs every part reviewed. */
   async function dispatchEligible(s: LoopState, report: TickReport): Promise<void> {
     const max = config.limits.max_concurrent;
@@ -366,16 +448,27 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       if (s.inFlight.some((e) => e.issueId === issue.id)) continue;
       const marker = readPartMarker(issue.description);
       if (marker === undefined) continue;
-      let parts: LinkedIssue[] = [];
+      let qa: QaContext | undefined;
       if (marker.role === "qa") {
         if (issue.parentId === undefined) continue;
-        parts = (await linear.listChildren(issue.parentId)).filter(isWorkPart);
+        // The parts that block QA; when Linear lost the relations, every part of the parent.
+        const children = (await linear.listChildren(issue.parentId)).filter(isWorkPart);
+        const blocking = children.filter((p) => issue.blockers.some((b) => b.id === p.id));
+        const parts = blocking.length > 0 ? blocking : children;
         const reviewed = parts.every((p) => QA_READY_STATES.has(p.state.toLowerCase()));
         if (parts.length === 0 || !reviewed) continue;
+        let parent: Issue;
+        try {
+          parent = await linear.getIssue(issue.parentId);
+        } catch (error) {
+          log(`${issue.key}: could not read the parent, retrying next tick: ${message(error)}`);
+          continue;
+        }
+        qa = { parent, parts };
       } else if (issue.blockedBy.length > 0) {
         continue;
       }
-      await dispatch(s, issue, marker.role, parts, report);
+      await dispatch(s, issue, marker.role, qa, report);
     }
   }
 

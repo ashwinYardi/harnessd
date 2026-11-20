@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import {
   branchName,
+  checkoutWorktree,
   createWorktree,
   MANIFEST_FILE,
   MAX_BRANCH_LENGTH,
@@ -177,6 +178,64 @@ describe("worktrees", () => {
       /outside worktrees root/,
     );
     assert.ok(existsSync(join(repoDir, "README.md")));
+  });
+
+  test("checkout fetches a remote branch and detaches at its head; remove cleans it up", async () => {
+    // A PR branch that exists only on the remote, pushed from another clone.
+    const origin = join(tmp, "origin.git");
+    const other = join(tmp, "other");
+    git(tmp, "init", "-q", "--bare", origin);
+    git(repoDir, "remote", "add", "origin", origin);
+    git(repoDir, "push", "-q", "origin", "main");
+    git(tmp, "clone", "-q", origin, other);
+    git(other, "switch", "-q", "-c", "met-41-pr-head");
+    await writeFile(join(other, "feature.txt"), "pr\n");
+    git(other, "add", ".");
+    git(other, "commit", "-q", "-m", "pr");
+    const sha = git(other, "rev-parse", "HEAD");
+    git(other, "push", "-q", "origin", "met-41-pr-head");
+    assert.throws(
+      () =>
+        execFileSync("git", ["-C", repoDir, "cat-file", "-e", `${sha}^{commit}`], {
+          stdio: "ignore",
+        }),
+      "not local yet",
+    );
+
+    const input = {
+      repoDir,
+      issueKey: "MET-43",
+      title: "pr 7",
+      branch: "met-41-pr-head",
+      sha,
+      root,
+    };
+    const wt = await checkoutWorktree(input);
+    assert.equal(wt.path, join(root, "repo", "met-43-pr-7"));
+    assert.equal(wt.branch, "met-41-pr-head");
+    assert.equal(git(wt.path, "rev-parse", "HEAD"), sha);
+    assert.equal(git(wt.path, "rev-parse", "--abbrev-ref", "HEAD"), "HEAD", "detached");
+    assert.ok(existsSync(join(wt.path, "feature.txt")));
+    assert.equal((await entry(wt.path))?.status, "active");
+
+    // A leftover checkout at the same path is replaced, not an error.
+    await writeFile(join(wt.path, "scratch.txt"), "left behind\n");
+    const again = await checkoutWorktree(input);
+    assert.equal(again.path, wt.path);
+    assert.equal(existsSync(join(wt.path, "scratch.txt")), false);
+
+    await removeWorktree({ repoDir, path: wt.path, root });
+    assert.equal(existsSync(wt.path), false);
+    assert.equal(await entry(wt.path), undefined);
+    assert.ok(!registered().includes(wt.path));
+    assert.ok(!branches().includes("met-41-pr-head"), "no local branch was created");
+
+    await assert.rejects(
+      checkoutWorktree({ ...input, branch: "nope", sha: "0".repeat(40) }),
+      /git fetch/,
+    );
+    assert.equal(existsSync(wt.path), false);
+    git(repoDir, "remote", "remove", "origin");
   });
 
   test("create fails cleanly on an unknown base and leaves no entry", async () => {

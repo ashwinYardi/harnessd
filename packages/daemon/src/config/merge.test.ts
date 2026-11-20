@@ -50,6 +50,15 @@ test("scalars override and tables deep-merge, later layer winning", () => {
   assert.deepEqual(merged.linear, { team_id: "MET", project: "harnessd" });
 });
 
+test("qa commands default to pnpm and merge per key", () => {
+  assert.deepEqual(mergeLayers([]).qa, {
+    setup_command: "pnpm install --frozen-lockfile --prefer-offline",
+    test_command: "pnpm test",
+  });
+  const merged = mergeLayers([layer("workspace", { settings: { qa: { setup_command: "" } } })]);
+  assert.deepEqual(merged.qa, { setup_command: "", test_command: "pnpm test" });
+});
+
 test("arrays replace rather than concatenate", () => {
   const merged = mergeLayers([
     layer("global", { settings: { merge: { protected_paths: ["a/**"] } } }),

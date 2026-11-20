@@ -17,6 +17,7 @@ test("parseConfigFile accepts a full config", () => {
     linear: { team_id: "MET", project: "harnessd" },
     slack: { channel: "#ops" },
     merge: { protected_paths: ["infra/**"] },
+    qa: { setup_command: "", test_command: "make test" },
     agents: {
       backend: {
         role: "backend",
@@ -52,7 +53,7 @@ test("unknown keys are rejected with their path", () => {
   );
   rejects(
     { colour: "red" },
-    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, agents, mcp`,
+    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, agents, mcp`,
   );
   rejects(
     { limits: { budget_minutes: { L: 300 } } },
@@ -70,6 +71,12 @@ test("wrong types are rejected with their path", () => {
     `${FILE}: limits.budget_minutes.S: expected an integer >= 1, got 1.5`,
   );
   rejects({ slack: "#x" }, `${FILE}: slack: expected a table, got "#x"`);
+  rejects({ qa: { test_command: "" } }, `${FILE}: qa.test_command: expected a non-empty string`);
+  rejects({ qa: { setup_command: 1 } }, `${FILE}: qa.setup_command: expected a string, got 1`);
+  rejects(
+    { qa: { command: "x" } },
+    `${FILE}: qa.command: unknown key, expected one of setup_command, test_command`,
+  );
   rejects({ slack: { channel: "" } }, `${FILE}: slack.channel: expected a non-empty string`);
   rejects(
     { merge: { protected_paths: ["a", 3] } },
