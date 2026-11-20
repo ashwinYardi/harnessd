@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { defaultGlobalDir, findRepoRoot, serveMemory, syncRepo, vaultDirs } from "@harnessd/daemon";
 import { ConfigError, VERSION } from "@harnessd/shared";
+import { type InitSystem, runInit } from "./init.ts";
 import { runLoop } from "./loop.ts";
 import { runPause, runResume } from "./pause.ts";
 
@@ -15,6 +16,8 @@ export interface CliIO {
   /** Protocol streams for `mcp` servers. Default to process.stdin and process.stdout. */
   stdin?: Readable;
   stdout?: Writable;
+  /** OS effects for `init`. Defaults to the real machine. */
+  system?: InitSystem;
 }
 
 const USAGE = `harnessd ${VERSION}
@@ -22,6 +25,9 @@ const USAGE = `harnessd ${VERSION}
 Usage: harnessd <command>
 
 Commands:
+  init [--yes] [--no-service] [--workspace <dir>]
+               Set up this machine: harness CLIs, ~/.harnessd/config.toml and,
+               on macOS, the launchd service (docs/INSTALL.md). Safe to re-run
   sync [dir]   Write AGENTS.md and each harness's native files from .harnessd/
   run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
                Run the coordinator loop: split Ready issues and dispatch agents.
@@ -82,6 +88,8 @@ async function mcp(args: readonly string[], io: CliIO): Promise<number> {
 export async function run(argv: readonly string[], io: CliIO): Promise<number> {
   const [command = "help", ...rest] = argv;
   switch (command) {
+    case "init":
+      return runInit(rest, io, io.system);
     case "sync":
       return sync(rest, io);
     case "mcp":
