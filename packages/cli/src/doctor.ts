@@ -73,10 +73,10 @@ export async function runDoctor(args: readonly string[], io: DoctorIO): Promise<
 }
 
 /** The error lines `harnessd run` prints when it refuses to start. */
-export function refusalLines(checks: readonly Check[]): string[] {
+export function refusalLines(checks: readonly Check[], outcome = "not starting"): string[] {
   const blocking = checks.filter(isBlocking);
   return [
-    `harnessd run: ${blocking.length} check${blocking.length === 1 ? "" : "s"} failed; not starting. Run "harnessd doctor" for the full list.`,
+    `harnessd run: ${blocking.length} check${blocking.length === 1 ? "" : "s"} failed; ${outcome}. Run "harnessd doctor" for the full list.`,
     ...blocking.map((c) => `  ${c.id} (${c.state}): ${c.detail}. Fix: ${c.fix}`),
   ];
 }

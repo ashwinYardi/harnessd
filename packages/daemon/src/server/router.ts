@@ -56,16 +56,26 @@ export class EventStream {
 /** A comment line on every open stream at this interval keeps proxies and clients awake. */
 export const STREAM_HEARTBEAT_MS = 15_000;
 
-/** An error the API reports as `{ error: code, message }` with this status. */
+/**
+ * An error the API reports as `{ error: code, message }` with this status. `fields` adds a
+ * map of field errors, such as `{ "0.name": "Enter a name." }`, for a form to show inline.
+ */
 export class HttpError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly fields: Record<string, string> | undefined;
 
-  constructor(status: number, code: string, message: string = code) {
+  constructor(
+    status: number,
+    code: string,
+    message: string = code,
+    fields?: Record<string, string>,
+  ) {
     super(message);
     this.name = "HttpError";
     this.status = status;
     this.code = code;
+    this.fields = fields;
   }
 }
 
@@ -205,7 +215,11 @@ export function createRouter(
       }
     } catch (error) {
       if (!(error instanceof HttpError)) throw error;
-      send(res, error.status, { error: error.code, message: error.message });
+      send(res, error.status, {
+        error: error.code,
+        message: error.message,
+        ...(error.fields ? { fields: error.fields } : {}),
+      });
     }
   }
 }

@@ -5,6 +5,7 @@ export {
 } from "./adapters/claude-code.ts";
 export * from "./config/load.ts";
 export * from "./config/merge.ts";
+export * from "./config/team.ts";
 export * from "./control/daemon-file.ts";
 export * from "./control/files.ts";
 export * from "./control/pause.ts";
@@ -33,6 +34,7 @@ export * from "./server/logs.ts";
 export * from "./server/router.ts";
 export * from "./server/static.ts";
 export * from "./server/ui.ts";
+export * from "./setup/routes.ts";
 export * from "./status/detect.ts";
 export * from "./status/route.ts";
 export * from "./status/status.ts";
