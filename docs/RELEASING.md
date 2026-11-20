@@ -7,9 +7,9 @@ Linear milestones, GitHub milestones and GitHub releases map one to one, all nam
 | v0.1.0-alpha.1 | Foundation | MET-5, 6, 7, 17 |
 | v0.1.0-alpha.2 | One agent ships a task | MET-8, 9, 10 |
 | v0.1.0-alpha.3 | Autopilot loop | MET-11, 12, 13, 14, 15 |
-| v0.1.0-beta.1 | Visible and installable | MET-16, 18, 19 |
+| v0.1.0-beta.1 | Visible and installable | MET-16, 18, 19, 21, 22 |
 | v0.1.0 | Self-hosting | MET-20 |
-| v0.2.0 | Cloud, sandboxes and canvas | to be filed |
+| v0.2.0 | Cloud, sandboxes and canvas | MET-23, 24, 25, 26 (Backlog until v0.1.0 ships) |
 
 ## Rules
 1. Every Linear issue belongs to exactly one milestone. A new issue goes in the earliest milestone that needs it. If it fits none, it goes in the next one.

@@ -9,7 +9,7 @@ A coordinator plus three persistent agents (Backend, Frontend, QA) take Ready is
 1. **Autopilot first.** The human is asked only for real inputs: secrets, money, irreversible or taste calls the spec doesn't settle.
 2. **Harness CLIs only.** No vendor SDKs. Adapters call each CLI in headless/JSON mode, with a terminal pane as the fallback.
 3. **One parent config.** Harness-native files are generated from it and never hand-edited.
-4. **Linear is the source of truth** for work. Well-formed issues are a hard requirement.
+4. **Linear is the source of truth** for work in v0.1. Well-formed issues are a hard requirement. From v0.2, any task tool or local markdown tasks work (D-018).
 5. **Anti-slop UI.** The UI is dense, quiet and professional, after t3.code and cloudroom.dev.
 
 ## Components
