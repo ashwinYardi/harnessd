@@ -296,6 +296,8 @@ interface HarnessSpec {
   status: string[];
   signedIn: (stdout: string, code: number) => { state: "ok" | "fail" | "warn"; detail: string };
   login: string;
+  /** argv of the CLI's own login, run by Settings sign-in (D-031). */
+  loginArgs: string[];
 }
 
 const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
@@ -316,6 +318,7 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
       return { state: "ok", detail: `signed in${method}` };
     },
     login: "Run: claude auth login",
+    loginArgs: ["auth", "login"],
   },
   codex: {
     bin: "codex",
@@ -328,6 +331,7 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
         ? { state: "ok", detail: "signed in" }
         : { state: "fail", detail: "not signed in" },
     login: "Run: codex login",
+    loginArgs: ["login"],
   },
 };
 
@@ -341,8 +345,7 @@ export function harnessSetupSpec(
   const spec = HARNESS_SPECS[harness];
   if (!spec) return undefined;
   const login = spec.login.replace(/^Run: /, "");
-  // "claude auth login" runs as the resolved claude binary with ["auth", "login"] (D-031).
-  return { pkg: spec.pkg, login, loginArgs: login.split(" ").slice(1), bin: spec.bin };
+  return { pkg: spec.pkg, login, loginArgs: [...spec.loginArgs], bin: spec.bin };
 }
 
 /**
