@@ -8,10 +8,20 @@ import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import { access, cp, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
-import { PACK_MARKER, parseConfigText, tomlKey, tomlString } from "@harnessd/daemon";
+import {
+  type ExecResult,
+  findOnPath,
+  isTransientDir,
+  PACK_MARKER,
+  parseConfigText,
+  pathDirs,
+  readVersion,
+  tomlKey,
+  tomlString,
+} from "@harnessd/daemon";
 import { ConfigError, type SkillSettings } from "@harnessd/shared";
 import { PACK_MANIFEST, type PackSkill } from "./pack.ts";
 
@@ -42,11 +52,7 @@ export const CONFIG_TEMPLATE = `# harnessd global config. Every key is optional;
 # port = 4747
 `;
 
-export interface ExecResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-}
+export type { ExecResult };
 
 export interface InitFs {
   /** undefined when the file does not exist. */
@@ -114,29 +120,13 @@ export function formatCommand(cmd: string, args: readonly string[]): string {
     .join(" ");
 }
 
-/** PATH entries npx adds for its own run; a service must not depend on them. */
-function isTransient(dir: string): boolean {
-  return dir.includes("/_npx/") || dir.includes("/node_modules/.bin");
-}
-
-function pathDirs(env: NodeJS.ProcessEnv): string[] {
-  return (env.PATH ?? "").split(delimiter).filter((d) => d !== "");
-}
-
-/** Finds `bin` on PATH, skipping npx's temporary folders. */
-export async function which(sys: InitSystem, bin: string): Promise<string | undefined> {
-  for (const dir of pathDirs(sys.env)) {
-    if (isTransient(dir)) continue;
-    const candidate = join(dir, bin);
-    if (await sys.fs.isExecutable(candidate)) return candidate;
-  }
-  return undefined;
+/** Finds `bin` on PATH, skipping npx's temporary folders (shared with the status engine). */
+export function which(sys: InitSystem, bin: string): Promise<string | undefined> {
+  return findOnPath(sys.env, bin, sys.fs.isExecutable);
 }
 
 async function version(sys: InitSystem, path: string): Promise<string> {
-  const res = await sys.exec(path, ["--version"]);
-  const line = `${res.stdout}\n${res.stderr}`.split("\n").find((l) => l.trim() !== "");
-  return res.code === 0 && line ? line.trim() : "version unknown";
+  return (await readVersion((cmd, args) => sys.exec(cmd, args), path)) ?? "version unknown";
 }
 
 function xml(s: string): string {
@@ -203,7 +193,7 @@ export function servicePath(sys: InitSystem, harnessd: string): string {
   const dirs = [
     dirname(sys.nodePath),
     dirname(harnessd),
-    ...pathDirs(sys.env).filter((d) => !isTransient(d)),
+    ...pathDirs(sys.env).filter((d) => !isTransientDir(d)),
     "/usr/bin",
     "/bin",
     "/usr/sbin",

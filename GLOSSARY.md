@@ -21,3 +21,9 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 **Draft decision record**: a decision record that the grill wrote to `<repo>/.harnessd/vault/decision-drafts/`, numbered `D-NNN` until a docs PR accepts it. _Avoid_: proposed ADR.
 
 **Precedent**: a call that is hard to reverse, surprising without context and the result of a real trade-off. Each precedent becomes a draft decision record.
+
+**Status engine**: the one source of checks for `harnessd doctor`, the start of `harnessd run` and the app (D-023).
+
+**Check**: one line of `harnessd doctor`: an id, a state, a detail and a fix (D-023). _Avoid_: probe, health check.
+
+**Blocking check**: a check in state `fail` or `missing`. `harnessd run` does not start while one exists.

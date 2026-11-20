@@ -14,16 +14,20 @@ import {
   type DaemonInfo,
   DEFAULT_LOOP_INTERVAL_MS,
   defaultGlobalDir,
+  isBlocking,
   LinearClient,
   type ListReadyOptions,
   loadConfig,
   removeDaemonInfo,
+  runStatus,
   type SlackFetch,
   startDaemon,
+  statusRoutes,
   type Visibility,
   writeDaemonInfo,
 } from "@harnessd/daemon";
 import { ConfigError } from "@harnessd/shared";
+import { type RunChecks, refusalLines, statusOptions } from "./doctor.ts";
 
 /** Read at the edge only; never written to disk or logs. */
 export const LINEAR_API_KEY_ENV = "LINEAR_API_KEY";
@@ -80,6 +84,8 @@ export interface LoopIO {
   stopSignal?: () => Promise<string>;
   /** Slack posts go through it. Default globalThis.fetch. */
   fetch?: SlackFetch;
+  /** Runs the status checks (MET-27). Default: the real machine. */
+  checks?: RunChecks;
 }
 
 /** How often a due daily summary is looked for. */
@@ -174,12 +180,25 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     return 1;
   }
 
+  // Every harness and connection, before anything is dispatched (MET-27, D-023).
+  const checks = io.checks ?? runStatus;
+  const options = statusOptions(repoDir, env);
+  const startChecks = await checks(options);
+  if (startChecks.some(isBlocking)) {
+    for (const line of refusalLines(startChecks)) io.err(line);
+    return 1;
+  }
+  for (const c of startChecks.filter((c) => c.state === "warn")) {
+    io.err(`harnessd run: warn ${c.id}: ${c.detail}`);
+  }
+
   // The local API (docs/API.md), so `harnessd pause` and the UI reach this loop at once.
   let daemon: Daemon;
   try {
     daemon = await startDaemon({
       port,
       pause: createPauseController({ store: pauseStore, loops: [loop] }),
+      routes: statusRoutes(() => checks({ ...options, servingPort: true })),
     });
   } catch (e) {
     const busy = (e as NodeJS.ErrnoException).code === "EADDRINUSE";
