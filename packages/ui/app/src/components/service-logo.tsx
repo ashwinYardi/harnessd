@@ -38,7 +38,12 @@ export function HarnessName({ harness, className }: { harness: string; className
   const service = harnessService(harness);
   return (
     <span className={cn("inline-flex min-w-0 items-center gap-1.5", className)}>
-      {service && <ServiceLogo className="size-3.5" service={service} />}
+      {/* A harness with no logo keeps an empty slot, so every name in a list starts at one edge. */}
+      {service ? (
+        <ServiceLogo className="size-3.5" service={service} />
+      ) : (
+        <span aria-hidden="true" className="size-3.5 shrink-0" />
+      )}
       <span className="truncate">{harness}</span>
     </span>
   );
