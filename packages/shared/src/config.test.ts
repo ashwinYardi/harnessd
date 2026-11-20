@@ -17,7 +17,15 @@ test("parseConfigFile accepts a full config", () => {
     linear: { team_id: "MET", project: "harnessd" },
     slack: { channel: "#ops" },
     merge: { protected_paths: ["infra/**"] },
-    agents: { backend: { role: "backend", harness: "codex", model: "gpt-5", instructions: "Hi" } },
+    agents: {
+      backend: {
+        role: "backend",
+        harness: "codex",
+        model: "gpt-5",
+        avatar: "avatars/backend.png",
+        instructions: "Hi",
+      },
+    },
     mcp: {
       docs: { command: "npx", args: ["-y", "docs-mcp"], env: { TOKEN: "", MODE: "ro" } },
       bare: { command: "bare-mcp" },
@@ -72,6 +80,17 @@ test("wrong types are rejected with their path", () => {
     `${FILE}: agents.qa.role: expected one of coordinator, backend, frontend, qa, got "tester"`,
   );
   rejects({ agents: { qa: [] } }, `${FILE}: agents.qa: expected a table, got an array`);
+});
+
+test("an agent avatar must be a non-empty string", () => {
+  rejects(
+    { agents: { qa: { avatar: "" } } },
+    `${FILE}: agents.qa.avatar: expected a non-empty string`,
+  );
+  rejects({ agents: { qa: { avatar: 3 } } }, `${FILE}: agents.qa.avatar: expected a string, got 3`);
+  assert.deepEqual(parseAgentSettings({ avatar: "qa.png" }, "agents/qa.md", "", false), {
+    avatar: "qa.png",
+  });
 });
 
 test("parseAgentSettings without a prefix reports bare keys", () => {

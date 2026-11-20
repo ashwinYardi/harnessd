@@ -484,3 +484,42 @@ export async function recoverOnStartup(options: RecoverOptions = {}): Promise<Re
   });
   return report;
 }
+
+// --- bound to one repo ----------------------------------------------------
+
+/** The worktree operations the coordinator loop needs, bound to one repo. */
+export interface TaskWorktrees {
+  create(input: { issueKey: string; title: string }): Promise<Worktree>;
+  /** Removes the worktree; the branch stays for the PR and for a retry. */
+  remove(path: string): Promise<void>;
+  /** Startup reconciliation (recoverOnStartup). */
+  recover(): Promise<void>;
+}
+
+export interface GitWorktreesOptions {
+  repoDir: string;
+  /** Worktrees root. Default `~/.harnessd/worktrees`. */
+  root?: string;
+  /** Branch new task branches start from. Default "main". */
+  base?: string;
+}
+
+export function createGitWorktrees(options: GitWorktreesOptions): TaskWorktrees {
+  const root = options.root;
+  return {
+    create: ({ issueKey, title }) => {
+      const create: CreateWorktreeOptions = { repoDir: options.repoDir, issueKey, title };
+      if (root !== undefined) create.root = root;
+      if (options.base !== undefined) create.base = options.base;
+      return createWorktree(create);
+    },
+    remove: (path) => {
+      const remove: RemoveWorktreeOptions = { repoDir: options.repoDir, path };
+      if (root !== undefined) remove.root = root;
+      return removeWorktree(remove);
+    },
+    recover: async () => {
+      await recoverOnStartup(root === undefined ? {} : { root });
+    },
+  };
+}

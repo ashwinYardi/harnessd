@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { defaultGlobalDir, findRepoRoot, serveMemory, syncRepo, vaultDirs } from "@harnessd/daemon";
 import { ConfigError, VERSION } from "@harnessd/shared";
+import { runLoop } from "./loop.ts";
 
 export interface CliIO {
   out: (line: string) => void;
@@ -21,6 +22,9 @@ Usage: harnessd <command>
 
 Commands:
   sync [dir]   Write AGENTS.md and each harness's native files from .harnessd/
+  run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
+               Run the coordinator loop: split Ready issues and dispatch agents.
+               Needs LINEAR_API_KEY and linear.team_id (docs/LOOP.md)
   mcp memory [--workspace <dir>]
                Serve the memory vaults over MCP on stdio (sync registers it)
   version      Print the version
@@ -78,6 +82,8 @@ export async function run(argv: readonly string[], io: CliIO): Promise<number> {
       return sync(rest, io);
     case "mcp":
       return mcp(rest, io);
+    case "run":
+      return runLoop(rest, io);
     case "version":
     case "--version":
     case "-v":

@@ -67,6 +67,7 @@ export function mergeLayers(layers: readonly ConfigLayer[]): MergedConfig {
       if (entry.role !== undefined) draft.role = entry.role;
       if (entry.harness !== undefined) draft.harness = entry.harness;
       if (entry.model !== undefined) draft.model = entry.model;
+      if (entry.avatar !== undefined) draft.avatar = entry.avatar;
       if (entry.instructions !== undefined) draft.instructions.push(entry.instructions);
       draft.label ??= entry.label;
       draft.keyPrefix ??= entry.keyPrefix;
@@ -123,5 +124,6 @@ export function resolveAgentConfig(merged: MergedConfig, agentName: string): Res
     skills: merged.skills,
   };
   if (agent.model !== undefined) resolved.model = agent.model;
+  if (agent.avatar !== undefined) resolved.avatar = agent.avatar;
   return resolved;
 }

@@ -35,6 +35,7 @@ protected_paths = ["**/auth/**"]
 role = "backend"            # coordinator | backend | frontend | qa
 harness = "claude-code"     # claude-code | codex | antigravity | opencode | cursor | grok
 model = "opus"              # optional, passed to the harness
+avatar = "avatars/backend.png"  # optional: path in this .harnessd/ folder, or a URL
 instructions = "..."        # optional
 
 [mcp.docs]                  # a stdio MCP server for every harness (see docs/SYNC.md)
@@ -42,10 +43,10 @@ command = "npx"             # required
 args = ["-y", "docs-mcp"]   # optional
 env = { DOCS_MODE = "ro" }  # optional, string values
 ```
-Default agents: coordinator, backend, frontend and qa, all on `claude-code`. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
+Default agents: coordinator, backend, frontend and qa, all on `claude-code` (D-010). The agent's name is its table key or file name; without an `avatar` the UI shows the name's initial. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
 
 ## agents/<name>.md
-Optional frontmatter with `role`, `harness` and `model`; the body is the agent's instructions.
+Optional frontmatter with `role`, `harness`, `model` and `avatar`; the body is the agent's instructions.
 ```markdown
 ---
 harness: codex
@@ -61,7 +62,7 @@ Optional frontmatter with `name` (defaults to the folder name) and `description`
 ## Merge rules
 Order: defaults, then global, then workspace, then the agent.
 - Scalars override. Arrays (such as `protected_paths`) replace. Tables deep-merge.
-- Agent fields (`role`, `harness`, `model`) override per layer.
+- Agent fields (`role`, `harness`, `model`, `avatar`) override per layer.
 - Rules, skills and MCP servers merge by name; the workspace wins. An `[mcp.<name>]` table is replaced whole, not deep-merged.
 - An agent's instruction text is global AGENTS.md, workspace AGENTS.md, then the agent's own instructions from global and then workspace, joined by blank lines.
 

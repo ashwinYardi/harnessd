@@ -44,6 +44,8 @@ export interface AgentSettings {
   role?: AgentRole;
   harness?: HarnessId;
   model?: string;
+  /** Image path (relative to the `.harnessd/` folder) or URL shown for the agent. */
+  avatar?: string;
   instructions?: string;
 }
 
@@ -109,6 +111,7 @@ export interface AgentLayerEntry {
   role?: AgentRole;
   harness?: HarnessId;
   model?: string;
+  avatar?: string;
   instructions?: InstructionBlock;
   /** File that defined the agent, as shown in errors, and the key prefix used in it. */
   label: string;
@@ -137,6 +140,8 @@ export interface Agent {
   role: AgentRole;
   harness: HarnessId;
   model?: string;
+  /** Image path or URL; the UI shows the name's initial when unset. */
+  avatar?: string;
   /** Agent-specific instructions, global first. */
   instructions: InstructionBlock[];
 }
@@ -160,6 +165,7 @@ export interface ResolvedAgentConfig {
   role: AgentRole;
   harness: HarnessId;
   model?: string;
+  avatar?: string;
   /** Global AGENTS.md, workspace AGENTS.md, then the agent's own instructions. */
   instructions: string;
   rules: Rule[];
@@ -321,8 +327,8 @@ export function parseAgentSettings(
 ): AgentSettings {
   const c = new Checker(file);
   const keys = allowInstructions
-    ? ["role", "harness", "model", "instructions"]
-    : ["role", "harness", "model"];
+    ? ["role", "harness", "model", "avatar", "instructions"]
+    : ["role", "harness", "model", "avatar"];
   const t = c.table(value, path, keys);
   const out: AgentSettings = {};
   if (t.role !== undefined)
@@ -331,6 +337,7 @@ export function parseAgentSettings(
     out.harness = c.oneOf(t.harness, keyPath(path, "harness"), HARNESSES, isHarnessId);
   }
   if (t.model !== undefined) out.model = c.string(t.model, keyPath(path, "model"));
+  if (t.avatar !== undefined) out.avatar = c.string(t.avatar, keyPath(path, "avatar"));
   if (t.instructions !== undefined) {
     out.instructions = c.string(t.instructions, keyPath(path, "instructions"));
   }

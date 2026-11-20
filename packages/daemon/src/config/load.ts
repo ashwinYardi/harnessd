@@ -125,7 +125,7 @@ export async function loadLayer(
     }
   }
 
-  // agents/<name>.md: frontmatter (role, harness, model) plus instructions as the body
+  // agents/<name>.md: frontmatter (role, harness, model, avatar) plus instructions as the body
   for (const ent of await listOptional(join(dir, "agents"))) {
     const path = join(dir, "agents", ent.name);
     const label = show(path);
@@ -138,7 +138,7 @@ export async function loadLayer(
     const text = body.trim();
     const existing = layer.agents[name];
     const entry: AgentLayerEntry = existing ?? { label, keyPrefix: "" };
-    for (const key of ["role", "harness", "model"] as const) {
+    for (const key of ["role", "harness", "model", "avatar"] as const) {
       if (def[key] === undefined) continue;
       if (existing?.[key] !== undefined) {
         throw new ConfigError(label, key, `also set as agents.${name}.${key} in ${existing.label}`);
