@@ -22,10 +22,11 @@ One developer, or a small team lead, who runs harnessd on their own Mac. They ar
   - **Team:** the agents. The user adds an agent, picks its role, and assigns it a harness and a model.
 
 ## Setup pattern
-Follow the T3 Code (pingdotgg/t3code, MIT) Settings → Providers patterns for these pages. Copy the layout and behaviour, not its brand or copy. If code is reused, keep the MIT notice.
+Settings has a sub-nav and one card per harness or connection. Each card shows the service's logo and name, a state badge, what was found, the fix for a failure, and its actions. A card answers "does this work, and if not, what do I do" without a click.
 
 ## Pinned aesthetic
-- Dense, quiet, professional. References: t3.code and cloudroom.dev.
+- Dense, quiet, keyboard-first, professional. Small type, tight rows and thin borders let one screen hold the whole team. Color is rare, so a red Needs you count stands out at once. Every action has a key. The UI looks like a well-made tool, not a product page.
+- Real service logos (GitHub, Linear, Slack, Claude, OpenAI, git) next to their names, in one color, so the eye finds a service by its shape first.
 - No gradients, no emoji, no filler copy, no decorative illustration (AGENTS.md).
 - Light and dark themes. Text contrast meets WCAG AA.
 

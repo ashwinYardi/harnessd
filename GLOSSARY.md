@@ -55,3 +55,7 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 **Setup**: the state of `harnessd run` when the app is served but the loop has not started, because a check blocks or Start was not pressed (D-026). _Avoid_: onboarding mode, idle.
 
 **Setup command**: one fixed command the app runs for a harness: install, update or sign in. Nothing from the request reaches it (D-026). _Avoid_: script, action.
+
+**Service logo**: the one-color logo of a service harnessd works with (GitHub, Linear, Slack, Claude, OpenAI, git), always next to its name (D-029). _Avoid_: brand icon, provider icon.
+
+**Brand token**: the `--brand` line in `index.css` that holds the accent for light and dark. Primary and ring read it (D-029). _Avoid_: theme color.

@@ -1,13 +1,13 @@
-// Ported from T3 Code, apps/web/src/components/ui/command.tsx (https://github.com/pingdotgg/t3code).
-// Copyright (c) 2026 T3 Tools Inc. MIT License; see packages/ui/THIRD_PARTY_NOTICES.md.
-// Changes: a plain combobox and listbox in a Base UI dialog, in place of the Autocomplete
-// primitive; matching is lib/commands.ts. Keys: Up, Down, Home, End, Enter, Esc.
+// The command palette. Its look follows the shadcn/ui base-nova command and dialog (MIT; see
+// packages/ui/THIRD_PARTY_NOTICES.md). The behaviour is harnessd's own: a combobox and listbox
+// in a Base UI dialog, with no cmdk dependency; lib/commands.ts matches the typed words.
+// Keys: Up, Down, Home, End, Enter, Esc.
 import { Dialog as CommandDialogPrimitive } from "@base-ui/react/dialog";
 import { ArrowDownIcon, ArrowUpIcon, SearchIcon } from "lucide-react";
 import { type KeyboardEvent, useId, useMemo, useRef, useState } from "react";
 import { cn } from "../../lib/cn.ts";
 import { type Command, matchCommands, nextEnabled } from "../../lib/commands.ts";
-import { DIALOG_BACKDROP_CLASS, DIALOG_POPUP_CLASS } from "./dialog.tsx";
+import { DIALOG_CONTENT_CLASS, DIALOG_OVERLAY_CLASS } from "./dialog.tsx";
 import { Kbd, KbdGroup } from "./kbd.tsx";
 
 interface CommandPaletteProps<T extends Command> {
@@ -44,17 +44,17 @@ function CommandPalette<T extends Command>({
     >
       <CommandDialogPrimitive.Portal>
         <CommandDialogPrimitive.Backdrop
-          className={DIALOG_BACKDROP_CLASS}
-          data-slot="command-dialog-backdrop"
+          className={DIALOG_OVERLAY_CLASS}
+          data-slot="command-dialog-overlay"
         />
         <CommandDialogPrimitive.Viewport className="pointer-events-none fixed inset-0 z-50 flex flex-col items-center px-4 pt-[max(--spacing(4),10vh)] pb-[10vh]">
           <CommandDialogPrimitive.Popup
             aria-label="Command palette"
             className={cn(
-              DIALOG_POPUP_CLASS,
+              DIALOG_CONTENT_CLASS,
               "pointer-events-auto max-h-105 max-w-xl overflow-hidden",
             )}
-            data-slot="command-dialog-popup"
+            data-slot="command-dialog-content"
           >
             {open && (
               <CommandBody
@@ -151,7 +151,7 @@ function CommandBody<T extends Command>({
             <div key={c.id} role="presentation">
               {head && (
                 <div
-                  className="px-2 pt-2 pb-1 font-medium text-muted-foreground text-xs"
+                  className="px-2 pt-2 pb-1.5 font-medium text-muted-foreground text-xs"
                   role="presentation"
                 >
                   {head}
@@ -162,8 +162,7 @@ function CommandBody<T extends Command>({
                 aria-disabled={c.disabled || undefined}
                 aria-selected={i === index}
                 className={cn(
-                  "flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-sm aria-disabled:cursor-not-allowed aria-disabled:opacity-64",
-                  i === index && "bg-foreground/[0.07]",
+                  "relative flex h-8 cursor-pointer select-none items-center gap-2 rounded-lg px-2 text-sm aria-disabled:cursor-not-allowed aria-disabled:opacity-64 aria-selected:bg-accent aria-selected:text-accent-foreground",
                 )}
                 id={`${id}-${i}`}
                 onClick={() => !c.disabled && onRun(c)}

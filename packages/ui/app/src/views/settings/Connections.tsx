@@ -1,17 +1,19 @@
 // Settings → Connections (MET-28): GitHub, Linear, Slack, git, the port and the skill pack,
 // each with its doctor checks, the fix for a failure and Check again. No secret is shown.
 import { RotateCwIcon } from "lucide-react";
+import { ServiceLogo } from "../../components/service-logo.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import {
   Card,
+  CardContent,
   CardDescription,
   CardHeader,
-  CardPanel,
   CardTitle,
 } from "../../components/ui/card.tsx";
 import { Skeleton } from "../../components/ui/skeleton.tsx";
 import { Spinner } from "../../components/ui/spinner.tsx";
 import type { Status } from "../../hooks/useStatus.ts";
+import { connectionService } from "../../lib/services.ts";
 import { connectionCards } from "../../lib/setup.ts";
 import { ErrorState } from "../common.tsx";
 import { CheckLine, StateBadge } from "./parts.tsx";
@@ -36,44 +38,48 @@ export function Connections({ status }: { status: Status }) {
     <div className="grid gap-3 sm:grid-cols-2">
       {connectionCards(s.data)
         .sort((a, b) => Number(a.state === "ok") - Number(b.state === "ok"))
-        .map((card) => (
-          <Card key={card.id}>
-            <CardHeader className="pb-1">
-              <div className="min-w-0 flex-1">
-                <CardTitle className="flex items-center gap-2">
-                  {card.title}
-                  <StateBadge state={card.state}>{LABEL[card.state]}</StateBadge>
-                </CardTitle>
-                <CardDescription>{card.about}</CardDescription>
-              </div>
-              {card.state !== "ok" && (
-                <Button
-                  aria-label={`Check ${card.title} again`}
-                  disabled={status.checking}
-                  onClick={() => void status.recheck()}
-                  size="sm"
-                  variant="ghost-muted"
-                >
-                  {status.checking ? <Spinner /> : <RotateCwIcon aria-hidden="true" />}
-                  Check again
-                </Button>
-              )}
-            </CardHeader>
-            <CardPanel>
-              {card.checks.length === 0 ? (
-                <p className="py-2 text-muted-foreground text-xs">
-                  No check ran for this connection.
-                </p>
-              ) : (
-                <ul className="divide-y">
-                  {card.checks.map((c) => (
-                    <CheckLine check={c} key={c.id} />
-                  ))}
-                </ul>
-              )}
-            </CardPanel>
-          </Card>
-        ))}
+        .map((card) => {
+          const logo = connectionService(card.id);
+          return (
+            <Card key={card.id}>
+              <CardHeader className="pb-1">
+                <div className="min-w-0 flex-1">
+                  <CardTitle className="flex items-center gap-2">
+                    {logo && <ServiceLogo service={logo} />}
+                    {card.title}
+                    <StateBadge state={card.state}>{LABEL[card.state]}</StateBadge>
+                  </CardTitle>
+                  <CardDescription>{card.about}</CardDescription>
+                </div>
+                {card.state !== "ok" && (
+                  <Button
+                    aria-label={`Check ${card.title} again`}
+                    disabled={status.checking}
+                    onClick={() => void status.recheck()}
+                    size="sm"
+                    variant="ghost-muted"
+                  >
+                    {status.checking ? <Spinner /> : <RotateCwIcon aria-hidden="true" />}
+                    Check again
+                  </Button>
+                )}
+              </CardHeader>
+              <CardContent>
+                {card.checks.length === 0 ? (
+                  <p className="py-2 text-muted-foreground text-xs">
+                    No check ran for this connection.
+                  </p>
+                ) : (
+                  <ul className="divide-y">
+                    {card.checks.map((c) => (
+                      <CheckLine check={c} key={c.id} />
+                    ))}
+                  </ul>
+                )}
+              </CardContent>
+            </Card>
+          );
+        })}
     </div>
   );
 }

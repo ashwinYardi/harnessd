@@ -1,5 +1,6 @@
-// Ported from T3 Code, apps/web/src/components/ui/skeleton.tsx (https://github.com/pingdotgg/t3code).
-// Copyright (c) 2026 T3 Tools Inc. MIT License; see packages/ui/THIRD_PARTY_NOTICES.md.
+// From shadcn/ui, base-nova registry (MIT; see packages/ui/THIRD_PARTY_NOTICES.md).
+// harnessd changes: three shapes, aria-hidden, and a stepped pulse (index.css) that stops
+// under prefers-reduced-motion.
 import { cva, type VariantProps } from "class-variance-authority";
 import type * as React from "react";
 import { cn } from "../../lib/cn.ts";

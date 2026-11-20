@@ -1,6 +1,6 @@
-// A card after T3 Code's SettingsGroup and provider card
-// (apps/web/src/components/settings/SettingsGroup.tsx, https://github.com/pingdotgg/t3code).
-// Copyright (c) 2026 T3 Tools Inc. MIT License; see packages/ui/THIRD_PARTY_NOTICES.md.
+// From shadcn/ui, base-nova registry (MIT; see packages/ui/THIRD_PARTY_NOTICES.md).
+// harnessd changes: a 1 px border in place of the ring, a flex header that holds a title and
+// an action on one row, 14 px titles, 12 px descriptions and tighter padding for dense pages.
 import type * as React from "react";
 import { cn } from "../../lib/cn.ts";
 
@@ -30,7 +30,7 @@ function CardHeader({ className, ...props }: React.ComponentProps<"div">) {
 function CardTitle({ className, ...props }: React.ComponentProps<"h3">) {
   return (
     <h3
-      className={cn("font-semibold text-sm leading-tight", className)}
+      className={cn("font-semibold text-sm leading-snug", className)}
       data-slot="card-title"
       {...props}
     />
@@ -47,8 +47,8 @@ function CardDescription({ className, ...props }: React.ComponentProps<"p">) {
   );
 }
 
-function CardPanel({ className, ...props }: React.ComponentProps<"div">) {
-  return <div className={cn("px-4 pb-3.5", className)} data-slot="card-panel" {...props} />;
+function CardContent({ className, ...props }: React.ComponentProps<"div">) {
+  return <div className={cn("px-4 pb-3.5", className)} data-slot="card-content" {...props} />;
 }
 
 function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
@@ -64,4 +64,4 @@ function CardFooter({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
-export { Card, CardDescription, CardFooter, CardHeader, CardPanel, CardTitle };
+export { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle };
