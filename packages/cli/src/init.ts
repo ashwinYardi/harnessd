@@ -314,6 +314,16 @@ function parseMarker(text: string | undefined): SkillPin | undefined {
   }
 }
 
+/** The pack format a marker names; a marker from before formats were recorded is 1. */
+function markerFormat(text: string | undefined): number {
+  try {
+    const format = JSON.parse(text ?? "{}")?.format;
+    return typeof format === "number" ? format : 1;
+  } catch {
+    return 1;
+  }
+}
+
 /** What init does with one pack skill. Pure, so every case reads in one place. */
 type SkillPlan =
   | { action: "foreign" }
@@ -325,7 +335,7 @@ function planSkill(
   marker: SkillPin | undefined,
   table: SkillSettings | undefined,
   configFile: string,
-  /** True when the installed marker differs from the one this build ships (a newer format). */
+  /** True when the installed marker names an older pack format than this build ships. */
   staleMarker = false,
 ): SkillPlan {
   if (present && marker === undefined) return { action: "foreign" };
@@ -383,7 +393,7 @@ async function installSkills({ io, sys }: Step): Promise<boolean> {
     const markerText = await sys.fs.read(join(dest, PACK_MARKER));
     const marker = parseMarker(markerText);
     const shipped = await sys.fs.read(join(sys.packDir, skill.name, PACK_MARKER));
-    const stale = shipped !== undefined && markerText !== shipped;
+    const stale = markerFormat(shipped) > markerFormat(markerText);
     plans.push({
       skill,
       dest,

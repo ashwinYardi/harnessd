@@ -237,6 +237,21 @@ test("a skill at its pin is copied again when this harnessd ships a newer pack f
   assert.equal(again.files.get(CONFIG), CONFIG_TEMPLATE + PINS);
 });
 
+test("a skill with a newer pack format than this build ships is kept", async () => {
+  const marker = `${JSON.stringify({ upstream: "pbakaus/impeccable", commit: B, format: 3 })}\n`;
+  const f = fake({
+    installed: ALL,
+    files: {
+      [CONFIG]: CONFIG_TEMPLATE + PINS,
+      [`${SKILLS}/impeccable/SKILL.md`]: "local",
+      [`${SKILLS}/impeccable/.harnessd-pack`]: marker,
+    },
+  });
+  assert.equal(await runInit(["--no-service"], f.io, f.sys), 0);
+  assert.equal(f.files.get(`${SKILLS}/impeccable/SKILL.md`), "local");
+  assert.ok(f.out.some((l) => l.startsWith("skills: kept") && l.includes("impeccable")));
+});
+
 test("a pin init cannot meet installs nothing for that skill", async () => {
   const pinned = `[skills.tdd]\ncommit = "${"c".repeat(40)}"\n`;
   const f = fake({ installed: ALL, files: { [CONFIG]: pinned } });

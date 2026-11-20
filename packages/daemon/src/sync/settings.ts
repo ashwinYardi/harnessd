@@ -1,6 +1,6 @@
 // Merges what sync owns into a harness settings file that the user may also edit:
 // `.claude/settings.json` and `.codex/hooks.json`. The user's keys, permissions and
-// hooks stay where they are. See docs/SYNC.md "Hooks and agents".
+// hooks stay where they are. See docs/SYNC.md "Hooks and subagents".
 import type { HookEvents, HookGroup } from "@harnessd/shared";
 import { jsonFile } from "./format.ts";
 

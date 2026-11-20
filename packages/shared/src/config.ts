@@ -152,7 +152,6 @@ export interface Rule {
   text: string;
 }
 
-/** `skills/<folder>/SKILL.md`. The name is the frontmatter `name`, else the folder name. */
 /** One hook command, as Claude Code and Codex write it. Other keys stay as they are. */
 export interface HookCommand {
   type: string;
@@ -186,6 +185,7 @@ export interface SkillNative {
   claudeAgents?: SkillAgent[];
 }
 
+/** `skills/<folder>/SKILL.md`. The name is the frontmatter `name`, else the folder name. */
 export interface Skill {
   name: string;
   description?: string;

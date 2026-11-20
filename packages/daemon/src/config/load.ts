@@ -83,7 +83,7 @@ export const PACK_MARKER = ".harnessd-pack";
 
 /**
  * The folder in a skill that holds its harness files: `hooks.json` and
- * `claude-agents/<name>.md` (docs/SYNC.md "Hooks and agents"). Sync does not copy it.
+ * `claude-agents/<name>.md` (docs/SYNC.md "Hooks and subagents"). Sync does not copy it.
  */
 export const NATIVE_DIR = ".harnessd-native";
 

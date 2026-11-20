@@ -70,7 +70,10 @@ async function isOwnAgentFile(repoDir: string, path: string): Promise<boolean> {
   const text = await readOptional(join(repoDir, path));
   if (text === undefined) return true;
   const note = `<!-- ${GENERATED_NOTE} -->\n`;
-  return text.startsWith(note) || text.includes(`\n---\n${note}`);
+  if (text.startsWith(note)) return true;
+  // The note sits right after the frontmatter, exactly where agentMd puts it.
+  const end = text.startsWith("---\n") ? text.indexOf("\n---\n", 3) : -1;
+  return end !== -1 && text.startsWith(note, end + "\n---\n".length);
 }
 
 /** The unit sync owns or not: a skill folder, an agent file, or undefined for the rest. */
