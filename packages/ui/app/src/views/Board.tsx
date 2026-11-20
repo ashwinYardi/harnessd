@@ -10,7 +10,7 @@ import { useHold } from "../hooks/useHold.ts";
 import { type Column, type ColumnId, groupBoard, needsYou } from "../lib/board.ts";
 import { cn } from "../lib/cn.ts";
 import { sinceText } from "../lib/format.ts";
-import { EmptyState, ErrorState, HeldUpdates, ViewToolbar } from "./common.tsx";
+import { ErrorState, HeldUpdates, ViewToolbar } from "./common.tsx";
 
 const EMPTY: Record<ColumnId, string> = {
   "needs-you": "Nothing needs you.",
@@ -97,25 +97,26 @@ function BoardColumn({ column, paused }: { column: Column; paused: boolean }) {
   const id = `col-${column.id}`;
   const loud = column.id === "needs-you";
   const hasIssues = column.issues.length > 0;
+  const alarm = loud && hasIssues;
   return (
     <section
       aria-labelledby={id}
       className={cn(
         "flex max-h-full min-w-44 flex-1 basis-0 flex-col self-start rounded-xl border bg-muted/50 dark:bg-card",
-        loud && hasIssues && "border-destructive/40 bg-error-surface dark:bg-error-surface",
+        alarm && "border-destructive/40 bg-error-surface dark:bg-error-surface",
       )}
       data-col={column.id}
     >
       <h2
         className={cn(
           "flex h-9 shrink-0 items-center gap-2 px-3 font-semibold text-sm",
-          loud && hasIssues && "text-destructive-foreground",
+          alarm && "text-destructive-foreground",
         )}
         id={id}
       >
-        {loud && hasIssues && <CircleAlertIcon aria-hidden="true" className="size-4" />}
+        {alarm && <CircleAlertIcon aria-hidden="true" className="size-4" />}
         <span>{column.title}</span>
-        <Badge size="sm" variant={loud && hasIssues ? "destructive" : "secondary"}>
+        <Badge size="sm" variant={alarm ? "destructive" : "secondary"}>
           {column.issues.length}
         </Badge>
       </h2>
@@ -204,12 +205,7 @@ export function Board({
           text={`Could not read the board from Linear. ${board.status === "error" ? board.error : (shown?.error ?? "")}`}
         />
       )}
-      {shown && !neverRead && shown.issues.length === 0 && (
-        <EmptyState>
-          No issues in this team and project. Ready issues in Linear show here.
-        </EmptyState>
-      )}
-      {shown && !neverRead && shown.issues.length > 0 && (
+      {shown && !neverRead && (
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex h-full items-start gap-3 px-4 pb-4">
             {groupBoard(shown.issues).map((column) => (

@@ -111,7 +111,6 @@ export function useHarnessd() {
     pause,
     connection,
     setPause,
-    reloadPause: loadPause,
     retry: { board: loadBoard, agents: loadAgents, logs: loadLogs },
   };
 }

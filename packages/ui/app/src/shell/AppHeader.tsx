@@ -3,6 +3,7 @@
 
 import type { Connection } from "../api.ts";
 import { Badge } from "../components/ui/badge.tsx";
+import { Button } from "../components/ui/button.tsx";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { cn } from "../lib/cn.ts";
 import { clockTime, sinceText } from "../lib/format.ts";
@@ -97,14 +98,15 @@ export function AppHeader({
         </Badge>
       )}
       {needsYou > 0 && (
-        <button
-          type="button"
+        <Button
+          className="whitespace-nowrap"
           onClick={onShowNeedsYou}
-          className="relative inline-flex min-h-7 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-destructive pointer-coarse:after:absolute pointer-coarse:after:top-1/2 pointer-coarse:after:left-1/2 pointer-coarse:after:size-11 pointer-coarse:after:-translate-1/2 px-2.5 font-medium text-sm text-white outline-none transition-colors duration-100 hover:bg-destructive/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          size="sm"
+          variant="destructive"
         >
           <span className="tabular-nums">{needsYou}</span>
           <span className="hidden sm:inline">{needsYou === 1 ? "needs you" : "need you"}</span>
-        </button>
+        </Button>
       )}
       <PauseButton view={pause} onToggle={onTogglePause} />
     </header>

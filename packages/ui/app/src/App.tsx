@@ -129,6 +129,13 @@ export function App() {
           run: () => goTo(view),
         }),
       ),
+      {
+        id: "needs-you",
+        title: "Show what needs you",
+        group: "Go to",
+        keywords: ["blocked", "needs input"],
+        run: () => goTo("board"),
+      },
       pause.view.shown.paused
         ? {
             id: "resume",
@@ -157,6 +164,13 @@ export function App() {
         group: "Board",
         keywords: ["refresh", "linear", "retry"],
         run: api.retry.board,
+      },
+      {
+        id: "reload-agents",
+        title: "Load the agents again",
+        group: "Agents",
+        keywords: ["refresh", "retry"],
+        run: api.retry.agents,
       },
       {
         id: "reload-logs",

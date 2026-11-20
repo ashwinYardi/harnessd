@@ -1,5 +1,5 @@
 # D-025 UI stack after T3 Code: Tailwind v4, Base UI, CVA, lucide-react
-Status: accepted 2026-11-20. Extends D-003 and D-024. Replaces the MET-18 visual world: hand-written CSS, authored icons, no shadows.
+Status: accepted 2026-11-20. Extends D-003 and D-024. Replaces the MET-18 visual world: hand-written CSS, authored icons, no shadows. No earlier record named a "no CSS framework" rule; it was the practice of MET-18 and the old DESIGN.md, which this record and the new DESIGN.md replace.
 
 - The UI uses Tailwind v4 (`@tailwindcss/vite`), Base UI (`@base-ui/react`), class-variance-authority and lucide-react, as T3 Code (pingdotgg/t3code) does. `tailwind-merge` resolves class conflicts in `cn()`.
 - The primitives live in `packages/ui/app/src/components/ui/`. Most are ports of T3 Code's `apps/web/src/components/ui`. Each ported file names its source and keeps the MIT notice. `packages/ui/THIRD_PARTY_NOTICES.md` holds the full licence text.

@@ -97,7 +97,7 @@ harnessd's UI is an Operate surface (PRODUCT.md). It answers three questions fas
 ## Colors
 Restrained, after T3 Code: zinc neutrals in light, true black and neutral in dark, one blue primary, and three state colors that each do one job.
 - **Primary** (blue): the default button, focus rings, the switch, the budget bar under 80 percent. Nothing else.
-- **Destructive and error** (red): only Needs you, Blocked, failed checks and failed calls. The Needs you column, its count in the sidebar and the header button are red. Nothing else is red.
+- **Destructive and error** (red): only Needs you, Blocked, blocking checks (fail and missing, D-023) and failed calls. The Needs you column, its count in the sidebar and the header button are red. Nothing else is red.
 - **Warning** (amber): budgets at 80 percent or more, stopping runs, warning log lines, warn checks, and the header while paused.
 - **Success** (emerald): the live connection dot, the running-agent dot, ok checks and success toasts.
 
@@ -171,7 +171,7 @@ Each item is met where it says. Check it again on every UI change.
 
 ## Do's and Don'ts
 - Do keep red for Needs you, Blocked and failures. Do keep amber for budget, stopping, warn and paused.
-- Do use lucide icons at 16 px, next to a text label or with a tooltip.
+- Do use lucide icons at 16 px, next to a text label or with a tooltip. Inside 12 px meta lines (issue reasons, the external-link hint) they shrink to 12 px.
 - Do build every new control from `components/ui`. Add a variant with CVA before a one-off class list.
 - Don't add gradients, glass, backdrop blur, emoji, eyebrow labels or decorative illustration.
 - Don't move content under the cursor: hold it, or append below the visible area.
