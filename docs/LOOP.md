@@ -51,7 +51,7 @@ When the split is done, the parent moves to In Progress.
 
 ## Sizes and budgets
 - S runs for `limits.budget_minutes.S` (30 min), M for `limits.budget_minutes.M` (2 h). An issue with no size counts as M.
-- L is never run. If the plan, or the fallback, still contains an L part, the issue goes to Needs input with a comment and one ping. The same happens to an L sub-issue.
+- L is never run. If the plan, or the fallback, still contains an L part, the issue goes to Needs input with a comment and one notice. The same happens to an L sub-issue.
 
 ## Dispatch
 - At most `limits.max_concurrent` runs at once (default 3).
@@ -70,7 +70,7 @@ When the split is done, the parent moves to In Progress.
 |---|---|
 | ok | The sub-issue moves to In Review. |
 | error or timeout, first time | A comment is posted and the sub-issue goes back to Ready for one retry. |
-| error or timeout, second time | A comment is posted, the sub-issue moves to Needs input and one ping is sent. |
+| error or timeout, second time | A comment is posted, the sub-issue moves to Needs input and one notice is sent. |
 | cancelled | The sub-issue goes back to Ready. No attempt is counted. |
 | cancelled by a pause | The worktree is kept. See Pause. |
 
@@ -123,7 +123,7 @@ After the round:
 | every PR approved | QA moves to In Review, with a comment that links each review. The approval, with each PR's head, goes to `loop.json` for the merge gate. |
 | changes requested, first failure | Each failing part goes back to Ready with a comment that links its review. QA goes back to Ready and runs again once the parts are back in review. |
 | QA could not judge a PR, first failure | QA goes back to Ready and runs again. |
-| second failure | QA and the parent move to Needs input. One comment goes on the parent and one ping is sent. Nothing is sent back again (D-014). |
+| second failure | QA and the parent move to Needs input. One comment goes on the parent and one notice is sent. Nothing is sent back again (D-014). |
 
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
 
@@ -140,7 +140,7 @@ The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR m
 | Finding | What happens |
 |---|---|
 | merged on GitHub | A human merged it: the part moves to Done. |
-| closed, not merged | The parent moves to Needs input, with a comment and one ping. The approval is dropped. |
+| closed, not merged | The parent moves to Needs input, with a comment and one notice. The approval is dropped. |
 | head is not the approved sha | Nothing merges unreviewed. QA moves back to Ready with a comment and runs again on the new head. No QA failure is counted. |
 | a changed file matches `merge.protected_paths` | Needs a human (below). |
 | GitHub listed fewer files than `changedFiles` | Needs a human: the paths could not all be checked. |
@@ -149,10 +149,10 @@ The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR m
 | every check passed | `gh pr merge <n> --squash --match-head-commit <approved sha>`. The part moves to Done, with a comment and a notice to the notifier (D-015). |
 
 - **CI green** means at least one check, and every check passed: a check run that completed with SUCCESS, NEUTRAL or SKIPPED, or a commit status of SUCCESS. When a check was re-run, only its latest run counts. Any other conclusion fails. A PR with no checks waits, because D-013 needs CI green.
-- **Needs a human.** The PR gets the `merge.label` label (default `needs-human`; the label is created when the repo lacks it). The parent moves to Needs input with one comment, and one ping is sent. The ping is recorded under `humanPings` in `loop.json`, keyed by the PR URL, before it is sent. So a PR is pinged once, across ticks, restarts and new QA rounds. harnessd never merges that PR. It keeps reading it, and once a human merges it, the part moves to Done. A merge GitHub refuses (branch protection, a draft) goes the same way, with gh's error in the comment.
+- **Needs a human.** The PR gets the `merge.label` label (default `needs-human`; the label is created when the repo lacks it). The parent moves to Needs input with one comment, and one notice is sent. The notice is recorded under `humanPings` in `loop.json`, keyed by the PR URL, before it is sent. So a PR gets one notice, across ticks, restarts and new QA rounds. harnessd never merges that PR. It keeps reading it, and once a human merges it, the part moves to Done. A merge GitHub refuses (branch protection, a draft) goes the same way, with gh's error in the comment.
 - **Sent back.** A failed check or a conflict is a gate failure for the parent. The rule is the QA one: sent back once, then escalated (SPEC step 6, D-014).
   - The first failure sends each failing part back to Ready. Its next prompt lists the failing checks, like QA feedback, and it pushes to its open PR. QA moves to Ready and runs again once the parts are back in review.
-  - The `limits.qa_max_failures`-th failure (default 2) moves QA and the parent to Needs input, with one comment and one ping. Nothing is sent back again.
+  - The `limits.qa_max_failures`-th failure (default 2) moves QA and the parent to Needs input, with one comment and one notice. Nothing is sent back again.
   - Gate failures are counted per parent under `gateFailures`, apart from QA failures. A new QA approval does not reset them. A parent reaching Done does.
 - **Done.** Once every PR of an approval is merged, QA moves to Done. When every part of the parent is Done, the parent moves to Done too.
 - **Pause.** No merge happens while paused. The flag is checked at the start of the tick, before each PR is read, and again right before each `gh pr merge`. A pause that lands mid-tick stops the gate before the next merge. The approval stays in `loop.json` for after resume. A flag that cannot be read counts as paused here.
@@ -168,4 +168,4 @@ The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR m
 
 `pausedAt` is set only on an in-flight run that a pause is cancelling.
 
-Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the QA approvals waiting to merge and the needs-human pings already sent. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.
+Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the QA approvals waiting to merge and the needs-human notices already sent. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.

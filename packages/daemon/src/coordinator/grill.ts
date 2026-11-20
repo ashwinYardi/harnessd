@@ -278,7 +278,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     if (escalation) {
       step = "move the issue to Needs input";
       await deps.linear.moveTo(issue.id, "Needs input");
-      step = "send the ping";
+      step = "send the notice";
       await deps.notifier.notify(grillNotice(issue, escalation));
     }
   } catch (error) {

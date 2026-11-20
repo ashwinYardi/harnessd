@@ -279,7 +279,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       linear.moveTo(target.id, "Needs input"),
     );
     const issue = target.url ? { key: target.key, url: target.url } : { key: target.key };
-    await safely("send the ping", () =>
+    await safely("send the notice", () =>
       notifier.notify({ kind: "needs_input", issue, prs: [], reason, detail: summary }),
     );
   }

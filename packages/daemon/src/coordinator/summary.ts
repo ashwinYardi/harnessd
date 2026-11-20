@@ -10,6 +10,7 @@ import {
   type NoticeIssue,
   type Notifier,
   slackEscape,
+  slackIssue,
   slackNoticeText,
 } from "./notifier.ts";
 
@@ -115,9 +116,7 @@ export function formatSummary(
   const running =
     inProgress.length === 0
       ? "*In progress*: none"
-      : `*In progress (${inProgress.length})*: ${inProgress
-          .map((i) => (i.url ? `<${i.url}|${slackEscape(i.key)}>` : slackEscape(i.key)))
-          .join(", ")}`;
+      : `*In progress (${inProgress.length})*: ${inProgress.map(slackIssue).join(", ")}`;
   return [
     head,
     ...section(

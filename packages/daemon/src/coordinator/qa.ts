@@ -726,7 +726,7 @@ export async function settleQa(
     );
     const failing = result.reviews.filter((r) => r.decision !== "approve");
     const keys = failing.map((r) => r.part.key);
-    await safely("send the ping", () =>
+    await safely("send the notice", () =>
       deps.notifier.notify({
         kind: "needs_input",
         issue: { key: parent.key, url: parent.url },

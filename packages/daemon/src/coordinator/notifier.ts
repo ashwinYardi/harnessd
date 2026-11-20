@@ -84,7 +84,8 @@ export function slackLink(url: string, label: string): string {
   return `<${url.replace(/[<>|\s]/g, "")}|${slackEscape(label)}>`;
 }
 
-function slackIssue(i: NoticeIssue): string {
+/** The issue key as a Slack link, or the bare key without a url. */
+export function slackIssue(i: NoticeIssue): string {
   return i.url === undefined ? slackEscape(i.key) : slackLink(i.url, i.key);
 }
 
