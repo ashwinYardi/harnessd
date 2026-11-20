@@ -1,4 +1,4 @@
-// Notices: one line to the owner per merge or block (D-015, D-020). See GLOSSARY.md.
+// Notices: one line to the owner per merge or block (D-015, D-021). See GLOSSARY.md.
 
 /** A Linear issue a notice links. */
 export interface NoticeIssue {

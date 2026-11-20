@@ -7,7 +7,7 @@ harnessd reads two folders with the same shape (D-004): `~/.harnessd/` (global, 
   config.toml           settings, all optional
   AGENTS.md             instructions for every agent
   rules/<name>.md       one rule per file; the name is the file name
-  skills/<folder>/SKILL.md
+  skills/<folder>/SKILL.md  plus any other files the skill uses
   agents/<name>.md      one agent per file
   vault/                memory notes, served over MCP (docs/MEMORY.md)
 ```
@@ -23,7 +23,7 @@ qa_max_failures = 2
 team_id = "MET"
 project = "harnessd"
 
-[slack]                     # Slack #harnessd (D-015, D-020, docs/INSTALL.md "Slack")
+[slack]                     # Slack #harnessd (D-015, D-021, docs/INSTALL.md "Slack")
 channel = "#harnessd"       # a label only: the webhook fixes the channel
 summary_time = "21:00"      # the daily summary, 24-hour "HH:MM"
 time_zone = "Asia/Kolkata"  # an IANA time zone
@@ -47,6 +47,11 @@ harness = "claude-code"     # claude-code | codex | antigravity | opencode | cur
 model = "opus"              # optional, passed to the harness
 avatar = "avatars/backend.png"  # optional: path in this .harnessd/ folder, or a URL
 instructions = "..."        # optional
+
+[skills.tdd]                # one table per skill; see "Skills" below
+upstream = "mattpocock/skills"    # written by harnessd init for each default skill
+commit = "abeeaf95660ba9e8b7c753eb38f441ca707a8823"
+enabled = false             # optional: drop the skill from this layer on
 
 [mcp.docs]                  # a stdio MCP server for every harness (see docs/SYNC.md)
 command = "npx"             # required
@@ -81,13 +86,35 @@ You own the API layer.
 An agent may be defined in both config.toml and `agents/<name>.md` of the same folder, but each field (and the instructions) only once per folder.
 
 ## skills/<folder>/SKILL.md
-Optional frontmatter with `name` (defaults to the folder name) and `description`. Other frontmatter keys are ignored. The frontmatter is flat `key: value` lines; indented lines continue the previous value.
+Optional frontmatter with `name` (defaults to the folder name) and `description`. Sync copies other frontmatter keys (such as `disable-model-invocation`) as they are. The frontmatter is flat `key: value` lines; indented lines continue the previous value. Sync copies every other file in the folder too.
+
+## Skills
+`harnessd init` installs the default skill pack (D-016) into `~/.harnessd/skills/`. The pack is part of the `@harnessd/cli` package, so init needs no network.
+
+| Skills | Upstream | Licence |
+|---|---|---|
+| code-review, codebase-design, diagnosing-bugs, domain-modeling, grill-with-docs, grilling, implement, improve-codebase-architecture, prototype, research, tdd, to-spec, to-tickets | mattpocock/skills | MIT |
+| impeccable | pbakaus/impeccable | Apache 2.0 |
+
+The commits are in `.claude/skills/VENDORED.md`. Each folder is the whole upstream skill: SKILL.md, reference files, scripts and `agents/`. Each folder has its upstream licence as `LICENSE` (impeccable also has `NOTICE.md`). Each folder also has a `.harnessd-pack` marker with the upstream and commit. Sync does not copy the marker.
+
+**Pins.** For each default skill without a `[skills.<name>]` table, init appends one to the global config.toml, with `upstream` and `commit`. init adds only new tables; it never changes your text. init installs or replaces a skill folder only when the pin names the commit that this harnessd ships. So a newer `@harnessd/cli` never changes a skill until you change its pin:
+- If the pin is older than the shipped commit, init keeps the folder and prints the `commit` to set.
+- To update, set `commit` to the printed value and run `harnessd init` again.
+- init reads pins from the global file only.
+- A table without `commit` (only `enabled = false`, say) gets no pin. init then installs nothing for that skill and prints the `commit` to add.
+
+**Your own folders.** A folder in `~/.harnessd/skills/` without the marker is yours. init never changes it and gives it no pin.
+
+**Turn a skill off.** Set `enabled = false` in `[skills.<name>]`. A later layer can set `enabled = true` again. Use the workspace file to turn off a default skill in one repo. A table for a skill that is not installed is not an error, because the global pack can differ between machines.
+
+`[skills.<name>]` keys: `enabled` (true or false), `upstream`, `commit` and `version` (strings). Each key is optional.
 
 ## Merge rules
 Order: defaults, then global, then workspace, then the agent.
 - Scalars override. Arrays (such as `protected_paths`) replace. Tables deep-merge.
 - Agent fields (`role`, `harness`, `model`, `avatar`) override per layer.
-- Rules, skills and MCP servers merge by name; the workspace wins. An `[mcp.<name>]` table is replaced whole, not deep-merged.
+- Rules, skills and MCP servers merge by name; the workspace wins. A skill with `enabled = false` in the last layer that sets `enabled` is dropped. An `[mcp.<name>]` table is replaced whole, not deep-merged.
 - An agent's instruction text is global AGENTS.md, workspace AGENTS.md, then the agent's own instructions from global and then workspace, joined by blank lines.
 
 Errors name the file and the key: `~/.harnessd/config.toml: agents.backend.harness: expected one of claude-code, codex, antigravity, opencode, cursor, grok, got "vim"`.

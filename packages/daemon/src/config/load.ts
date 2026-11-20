@@ -5,6 +5,7 @@ import { join, resolve, sep } from "node:path";
 import {
   type AgentLayerEntry,
   ConfigError,
+  type ConfigFile,
   type ConfigLayer,
   type ConfigScope,
   type MergedConfig,
@@ -74,6 +75,25 @@ async function listOptional(path: string): Promise<Dirent[]> {
   }
 }
 
+/** The marker init writes in each default skill folder (docs/CONFIG.md "Skills"). */
+export const PACK_MARKER = ".harnessd-pack";
+
+/** Every file in a skill folder but SKILL.md and the pack marker, `/`-separated and sorted. */
+async function skillFiles(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  async function walk(rel: string) {
+    const entries = await readdir(join(dir, rel), { withFileTypes: true });
+    for (const ent of entries) {
+      const path = rel === "" ? ent.name : `${rel}/${ent.name}`;
+      if (path === "SKILL.md" || path === PACK_MARKER) continue;
+      if (ent.isDirectory()) await walk(path);
+      else if (ent.isFile()) out.push(path);
+    }
+  }
+  await walk("");
+  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+}
+
 function parseToml(text: string, label: string): unknown {
   try {
     return parse(text);
@@ -88,6 +108,11 @@ function parseToml(text: string, label: string): unknown {
     }
     throw e;
   }
+}
+
+/** Parses and validates config.toml text. `label` names the file in errors. */
+export function parseConfigText(text: string, label: string): ConfigFile {
+  return parseConfigFile(parseToml(text, label), label);
 }
 
 /** Loads one `.harnessd/` folder. See docs/CONFIG.md for the layout. */
@@ -105,6 +130,7 @@ export async function loadLayer(
     rules: [],
     skills: [],
     mcp: {},
+    skillSettings: {},
   };
 
   // config.toml
@@ -112,9 +138,10 @@ export async function loadLayer(
   const configText = await readOptional(configPath);
   if (configText !== undefined) {
     const label = show(configPath);
-    const { agents, mcp, ...settings } = parseConfigFile(parseToml(configText, label), label);
+    const { agents, mcp, skills, ...settings } = parseConfigText(configText, label);
     layer.settings = settings;
     layer.mcp = mcp ?? {};
+    layer.skillSettings = skills ?? {};
     for (const [name, def] of Object.entries(agents ?? {})) {
       const { instructions, ...rest } = def;
       const entry: AgentLayerEntry = { ...rest, label, keyPrefix: `agents.${name}` };
@@ -177,7 +204,7 @@ export async function loadLayer(
     const label = show(path);
     const text = await readOptional(path);
     if (text === undefined) throw new ConfigError(label, undefined, "missing SKILL.md");
-    const { data, body } = parseFrontmatter(text, label);
+    const { data, lines, body } = parseFrontmatter(text, label);
     const name = data.name?.trim() || ent.name;
     const clash = seen.get(name);
     if (clash !== undefined) {
@@ -187,6 +214,12 @@ export async function loadLayer(
     const skill: Skill = { name, dir: skillDir, source: path, body: body.trim() };
     const description = data.description?.trim();
     if (description) skill.description = description;
+    const extra = Object.entries(lines)
+      .filter(([key]) => key !== "name" && key !== "description")
+      .flatMap(([, l]) => l);
+    if (extra.length > 0) skill.frontmatter = extra;
+    const files = await skillFiles(skillDir);
+    if (files.length > 0) skill.files = files;
     layer.skills.push(skill);
   }
 

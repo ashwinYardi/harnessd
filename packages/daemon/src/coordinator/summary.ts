@@ -1,4 +1,4 @@
-// The daily summary (D-015, D-020): one Slack message a day at `slack.summary_time` in
+// The daily summary (D-015, D-021): one Slack message a day at `slack.summary_time` in
 // `slack.time_zone`. It lists the merges and blocks noticed since the last summary and
 // the work in progress now. State lives in `<repo>/.harnessd/state/summary.json`, so a
 // summary missed while the daemon was off goes out once at the next start.

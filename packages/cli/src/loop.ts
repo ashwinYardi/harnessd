@@ -200,7 +200,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     const pause = await pauseStore.read();
     if (pause.paused) io.out(pausedLine(pause.since, pause.reason));
     io.out(`harnessd run: ${visibility.status}`);
-    // A summary missed while the daemon was off goes out now, once (D-020).
+    // A summary missed while the daemon was off goes out now, once (D-021).
     await visibility.checkSummary();
     const summaries = parsed.once
       ? undefined

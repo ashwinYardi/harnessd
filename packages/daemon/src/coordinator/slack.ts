@@ -1,4 +1,4 @@
-// The Slack notifier (D-015, D-020): an incoming webhook over plain HTTPS, no SDK.
+// The Slack notifier (D-015, D-021): an incoming webhook over plain HTTPS, no SDK.
 //
 // `notify` and `post` only queue a message and return, so the loop never waits on Slack.
 // One message is sent at a time. A 5xx, a 429 or a network error is retried with
@@ -6,7 +6,7 @@
 // message with one log line. The webhook url is a secret: it never reaches a log.
 import { type Notice, type Notifier, slackNoticeText } from "./notifier.ts";
 
-/** Read at the edge only; never written to disk or logs (D-020). */
+/** Read at the edge only; never written to disk or logs (D-021). */
 export const SLACK_WEBHOOK_ENV = "HARNESSD_SLACK_WEBHOOK_URL";
 
 /** The part of `fetch` the notifier uses. */

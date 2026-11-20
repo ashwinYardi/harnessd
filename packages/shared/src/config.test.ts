@@ -54,7 +54,7 @@ test("unknown keys are rejected with their path", () => {
   );
   rejects(
     { colour: "red" },
-    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, daemon, agents, mcp`,
+    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, daemon, agents, mcp, skills`,
   );
   rejects(
     { limits: { budget_minutes: { L: 300 } } },
@@ -182,4 +182,25 @@ test("mcp servers are validated with their path", () => {
     `${FILE}: mcp.my docs: server names may only use letters, digits, _ and -`,
   );
   rejects({ mcp: [] }, `${FILE}: mcp: expected a table, got an array`);
+});
+
+test("skill tables take enabled, upstream, commit and version", () => {
+  const skills = {
+    tdd: { upstream: "mattpocock/skills", commit: "abeeaf95660ba9e8b7c753eb38f441ca707a8823" },
+    impeccable: { upstream: "pbakaus/impeccable", commit: "b49177d", version: "4.10.0" },
+    research: { enabled: false },
+  };
+  assert.deepEqual(parseConfigFile({ skills }, FILE), { skills });
+  rejects(
+    { skills: { tdd: { enabled: "no" } } },
+    `${FILE}: skills.tdd.enabled: expected true or false, got "no"`,
+  );
+  rejects(
+    { skills: { tdd: { pin: "x" } } },
+    `${FILE}: skills.tdd.pin: unknown key, expected one of enabled, upstream, commit, version`,
+  );
+  rejects(
+    { skills: { tdd: { commit: "" } } },
+    `${FILE}: skills.tdd.commit: expected a non-empty string`,
+  );
 });

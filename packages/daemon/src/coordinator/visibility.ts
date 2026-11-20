@@ -1,4 +1,4 @@
-// Slack #harnessd for one `harnessd run` (D-015, D-020): the notifier the loop uses and
+// Slack #harnessd for one `harnessd run` (D-015, D-021): the notifier the loop uses and
 // the daily summary. Without HARNESSD_SLACK_WEBHOOK_URL it is NullNotifier, and `status`
 // is the one warning to log.
 import type { SlackConfig } from "@harnessd/shared";

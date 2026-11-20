@@ -588,6 +588,7 @@ test("max_concurrent and budget_minutes come from the config", async () => {
       rules: [],
       skills: [],
       mcp: {},
+      skillSettings: {},
     },
   ]);
   const t = setup({ config });
@@ -1081,6 +1082,7 @@ test("a refused merge waits for a human; the merge method and label come from [m
       rules: [],
       skills: [],
       mcp: {},
+      skillSettings: {},
     },
   ]);
   const t = setup({ config });

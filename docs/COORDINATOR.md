@@ -14,7 +14,7 @@ Before any work starts, the coordinator grills each picked issue itself (SPEC "A
 | `context` | `loadGrillContext(repo)`: `docs/SPEC.md` and `docs/decisions/*.md`. |
 | `cwd` | The repo. The model may read code and `.harnessd/vault/`; it must not edit. |
 | `linear` | `comment(issueId, body)` and `moveTo(issueId, state)`. `LinearClient` fits. |
-| `notifier` | `Notifier { notify(notice) }`: Slack #harnessd, or `NullNotifier` without a webhook (D-020). |
+| `notifier` | `Notifier { notify(notice) }`: Slack #harnessd, or `NullNotifier` without a webhook (D-021). |
 | `decisions` | `DecisionSink { write(note) }`. `createFileDecisionSink(vault)` is the default. |
 
 ## Model reply

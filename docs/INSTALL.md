@@ -37,12 +37,13 @@ Steps:
 
    It runs them only with `--yes` or after an interactive yes. With no terminal and no `--yes`, it installs nothing and says so. Login stays with each CLI: run `claude` and `codex` once yourself.
 2. **Config.** It writes `~/.harnessd/config.toml` (`$HARNESSD_HOME/config.toml` when set), a commented template, only if the file is absent. An existing file is never touched ("kept existing"). It also creates `~/.harnessd/logs/`.
-3. **Service (macOS only).** It writes `~/Library/LaunchAgents/dev.harnessd.daemon.plist`, then runs `launchctl bootstrap gui/$UID <plist>`.
+3. **Skills.** It installs the default skill pack into `~/.harnessd/skills/` and appends a `[skills.<name>]` pin for each new skill to config.toml. It keeps existing skills and pins. See docs/CONFIG.md "Skills".
+4. **Service (macOS only).** It writes `~/Library/LaunchAgents/dev.harnessd.daemon.plist`, then runs `launchctl bootstrap gui/$UID <plist>`.
    - If the plist is unchanged and already loaded, nothing happens.
    - If the plist changed and the service is loaded, it runs `launchctl bootout gui/$UID/dev.harnessd.daemon` first.
    - On Linux, or with `--no-service`, it prints that the service is skipped.
 
-The exit code is 0 when everything it tried worked, even if you declined an install; the last line lists what is not installed. It is 1 when an install or `launchctl` failed, and 2 for a usage error.
+The exit code is 0 when everything it tried worked, even if you declined an install; the last line lists what is not installed. It is 1 when an install, the skills step or `launchctl` failed, and 2 for a usage error.
 
 ## The launchd service
 | | |
@@ -64,7 +65,7 @@ launchctl kickstart -k gui/$(id -u)/dev.harnessd.daemon
 Until the key is set, the service logs the missing-key error to `daemon.err.log` and retries every 30 s. `launchctl setenv` does not survive a reboot.
 
 ### Slack
-harnessd posts to Slack **#harnessd** through an incoming webhook (D-015, D-020). Without one it posts nothing, logs one warning at start and works as before.
+harnessd posts to Slack **#harnessd** through an incoming webhook (D-015, D-021). Without one it posts nothing, logs one warning at start and works as before.
 1. In Slack, create an app for your workspace, turn on **Incoming Webhooks** and add a webhook for #harnessd. Copy its url.
 2. Give the url to launchd, then restart the service:
    ```sh
