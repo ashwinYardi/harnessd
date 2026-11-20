@@ -1,5 +1,6 @@
 // The services harnessd works with, and the logo each one shows (D-029). Paths come from
 // Simple Icons; only the icons used are imported, so the build carries six paths.
+import type { HarnessId } from "@harnessd/shared";
 import { siClaude, siGit, siGithub, siLinear } from "simple-icons";
 import { OPENAI_PATH, SLACK_PATH } from "./service-paths.ts";
 
@@ -30,11 +31,11 @@ export const SERVICES: Record<ServiceId, Service> = {
   },
 };
 
-const HARNESS: Record<string, ServiceId> = { "claude-code": "claude", codex: "openai" };
+const HARNESS: Partial<Record<HarnessId, ServiceId>> = { "claude-code": "claude", codex: "openai" };
 
 /** The logo of the company that makes a harness CLI, if harnessd has one. */
 export function harnessService(harness: string): ServiceId | undefined {
-  return HARNESS[harness];
+  return HARNESS[harness as HarnessId];
 }
 
 const CONNECTION: Record<string, ServiceId> = {

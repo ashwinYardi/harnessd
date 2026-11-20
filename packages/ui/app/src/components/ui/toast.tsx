@@ -78,7 +78,7 @@ function ToastProvider({ children }: { children: ReactNode }) {
       <ToastPrimitive.Portal data-slot="toast-portal">
         <ToastPrimitive.Viewport
           aria-label="Notifications"
-          className="fixed right-4 bottom-4 z-100 flex w-[calc(100%-2rem)] max-w-sm flex-col-reverse gap-2 outline-none"
+          className="fixed right-4 bottom-4 z-100 flex w-[calc(100%-2rem)] max-w-90 flex-col-reverse gap-2 outline-none"
           data-slot="toast-viewport"
         >
           <ToastList />

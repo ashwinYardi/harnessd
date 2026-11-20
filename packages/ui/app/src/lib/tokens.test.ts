@@ -46,6 +46,17 @@ test("the accent is one --brand line, and primary and ring read it", () => {
   assert.doesNotMatch(others, /oklch\(/, "no other chromatic oklch outside --brand");
 });
 
+test("the brand as a focus ring keeps 3:1 against the page in light and dark", () => {
+  // The page is zinc-25 (oklch 99.2% 0 0) in light and #000 in dark.
+  const page = { light: luminance(0.992, 0, 0), dark: 0 };
+  for (const [theme, [l, c, h]] of Object.entries(brandArms())) {
+    const y = luminance(l, c, h);
+    const bg = page[theme as "light" | "dark"];
+    const ratio = (Math.max(y, bg) + 0.05) / (Math.min(y, bg) + 0.05);
+    assert.ok(ratio >= 3, `${theme}: ${ratio.toFixed(2)}:1`);
+  }
+});
+
 test("white text on the brand fill meets WCAG AA (4.5:1) in light and dark", () => {
   assert.match(css, /--brand-foreground:\s*var\(--color-white\);/);
   for (const [theme, [l, c, h]] of Object.entries(brandArms())) {

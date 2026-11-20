@@ -60,7 +60,7 @@ function Choice({
   onChange,
   invalid,
   describedBy,
-  show = (o) => o,
+  renderOption = (o) => o,
 }: {
   label: string;
   value: string;
@@ -69,7 +69,7 @@ function Choice({
   invalid: boolean;
   describedBy: string | undefined;
   /** How an option reads in the list and the trigger. */
-  show?: (option: string) => React.ReactNode;
+  renderOption?: (option: string) => React.ReactNode;
 }) {
   return (
     <Select value={value} onValueChange={(v) => onChange(String(v))}>
@@ -80,12 +80,12 @@ function Choice({
         size="sm"
         className="min-w-0"
       >
-        <SelectValue>{(v: string) => show(v)}</SelectValue>
+        <SelectValue>{(v: string) => renderOption(v)}</SelectValue>
       </SelectTrigger>
       <SelectContent>
         {options.map((o) => (
           <SelectItem key={o} value={o}>
-            {show(o)}
+            {renderOption(o)}
           </SelectItem>
         ))}
       </SelectContent>
@@ -271,7 +271,7 @@ export function Team() {
                           label={`Harness of ${row.name || "the new agent"}`}
                           onChange={(v) => update(i, { harness: v })}
                           options={HARNESSES}
-                          show={(h) => <HarnessName harness={h} />}
+                          renderOption={(h) => <HarnessName harness={h} />}
                           value={row.harness}
                         />
                       </Field>
