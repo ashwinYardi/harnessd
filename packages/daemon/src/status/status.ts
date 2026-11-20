@@ -82,6 +82,8 @@ export interface StatusOptions {
   /** This process serves the API on daemon.port, so the port is in use by design. */
   servingPort?: boolean;
   knownBadVersions?: readonly KnownBadVersion[];
+  /** Runs only the checks of these harnesses, whether an agent uses them or not (MET-28). */
+  harnessesOnly?: readonly HarnessId[];
 }
 
 export function isBlocking(check: Check): boolean {
@@ -140,12 +142,22 @@ function run(
   return ctx.exec(cmd, args, { cwd: ctx.o.repoDir, env: ctx.env, timeoutMs: left });
 }
 
-/** The binary that `envBin` names when set, else `bin` on PATH; or why there is none. */
+/**
+ * The binary `[harnesses.<id>] bin` names in the config, else the one `envBin` names, else
+ * `bin` on PATH; or why there is none.
+ */
 async function locate(
   ctx: Ctx,
   bin: string,
   envBin: string,
+  harness?: HarnessId,
 ): Promise<{ path: string } | { absent: string }> {
+  const configured = harness ? ctx.config?.harnesses[harness]?.bin : undefined;
+  if (configured) {
+    return (await ctx.isExec(configured))
+      ? { path: configured }
+      : { absent: `${configured} (harnesses.${harness}.bin) is not executable` };
+  }
   const override = ctx.env[envBin]?.trim();
   if (override) {
     return (await ctx.isExec(override))
@@ -225,6 +237,19 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
   },
 };
 
+/**
+ * The npm package and the sign-in command of a harness, for the fixed setup commands the
+ * app runs (MET-28). Undefined for a harness harnessd has no checks for yet.
+ */
+export function harnessSetupSpec(
+  harness: HarnessId,
+): { pkg: string; login: string; bin: string } | undefined {
+  const spec = HARNESS_SPECS[harness];
+  return spec
+    ? { pkg: spec.pkg, login: spec.login.replace(/^Run: /, ""), bin: spec.bin }
+    : undefined;
+}
+
 function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
   const p = `harness.${harness}`;
   const ids = [`${p}.cli`, `${p}.auth`, `${p}.version`];
@@ -246,7 +271,7 @@ function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
   return {
     ids,
     run: async (deadline) => {
-      const found = await locate(ctx, spec.bin, spec.envBin);
+      const found = await locate(ctx, spec.bin, spec.envBin, harness);
       if ("absent" in found) {
         return [
           bad(`${p}.cli`, "missing", found.absent, install),
@@ -781,6 +806,19 @@ export async function runStatus(options: StatusOptions): Promise<Check[]> {
     a === "claude-code" ? -1 : b === "claude-code" ? 1 : a.localeCompare(b),
   );
 
+  const secrets = secretsIn(env);
+  const clean = (c: Check): Check => ({
+    ...c,
+    detail: redact(c.detail, secrets),
+    fix: redact(c.fix, secrets),
+  });
+  if (options.harnessesOnly) {
+    const only = await Promise.all(
+      options.harnessesOnly.map((h) => guarded(harnessGroup(ctx, h), timeoutMs)),
+    );
+    return only.flat().map(clean);
+  }
+
   const groups: Group[] = [
     nodeGroup(ctx),
     ...harnesses.map((h) => harnessGroup(ctx, h)),
@@ -793,10 +831,5 @@ export async function runStatus(options: StatusOptions): Promise<Check[]> {
   ];
   const results = await Promise.all(groups.map((g) => guarded(g, timeoutMs)));
   const [node = [], ...rest] = results;
-  const secrets = secretsIn(env);
-  return [...node, configCheck, ...rest.flat()].map((c) => ({
-    ...c,
-    detail: redact(c.detail, secrets),
-    fix: redact(c.fix, secrets),
-  }));
+  return [...node, configCheck, ...rest.flat()].map(clean);
 }

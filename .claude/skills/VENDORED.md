@@ -16,4 +16,4 @@ This is the setup for building harnessd itself. MET-21 adds the same pack to `ha
 ## Impeccable agents and hook
 `npx impeccable@4.10.0 install --providers=claude,codex --scope=project` added these. They are Apache 2.0, from the same commit as the skill.
 - `.claude/agents/impeccable-*.md`: the finish reviewer, motion reviewer, documenter, asset producer and manual-edit applier.
-- `.claude/settings.json`: the design hook. It runs the detector after each Edit or Write on a UI file, and a deep pass on Stop. `harnessd sync` also writes this file. Since MET-30, sync merges into it and keeps these hooks (D-026). The pack ships the same hook and agents in `impeccable/.harnessd-native/` (packages/cli/src/pack.ts). A test checks that they match the files here.
+- `.claude/settings.json`: the design hook. It runs the detector after each Edit or Write on a UI file, and a deep pass on Stop. `harnessd sync` also writes this file. Since MET-30, sync merges into it and keeps these hooks (D-027). The pack ships the same hook and agents in `impeccable/.harnessd-native/` (packages/cli/src/pack.ts). A test checks that they match the files here.

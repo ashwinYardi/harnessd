@@ -5,6 +5,9 @@
 // --static serves no live event stream, so a page scanner such as `impeccable detect <url>`
 // sees the network go idle. The page loads its data once and shows the stream as down.
 
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   agentsView,
@@ -17,6 +20,8 @@ import {
   mergeLayers,
   type PauseControl,
   type PauseState,
+  type Route,
+  setupRoutes,
   startDaemon,
   staticRoutes,
   statusRoutes,
@@ -202,41 +207,135 @@ const ui = createUiApi({
 });
 
 const ok = (id: string, detail: string): Check => ({ id, state: "ok", detail, fix: "" });
-const CHECKS = (): Check[] => [
-  ok("node", "v24.11.0 (/opt/homebrew/bin/node)"),
-  ok("config", "4 agents"),
-  setup
-    ? {
+// --setup starts with Claude Code missing and Codex signed out; Install fixes the first.
+let claudeInstalled = !setup;
+const harnessChecks = (): Check[] => [
+  claudeInstalled
+    ? ok("harness.claude-code.cli", "2.1.4 (Claude Code) (/opt/homebrew/bin/claude)")
+    : {
         id: "harness.claude-code.cli",
         state: "missing",
         detail: "claude is not on PATH",
         fix: "Install it: npm i -g @anthropic-ai/claude-code",
-      }
-    : ok("harness.claude-code.cli", "2.1.4 (Claude Code) (/opt/homebrew/bin/claude)"),
-  setup
-    ? {
+      },
+  claudeInstalled
+    ? ok("harness.claude-code.auth", "signed in (claude.ai)")
+    : {
         id: "harness.claude-code.auth",
         state: "missing",
         detail: "not checked",
         fix: "Fix harness.claude-code.cli first.",
-      }
-    : ok("harness.claude-code.auth", "signed in (claude.ai)"),
+      },
+  claudeInstalled
+    ? ok("harness.claude-code.version", "2.1.4 has no known problems")
+    : {
+        id: "harness.claude-code.version",
+        state: "missing",
+        detail: "not checked",
+        fix: "Fix harness.claude-code.cli first.",
+      },
+  ok("harness.codex.cli", "codex-cli 0.60.0 (/opt/homebrew/bin/codex)"),
+  setup
+    ? { id: "harness.codex.auth", state: "fail", detail: "not signed in", fix: "Run: codex login" }
+    : ok("harness.codex.auth", "signed in"),
+  {
+    id: "harness.codex.version",
+    state: "warn",
+    detail: "0.60.0 is known bad: drops tool output over 1 MB",
+    fix: "Update it: npm i -g @openai/codex@latest",
+  },
+];
+const CHECKS = (): Check[] => [
+  ok("node", "v24.11.0 (/opt/homebrew/bin/node)"),
+  ok("config", "5 agents"),
+  // The demo team has qa on Codex, so the real engine would check both harnesses.
+  ...harnessChecks(),
   ok("github.cli", "gh 2.83.0"),
   ok("github.auth", "signed in as demo-owner"),
   ok("github.push", "demo/harnessd: WRITE"),
   ok("github.ci", "main requires: ci"),
-  ok("linear.key", "HARNESSD_LINEAR_API_KEY is set"),
-  ok("linear.team", "MET"),
-  ok("linear.states", "Ready, In Progress, In Review, Done, Needs input"),
+  setup
+    ? {
+        id: "linear.key",
+        state: "missing",
+        detail: "LINEAR_API_KEY is not set",
+        fix: "Create a personal API key in Linear, then: export LINEAR_API_KEY=lin_api_...",
+      }
+    : ok("linear.key", "LINEAR_API_KEY is set"),
+  setup
+    ? { id: "linear.team", state: "missing", detail: "not checked", fix: "Fix linear.key first." }
+    : ok("linear.team", "MET"),
+  setup
+    ? { id: "linear.states", state: "missing", detail: "not checked", fix: "Fix linear.key first." }
+    : ok("linear.states", "Ready, In Progress, In Review, Done, Needs input"),
   {
     id: "slack.webhook",
     state: "warn",
     detail: "HARNESSD_SLACK_WEBHOOK_URL is not set",
-    fix: "Set HARNESSD_SLACK_WEBHOOK_URL in ~/.zprofile to post merges and blocks.",
+    fix: "Set HARNESSD_SLACK_WEBHOOK_URL to post merges and blocks to Slack.",
   },
   ok("git.worktrees", "3 worktrees in /Users/demo/harnessd"),
   ok("daemon.port", "4848 is served by this daemon"),
   ok("skills.pack", "16 of 16 skills in place"),
+];
+const blocking = () =>
+  CHECKS()
+    .filter((c) => c.state === "fail" || c.state === "missing")
+    .map((c) => c.id);
+
+// A throwaway repo and global folder, so Settings → Team writes real files.
+const scratch = await mkdtemp(join(tmpdir(), "harnessd-demo-"));
+const repoDir = join(scratch, "repo");
+const globalDir = join(scratch, "global");
+await mkdir(join(repoDir, ".harnessd"), { recursive: true });
+await mkdir(globalDir, { recursive: true });
+await writeFile(
+  join(repoDir, ".harnessd", "config.toml"),
+  '# Demo workspace.\n[linear]\nteam_id = "MET"\n\n# QA runs on Codex.\n[agents.qa]\nharness = "codex"\nmodel = "gpt-5"\n\n# Writes the docs.\n[agents.docs]\nrole = "frontend"\nharness = "claude-code"\n',
+);
+const setupApi = setupRoutes({
+  repoDir,
+  globalDir,
+  env: {},
+  platform: "darwin",
+  checks: async (o) => {
+    await sleep(300);
+    return o.harnessesOnly ? harnessChecks() : CHECKS();
+  },
+  isExecutable: async (p) => p.startsWith("/opt/"),
+  sync: async () => ({ changed: ["AGENTS.md", ".claude/agents/docs.md"], skipped: [] }),
+  // Synthetic output; nothing is installed.
+  runner: async (cmd, args, onLine) => {
+    const lines =
+      cmd === "osascript"
+        ? []
+        : ["npm warn deprecated inflight@1.0.6", "added 3 packages in 4s", "changed 1 package"];
+    for (const line of lines) {
+      await sleep(700);
+      onLine(line);
+    }
+    if (args.includes("@anthropic-ai/claude-code")) claudeInstalled = true;
+    return 0;
+  },
+});
+let started = !setup;
+const loopRoutes: Route[] = [
+  {
+    method: "GET",
+    path: "/api/loop",
+    handler: () => ({ state: started ? "running" : "setup", blocking: started ? [] : blocking() }),
+  },
+  {
+    method: "POST",
+    path: "/api/start",
+    handler: () => {
+      const now = blocking();
+      if (now.length > 0)
+        throw new HttpError(409, "setup_incomplete", `Fix these first: ${now.join(", ")}.`);
+      started = true;
+      return { state: "running", blocking: [] };
+    },
+  },
 ];
 
 const daemon = await startDaemon({
@@ -258,6 +357,8 @@ const daemon = await startDaemon({
       await sleep(400);
       return CHECKS();
     }),
+    ...setupApi.routes,
+    ...loopRoutes,
     ...(await staticRoutes(UI_DIR)),
   ],
 });

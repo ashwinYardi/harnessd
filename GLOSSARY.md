@@ -8,7 +8,7 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Pack marker**: the `.harnessd-pack` file in a skill folder that init installed. A folder without it belongs to the user.
 
-**Native folder**: the `.harnessd-native/` folder in a skill. It holds the skill's hooks (`hooks.json`) and Claude Code subagents (`claude-agents/`). Sync merges them into the harness files; it does not copy the folder (D-026).
+**Native folder**: the `.harnessd-native/` folder in a skill. It holds the skill's hooks (`hooks.json`) and Claude Code subagents (`claude-agents/`). Sync merges them into the harness files; it does not copy the folder (D-027).
 
 **Subagent**: a harness's own agent file, such as `.claude/agents/impeccable-finish-reviewer.md`. It is not a harnessd agent (coordinator, backend, frontend, qa). _Avoid_: agent, when you mean a subagent.
 
@@ -51,3 +51,7 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 **Command palette**: the dialog that Cmd+K (Ctrl+K) opens. It lists every action in the app and runs the one you pick (D-025). _Avoid_: command menu, quick open.
 
 **Optimistic pause**: the pause control shows the new state on the click, before the daemon answers, and rolls back if the call fails (DESIGN.md).
+
+**Setup**: the state of `harnessd run` when the app is served but the loop has not started, because a check blocks or Start was not pressed (D-026). _Avoid_: onboarding mode, idle.
+
+**Setup command**: one fixed command the app runs for a harness: install, update or sign in. Nothing from the request reaches it (D-026). _Avoid_: script, action.

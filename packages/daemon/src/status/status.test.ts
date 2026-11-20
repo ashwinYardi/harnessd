@@ -512,3 +512,41 @@ test("skills.pack warns when a skill's hook is missing from .claude/settings.jso
   check = byId(await runStatus(w.options), "skills.pack");
   assert.equal(check.state, "ok", check.detail);
 });
+
+test("[harnesses.<id>] bin in the config picks the binary, before the env override", async () => {
+  const w = await world('[linear]\nteam_id = "MET"\n');
+  await writeFile(
+    join(w.globalDir, "config.toml"),
+    '[harnesses.claude-code]\nbin = "/opt/claude"\n',
+  );
+  w.bins.add("/opt/claude");
+  w.replies.set("/opt/claude --version", ok("2.1.0 (Claude Code)"));
+  w.replies.set("/opt/claude auth status --json", ok('{"loggedIn":true}'));
+  const checks = await runStatus({
+    ...w.options,
+    env: { ...w.options.env, HARNESSD_CLAUDE_BIN: "/bin/claude" },
+  });
+  assert.equal(byId(checks, "harness.claude-code.cli").detail, "2.1.0 (Claude Code) (/opt/claude)");
+
+  await writeFile(join(w.globalDir, "config.toml"), '[harnesses.claude-code]\nbin = "/opt/none"\n');
+  const missing = byId(await runStatus(w.options), "harness.claude-code.cli");
+  assert.equal(missing.state, "missing");
+  assert.equal(missing.detail, "/opt/none (harnesses.claude-code.bin) is not executable");
+});
+
+test("harnessesOnly runs just those harness checks, used by an agent or not", async () => {
+  const w = await world();
+  const checks = await runStatus({ ...w.options, harnessesOnly: ["claude-code", "codex"] });
+  assert.deepEqual(
+    checks.map((c) => c.id),
+    [
+      "harness.claude-code.cli",
+      "harness.claude-code.auth",
+      "harness.claude-code.version",
+      "harness.codex.cli",
+      "harness.codex.auth",
+      "harness.codex.version",
+    ],
+  );
+  assert.ok(!w.calls.some((c) => c.startsWith("/bin/gh")), "no GitHub call");
+});

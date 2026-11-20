@@ -31,7 +31,7 @@ A skill can ship harness files in a `.harnessd-native/` folder. Sync does not co
 - `.harnessd-native/hooks.json`: `{ "claude": {...}, "codex": {...} }`. Each value is a `hooks` table: event name to matcher groups, as in `.claude/settings.json`.
 - `.harnessd-native/claude-agents/<name>.md`: Claude Code subagents.
 
-In the default skill pack, impeccable has both (D-026):
+In the default skill pack, impeccable has both (D-027):
 - Claude Code hooks: `SessionStart`, `PostToolUse` on `Edit|Write` and `Stop`. Each runs `.claude/skills/impeccable/scripts/impeccable hook`.
 - Codex hooks: `PostToolUse` on `Edit|Write|apply_patch` and `Stop`. Each runs `.agents/skills/impeccable/scripts/impeccable hook`. Codex asks you to approve the hook in `/hooks` the first time.
 - Subagents: `impeccable-finish-reviewer`, `impeccable-motion-reviewer`, `impeccable-documenter`, `impeccable-asset-producer` and `impeccable-manual-edit-applier`.

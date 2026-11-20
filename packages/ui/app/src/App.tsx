@@ -4,12 +4,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHarnessd } from "./api.ts";
 import { CommandPalette } from "./components/ui/command.tsx";
 import { SidebarInset } from "./components/ui/sidebar.tsx";
+import { useLoop } from "./hooks/useLoop.ts";
 import { usePause } from "./hooks/usePause.ts";
 import { useRoute } from "./hooks/useRoute.ts";
+import { useStatus } from "./hooks/useStatus.ts";
 import { type Theme, useTheme } from "./hooks/useTheme.ts";
 import { needsYou } from "./lib/board.ts";
 import type { Command } from "./lib/commands.ts";
 import type { View } from "./lib/route.ts";
+import { firstRoute, type SettingsPage } from "./lib/route.ts";
+import { blockingAreas, startState } from "./lib/setup.ts";
 import { goToView, isPaletteShortcut, isTypingTarget } from "./lib/shortcut.ts";
 import { AppHeader } from "./shell/AppHeader.tsx";
 import { AppSidebar } from "./shell/AppSidebar.tsx";
@@ -17,7 +21,7 @@ import { NAV } from "./shell/nav.ts";
 import { Agents } from "./views/Agents.tsx";
 import { Board } from "./views/Board.tsx";
 import { Logs } from "./views/Logs.tsx";
-import { Settings, useStatus } from "./views/Settings.tsx";
+import { Settings } from "./views/settings/Settings.tsx";
 
 /** One clock for every elapsed time on the page, so they tick together. */
 function useNow(ms = 1000): Date {
@@ -40,6 +44,23 @@ export function App() {
   const { theme, setTheme } = useTheme();
   const pause = usePause(api.pause, api.setPause);
   const status = useStatus();
+  const loop = useLoop();
+  const { refresh: refreshLoop } = loop;
+
+  // First launch: a blocking check opens the Settings page that fixes it (MET-28).
+  const opened = useRef(false);
+  useEffect(() => {
+    if (opened.current || !loop.loop) return;
+    opened.current = true;
+    const to = firstRoute(location.hash, loop.loop);
+    if (to) go(to);
+  }, [loop.loop, go]);
+
+  // A recheck may clear the last blocker, so the loop state is read again with it.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs on each new status
+  useEffect(() => {
+    void refreshLoop();
+  }, [status.status, refreshLoop]);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const { recheck } = status;
 
@@ -52,10 +73,9 @@ export function App() {
     api.agents.status === "ready"
       ? api.agents.data.agents.reduce((n, a) => n + a.runs.length, 0)
       : undefined;
+  // Things to fix, not checks: a harness or a connection counts once (MET-28).
   const failingChecks =
-    status.status.status === "ready"
-      ? status.status.data.filter((c) => c.state === "fail" || c.state === "missing").length
-      : 0;
+    status.status.status === "ready" ? blockingAreas(status.status.data).length : 0;
 
   const title = NAV.find((n) => n.view === route.view)?.title ?? "Board";
   useEffect(() => {
@@ -129,6 +149,27 @@ export function App() {
           run: () => goTo(view),
         }),
       ),
+      ...(["harnesses", "connections", "team"] as const).map(
+        (page): AppCommand => ({
+          id: `settings-${page}`,
+          title: `Open Settings: ${page[0]?.toUpperCase()}${page.slice(1)}`,
+          group: "Settings",
+          keywords: ["setup", "configure"],
+          disabled: route.view === "settings" && route.page === page,
+          run: () => go({ view: "settings", page: page as SettingsPage }),
+        }),
+      ),
+      ...(loop.loop?.state === "setup"
+        ? [
+            {
+              id: "start",
+              title: "Start the loop",
+              group: "Loop",
+              keywords: ["run", "begin"],
+              run: () => void loop.start(),
+            } satisfies AppCommand,
+          ]
+        : []),
       {
         id: "needs-you",
         title: "Show what needs you",
@@ -186,8 +227,11 @@ export function App() {
   }, [
     pause.view.shown.paused,
     pause.toggle,
-    route.view,
+    route,
+    go,
     goTo,
+    loop.loop?.state,
+    loop.start,
     theme,
     setTheme,
     recheck,
@@ -219,12 +263,31 @@ export function App() {
           needsYou={waiting}
           now={now}
           onShowNeedsYou={() => goTo("board")}
+          setup={
+            // On Settings the banner carries Start, so the header does not repeat it.
+            loop.loop?.state === "setup" && route.view !== "settings"
+              ? {
+                  ready: startState(
+                    status.status.status === "ready" ? status.status.data : undefined,
+                    loop.loop,
+                  ).ready,
+                  starting: loop.starting,
+                  onStart: () => void loop.start(),
+                  onFinish: () => go({ view: "settings", page: "harnesses" }),
+                }
+              : undefined
+          }
           onTogglePause={pause.toggle}
           pause={pause.view}
           pauseUnknown={pause.unknown}
           title={title}
         />
-        <main className="flex min-h-0 flex-1 flex-col" id="main" aria-label={title} tabIndex={-1}>
+        <main
+          aria-label={title}
+          className="flex min-h-0 flex-1 flex-col outline-none"
+          id="main"
+          tabIndex={-1}
+        >
           {route.view === "board" && (
             <Board
               board={api.board}
@@ -237,7 +300,7 @@ export function App() {
             <Agents agents={api.agents} now={now} retry={api.retry.agents} />
           )}
           {route.view === "logs" && <Logs logs={api.logs} retry={api.retry.logs} />}
-          {route.view === "settings" && <Settings status={status} />}
+          {route.view === "settings" && <Settings loop={loop} page={route.page} status={status} />}
         </main>
       </SidebarInset>
       <CommandPalette

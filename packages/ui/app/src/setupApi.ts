@@ -1,0 +1,49 @@
+// The Settings routes (docs/API.md, "Settings routes", MET-28).
+
+import { post, request } from "./api.ts";
+import type { Check } from "./lib/checks.ts";
+import type { LoopState } from "./lib/route.ts";
+
+export type HarnessId = "claude-code" | "codex";
+export type HarnessAction = "install" | "update" | "signin";
+
+export interface Job {
+  id: string;
+  harness: HarnessId;
+  action: HarnessAction;
+  command: string;
+  state: "running" | "ok" | "failed";
+  exitCode?: number;
+  lines: string[];
+  startedAt: string;
+}
+
+export interface HarnessCard {
+  id: HarnessId;
+  name: string;
+  /** An agent uses this harness, so its checks block the loop. */
+  required: boolean;
+  bin: string | null;
+  checks: Check[];
+  commands: Record<HarnessAction, string>;
+  job: Job | null;
+}
+
+export interface TeamAgent {
+  name: string;
+  role: string;
+  harness: string;
+  model: string;
+  removable: boolean;
+}
+
+export const readHarnesses = () => request<{ harnesses: HarnessCard[] }>("/api/harnesses");
+export const runHarnessAction = (id: HarnessId, action: HarnessAction) =>
+  post<Job>(`/api/harnesses/${id}/${action}`, {});
+export const setHarnessPath = (id: HarnessId, path: string | null) =>
+  post<{ bin: string | null }>(`/api/harnesses/${id}/path`, { path });
+export const readTeam = () => request<{ agents: TeamAgent[] }>("/api/team");
+export const saveTeam = (agents: Array<Omit<TeamAgent, "removable">>) =>
+  post<{ agents: TeamAgent[]; synced: string[]; syncError?: string }>("/api/team", { agents });
+export const readLoop = () => request<LoopState>("/api/loop");
+export const startLoop = () => post<LoopState>("/api/start", {});
