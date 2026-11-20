@@ -13,6 +13,9 @@ import {
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import type { SyncFile } from "./generate.ts";
 
+/** A file whose bytes are known: sync resolves merged settings files before writing. */
+export type WritableFile = Exclude<SyncFile, { settings: unknown }>;
+
 function inside(root: string, path: string): string {
   const full = resolve(root, path);
   const rel = relative(root, full);
@@ -36,7 +39,10 @@ async function lstatOptional(path: string) {
  * differs. Returns the changed paths in input order; an up-to-date tree gives [].
  * Files are written via a temp file and rename, so a reader never sees half a file.
  */
-export async function writeSyncFiles(root: string, files: readonly SyncFile[]): Promise<string[]> {
+export async function writeSyncFiles(
+  root: string,
+  files: readonly WritableFile[],
+): Promise<string[]> {
   const changed: string[] = [];
   for (const file of files) {
     const full = inside(root, file.path);

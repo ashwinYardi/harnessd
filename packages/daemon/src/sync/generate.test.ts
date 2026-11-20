@@ -3,7 +3,13 @@ import { test } from "node:test";
 import { ConfigError } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
 import { tomlKey, tomlString, yamlString } from "./format.ts";
-import { codexConfig, GENERATED_NOTE, generateSyncFiles, syncedMcpServers } from "./generate.ts";
+import {
+  agentMd,
+  codexConfig,
+  GENERATED_NOTE,
+  generateSyncFiles,
+  syncedMcpServers,
+} from "./generate.ts";
 
 test("generateSyncFiles lists every native file in a stable order", () => {
   const paths = generateSyncFiles(mergeLayers([])).map((f) => f.path);
@@ -48,6 +54,54 @@ test("a skill goes to Claude Code and Codex with its frontmatter and every file"
     { path: ".agents/skills/ui/LICENSE", copyFrom: "/g/skills/ui/LICENSE" },
     { path: ".agents/skills/ui/scripts/run", copyFrom: "/g/skills/ui/scripts/run" },
   ]);
+});
+
+const HOOK = { hooks: [{ type: "command", command: "scan" }] };
+
+test("a skill's hooks and agents go to Claude Code settings, the Codex hook file and .claude/agents", () => {
+  const merged = mergeLayers([]);
+  merged.skills = [
+    {
+      name: "ui",
+      dir: "/g/skills/ui",
+      source: "/g/skills/ui/SKILL.md",
+      body: "",
+      native: {
+        claudeHooks: { Stop: [HOOK] },
+        codexHooks: { Stop: [HOOK] },
+        claudeAgents: [{ name: "ui-reviewer", text: "---\nname: ui-reviewer\n---\nReview.\n" }],
+      },
+    },
+  ];
+  const files = generateSyncFiles(merged);
+  const settings = files.find((f) => f.path === ".claude/settings.json");
+  assert.ok(settings && "settings" in settings);
+  assert.deepEqual(settings.settings.hooks, { Stop: [HOOK] });
+  assert.deepEqual(Object.keys(settings.settings.keys), ["$schema", "enabledMcpjsonServers"]);
+  const codex = files.find((f) => f.path === ".codex/hooks.json");
+  assert.deepEqual(codex, {
+    path: ".codex/hooks.json",
+    settings: { keys: {}, hooks: { Stop: [HOOK] } },
+  });
+  assert.deepEqual(
+    files.find((f) => f.path === ".claude/agents/ui-reviewer.md"),
+    {
+      path: ".claude/agents/ui-reviewer.md",
+      content: `---\nname: ui-reviewer\n---\n<!-- ${GENERATED_NOTE} -->\nReview.\n`,
+    },
+  );
+});
+
+test("without a skill that has hooks, sync writes no hooks and no Codex hook file", () => {
+  const files = generateSyncFiles(mergeLayers([]));
+  const settings = files.find((f) => f.path === ".claude/settings.json");
+  assert.ok(settings && "settings" in settings);
+  assert.deepEqual(settings.settings.hooks, {});
+  assert.ok(!files.some((f) => f.path === ".codex/hooks.json"));
+});
+
+test("an agent file without frontmatter gets the note first", () => {
+  assert.equal(agentMd("Review.\n"), `<!-- ${GENERATED_NOTE} -->\nReview.\n`);
 });
 
 test("codex config writes empty env tables", () => {

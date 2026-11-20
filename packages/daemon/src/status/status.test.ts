@@ -483,6 +483,36 @@ test("a port held by a running harnessd is a warning, not a fail", async () => {
   assert.equal(check.detail, "4747 is in use by a running harnessd");
 });
 
+test("skills.pack warns when a skill's hook is missing from .claude/settings.json", async () => {
+  const w = await world();
+  const native = join(w.options.globalDir, "skills", "tdd", ".harnessd-native");
+  await mkdir(native, { recursive: true });
+  const group = { matcher: "Edit|Write", hooks: [{ type: "command", command: "scan hook" }] };
+  await writeFile(join(native, "hooks.json"), JSON.stringify({ claude: { PostToolUse: [group] } }));
+
+  let check = byId(await runStatus(w.options), "skills.pack");
+  assert.equal(check.state, "warn");
+  assert.equal(check.detail, "1 of 1 skills in place; tdd hook missing from .claude/settings.json");
+  assert.equal(check.fix, "Run: harnessd sync");
+
+  await mkdir(join(w.repoDir, ".claude"), { recursive: true });
+  await writeFile(
+    join(w.repoDir, ".claude", "settings.json"),
+    JSON.stringify({ hooks: { PostToolUse: [group] } }),
+  );
+  check = byId(await runStatus(w.options), "skills.pack");
+  assert.equal(check.state, "ok", check.detail);
+
+  // A workspace that turns the skill off expects no hook.
+  await writeFile(join(w.repoDir, ".claude", "settings.json"), "{}");
+  await writeFile(
+    join(w.repoDir, ".harnessd", "config.toml"),
+    '[linear]\nteam_id = "MET"\n\n[skills.tdd]\nenabled = false\n',
+  );
+  check = byId(await runStatus(w.options), "skills.pack");
+  assert.equal(check.state, "ok", check.detail);
+});
+
 test("[harnesses.<id>] bin in the config picks the binary, before the env override", async () => {
   const w = await world('[linear]\nteam_id = "MET"\n');
   await writeFile(

@@ -314,6 +314,16 @@ function parseMarker(text: string | undefined): SkillPin | undefined {
   }
 }
 
+/** The pack format a marker names; a marker from before formats were recorded is 1. */
+function markerFormat(text: string | undefined): number {
+  try {
+    const format = JSON.parse(text ?? "{}")?.format;
+    return typeof format === "number" ? format : 1;
+  } catch {
+    return 1;
+  }
+}
+
 /** What init does with one pack skill. Pure, so every case reads in one place. */
 type SkillPlan =
   | { action: "foreign" }
@@ -325,6 +335,8 @@ function planSkill(
   marker: SkillPin | undefined,
   table: SkillSettings | undefined,
   configFile: string,
+  /** True when the installed marker names an older pack format than this build ships. */
+  staleMarker = false,
 ): SkillPlan {
   if (present && marker === undefined) return { action: "foreign" };
   const fix = `Set skills.${skill.name}.commit = "${skill.commit}" in ${configFile}`;
@@ -345,7 +357,7 @@ function planSkill(
     return { action: marker === undefined ? "skip" : "keep", note, ...extra };
   }
   if (marker === undefined) return { action: "install", ...extra };
-  return { action: marker.commit === pinned ? "keep" : "update", ...extra };
+  return { action: marker.commit === pinned && !staleMarker ? "keep" : "update", ...extra };
 }
 
 /**
@@ -378,11 +390,14 @@ async function installSkills({ io, sys }: Step): Promise<boolean> {
   for (const skill of pack) {
     const dest = join(skillsDir, skill.name);
     const present = await sys.fs.exists(dest);
-    const marker = parseMarker(await sys.fs.read(join(dest, PACK_MARKER)));
+    const markerText = await sys.fs.read(join(dest, PACK_MARKER));
+    const marker = parseMarker(markerText);
+    const shipped = await sys.fs.read(join(sys.packDir, skill.name, PACK_MARKER));
+    const stale = markerFormat(shipped) > markerFormat(markerText);
     plans.push({
       skill,
       dest,
-      plan: planSkill(skill, present, marker, tables[skill.name], configFile),
+      plan: planSkill(skill, present, marker, tables[skill.name], configFile, stale),
     });
   }
 
