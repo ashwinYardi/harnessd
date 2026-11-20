@@ -29,3 +29,21 @@ test("file sink writes the note into the workspace vault via writeDecisionNote",
     await rm(repo, { recursive: true, force: true });
   }
 });
+
+test("file sink writes terms to glossary/ and drafts to decision-drafts/, once each", async () => {
+  const repo = await mkdtemp(join(tmpdir(), "harnessd-notes-"));
+  try {
+    const vault = workspaceVaultDir(repo);
+    const sink = createFileDecisionSink(vault);
+    const term = { issue: "MET-22", term: "Work part", definition: "A sub-issue.", avoid: [] };
+    assert.equal(await sink.term?.(term), join(vault, "glossary", "work-part.md"));
+    assert.equal(await sink.term?.(term), undefined);
+    const draft = { issue: "MET-22", title: "Vault terms", decision: "D.", why: "W." };
+    const path = await sink.draft?.(draft);
+    assert.equal(path, join(vault, "decision-drafts", "MET-22-vault-terms.md"));
+    assert.match(await readFile(path ?? "", "utf8"), /# D-NNN Vault terms\nStatus: draft /);
+    assert.equal(await sink.draft?.(draft), undefined);
+  } finally {
+    await rm(repo, { recursive: true, force: true });
+  }
+});

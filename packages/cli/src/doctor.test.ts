@@ -106,7 +106,10 @@ test("doctor runs fake CLIs and prints one dense row per check", async () => {
   assert.match(text, /^ok {6}github\.push +ADMIN on acme\/app$/m);
   assert.match(text, /^ok {6}linear\.states +Ready, In Progress, In Review, Done, Needs input$/m);
   // No Slack webhook and no skill pack here: warnings only, so doctor still passes.
-  assert.match(text, /^warn {4}slack\.webhook +SLACK_WEBHOOK_URL is not set.* {2}Create a Slack/m);
+  assert.match(
+    text,
+    /^warn {4}slack\.webhook +HARNESSD_SLACK_WEBHOOK_URL is not set.* {2}Create a Slack/m,
+  );
   assert.match(text, /^\d+ checks: \d+ ok, 2 warn, 0 fail, 0 missing$/m);
   assert.equal(code, 0, text);
   assert.doesNotMatch(text, /DOCTORSECRET/);

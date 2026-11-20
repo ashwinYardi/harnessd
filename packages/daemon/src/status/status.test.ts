@@ -80,7 +80,7 @@ async function world(config = '[linear]\nteam_id = "MET"\n') {
   const options: StatusOptions = {
     repoDir,
     globalDir,
-    env: { PATH: "/bin", LINEAR_API_KEY: LINEAR_KEY, SLACK_WEBHOOK_URL: WEBHOOK },
+    env: { PATH: "/bin", LINEAR_API_KEY: LINEAR_KEY, HARNESSD_SLACK_WEBHOOK_URL: WEBHOOK },
     nodeVersion: "v24.11.0",
     nodePath: "/bin/node",
     isExecutable: async (p) => bins.has(p),

@@ -40,12 +40,32 @@ export interface Escalation {
   why: string;
 }
 
+/** A new domain term the grill found. It goes to the workspace glossary, never GLOSSARY.md. */
+export interface GlossaryTerm {
+  term: string;
+  /** One or two sentences: what the term is. */
+  definition: string;
+  /** Words to avoid for the same concept. */
+  avoid: string[];
+}
+
+/** A call that sets new precedent. It becomes a draft decision record for a docs PR (D-017). */
+export interface Precedent {
+  title: string;
+  decision: string;
+  why: string;
+}
+
 export type GrillOutcome = "proceed" | "needs_input" | "error";
 
 export interface GrillResult {
   calls: Call[];
   escalation: Escalation | null;
   outcome: GrillOutcome;
+  /** New terms, written to the workspace glossary. Set when the grill ran. */
+  terms?: GlossaryTerm[];
+  /** Calls that set new precedent, written as draft decision records. Set when the grill ran. */
+  precedents?: Precedent[];
   /** Short reason when the outcome is `error`. */
   error?: string;
 }

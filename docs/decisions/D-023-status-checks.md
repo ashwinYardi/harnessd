@@ -1,4 +1,4 @@
-# D-021 One status engine; fail and missing block the loop
+# D-023 One status engine; fail and missing block the loop
 Status: accepted 2026-11-20.
 - `harnessd doctor`, the start of `harnessd run` and `GET /api/status` use one list of checks.
 - A check has an id, a state, a one-line detail and a one-line fix.

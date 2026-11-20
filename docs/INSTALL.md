@@ -74,12 +74,12 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 | `linear.key` | one GraphQL read with `LINEAR_API_KEY` | `missing` when unset; `fail` when rejected or unreachable |
 | `linear.team` | `linear.team_id`, as a key or a UUID | `missing` when unset; `fail` when unknown |
 | `linear.states` | Ready, In Progress, In Review, Done and Needs input | `fail`, with the missing names |
-| `slack.webhook` | `SLACK_WEBHOOK_URL` is set | `warn` only |
+| `slack.webhook` | `HARNESSD_SLACK_WEBHOOK_URL` is set | `warn` only |
 | `git.worktrees` | `git worktree list` in the workspace | `fail` outside a git clone |
 | `daemon.port` | binds `127.0.0.1:<daemon.port>` | `warn` when a running harnessd holds it; `fail` when anything else does |
 | `skills.pack` | each default skill in `~/.harnessd/skills/` | `warn`: run `harnessd init` |
 
-Harnesses are checked once for each harness an agent uses. Checks run in parallel. No command runs past 5 s, so `doctor` returns within a few seconds. No check spends tokens. Sign-in checks read only the exit code and named JSON fields, never the account or the token. Output never shows a key, a token or a webhook: each value of 6 characters or more of an environment variable with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in its name is replaced by `***`. `SLACK_WEBHOOK_URL` is the name the Slack notifier (MET-16) is to read.
+Harnesses are checked once for each harness an agent uses. Checks run in parallel. No command runs past 5 s, so `doctor` returns within a few seconds. No check spends tokens. Sign-in checks read only the exit code and named JSON fields, never the account or the token. Output never shows a key, a token or a webhook: each value of 6 characters or more of an environment variable with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in its name is replaced by `***`. The Slack notifier reads `HARNESSD_SLACK_WEBHOOK_URL` (D-021).
 
 ## The launchd service
 | | |
@@ -99,6 +99,23 @@ launchctl setenv LINEAR_API_KEY lin_api_...
 launchctl kickstart -k gui/$(id -u)/dev.harnessd.daemon
 ```
 Until the key is set, the service logs the missing-key error to `daemon.err.log` and retries every 30 s. `launchctl setenv` does not survive a reboot.
+
+### Slack
+harnessd posts to Slack **#harnessd** through an incoming webhook (D-015, D-021). Without one it posts nothing, logs one warning at start and works as before.
+1. In Slack, create an app for your workspace, turn on **Incoming Webhooks** and add a webhook for #harnessd. Copy its url.
+2. Give the url to launchd, then restart the service:
+   ```sh
+   launchctl setenv HARNESSD_SLACK_WEBHOOK_URL https://hooks.slack.com/services/...
+   launchctl kickstart -k gui/$(id -u)/dev.harnessd.daemon
+   ```
+3. Check `daemon.out.log` for `slack: posting notices to #harnessd, daily summary at 21:00 Asia/Kolkata`.
+
+The url is a secret. harnessd reads it from the environment only and never writes it to disk or logs. It must start with `https://`. The webhook fixes the channel; `slack.channel` is only a label. Set `slack.summary_time` and `slack.time_zone` in `.harnessd/config.toml` (docs/CONFIG.md).
+
+What harnessd posts:
+- **A notice per event:** one line per merge, per block (Needs input, an escalation, two QA or gate failures) and per protected PR that waits for a human. Each line links the issue and the PR, when there is one.
+- **A daily summary** at `slack.summary_time` (default 21:00) in `slack.time_zone` (default `Asia/Kolkata`). It lists the merges and blocks since the last summary, and the runs in progress now. If the daemon was off at that time, the summary goes out once at the next start. The first start sends none. State is in `<repo>/.harnessd/state/summary.json`.
+- **Failures:** a post runs in the background, so Slack never stops or slows the loop. A 5xx, a 429 or a network error is retried 3 times, after 1 s, 2 s and 4 s. Then the message is dropped with one log line. Other 4xx errors are dropped at once.
 
 ```sh
 launchctl print gui/$(id -u)/dev.harnessd.daemon     # status

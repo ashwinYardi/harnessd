@@ -23,8 +23,10 @@ qa_max_failures = 2
 team_id = "MET"
 project = "harnessd"
 
-[slack]
-channel = "#harnessd"
+[slack]                     # Slack #harnessd (D-015, D-021, docs/INSTALL.md "Slack")
+channel = "#harnessd"       # a label only: the webhook fixes the channel
+summary_time = "21:00"      # the daily summary, 24-hour "HH:MM"
+time_zone = "Asia/Kolkata"  # an IANA time zone
 
 [daemon]
 port = 4747                 # the local API on 127.0.0.1 (docs/API.md); 0 picks a free port
@@ -67,6 +69,8 @@ env = { DOCS_MODE = "ro" }  # optional, string values
 | merge-gate config | `.harnessd/config.toml` (holds `[merge]`), `**/CODEOWNERS`, `.github/settings.yml`, `.github/rulesets/**` |
 
 Setting `protected_paths` replaces the whole list, so copy the defaults you want to keep.
+
+The Slack webhook url is a secret. It comes only from `HARNESSD_SLACK_WEBHOOK_URL`, never from config.toml: a `webhook_url` key is an unknown-key error.
 
 Default agents: coordinator, backend, frontend and qa, all on `claude-code` (D-010). The agent's name is its table key or file name; without an `avatar` the UI shows the name's initial. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
 

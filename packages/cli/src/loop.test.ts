@@ -136,6 +136,46 @@ test("run fails clearly when the API port is taken", async () => {
   }
 });
 
+test("run without a Slack webhook logs one warning and works as before", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  assert.equal(await run(["run", "--once"], s.io), 0);
+  const warnings = s.out.filter((l) => /HARNESSD_SLACK_WEBHOOK_URL is not set/.test(l));
+  assert.equal(warnings.length, 1);
+  assert.equal(s.out.at(-1), "paused: nothing dispatched");
+});
+
+test("run sends a missed daily summary once at start, through the webhook", async () => {
+  const webhook = "https://hooks.slack.test/services/T000/B000/fake-token";
+  const s = await setup(
+    { LINEAR_API_KEY: "k", HARNESSD_SLACK_WEBHOOK_URL: webhook },
+    PAUSED_CONFIG,
+  );
+  await createFilePauseStore(s.home).pause();
+  await mkdir(join(s.repo, ".harnessd", "state"), { recursive: true });
+  await writeFile(
+    join(s.repo, ".harnessd", "state", "summary.json"),
+    JSON.stringify({ version: 1, lastSentAt: "2026-01-01T00:00:00.000Z", notices: [] }),
+  );
+  const posts: { url: string; text: string }[] = [];
+  const io = {
+    ...s.io,
+    fetch: async (url: string, init: { body: string }) => {
+      posts.push({ url, text: (JSON.parse(init.body) as { text: string }).text });
+      return { ok: true, status: 200 };
+    },
+  };
+  assert.equal(await run(["run", "--once"], io), 0);
+  assert.equal(await runLoop(["--once"], io), 0, "a second start sends nothing more");
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0]?.url, webhook);
+  assert.match(
+    posts[0]?.text ?? "",
+    /^\*harnessd daily summary\* since 1 Jan 05:30 \(Asia\/Kolkata\)/,
+  );
+  assert.doesNotMatch([...s.out, ...s.err].join("\n"), /fake-token/);
+});
+
 test("run refuses to start on a failing check and prints its fix", async () => {
   const s = await setup({ LINEAR_API_KEY: "lin_api_secret_value" }, PAUSED_CONFIG);
   const code = await runLoop(["--once"], {

@@ -2,11 +2,13 @@
 // `harnessd run` and GET /api/status. Harnesses and GitHub are checked through their
 // own CLIs (D-002); Linear through one GraphQL read. Checks run in parallel, each
 // group under a short timeout. No secret value ever reaches a detail or a fix.
+
 import { access } from "node:fs/promises";
 import { createServer } from "node:net";
 import { join } from "node:path";
 import { ConfigError, DEFAULT_SETTINGS, type HarnessId, type MergedConfig } from "@harnessd/shared";
 import { loadConfig } from "../config/load.ts";
+import { SLACK_WEBHOOK_ENV } from "../coordinator/slack.ts";
 import { LinearClient, LinearError } from "../linear/client.ts";
 import {
   compareSemver,
@@ -21,7 +23,7 @@ import {
 /**
  * ok: works. warn: works, but something is off; never blocks. fail: present but
  * broken. missing: required and absent (not installed, not set). fail and missing
- * both block `harnessd run` (D-021).
+ * both block `harnessd run` (D-023).
  */
 export type CheckState = "ok" | "warn" | "fail" | "missing";
 
@@ -48,7 +50,6 @@ export interface KnownBadVersion {
 export const KNOWN_BAD_VERSIONS: readonly KnownBadVersion[] = [];
 
 /** The env var the Slack notifier reads (MET-16). */
-export const SLACK_WEBHOOK_ENV = "SLACK_WEBHOOK_URL";
 
 export const STATUS_TIMEOUT_MS = 5_000;
 
