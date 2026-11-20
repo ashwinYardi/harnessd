@@ -1,6 +1,6 @@
 // The current view, read from the hash and kept in step with Back and Forward.
 import { useCallback, useEffect, useState } from "react";
-import { hrefFor, parseRoute, type Route } from "../lib/route.ts";
+import { hrefFor, parseRoute, type Route, type View } from "../lib/route.ts";
 
 export function useRoute() {
   const [route, setRoute] = useState<Route>(() => parseRoute(location.hash));
@@ -9,7 +9,7 @@ export function useRoute() {
     addEventListener("hashchange", onHash);
     return () => removeEventListener("hashchange", onHash);
   }, []);
-  const go = useCallback((next: Route) => {
+  const go = useCallback((next: Route | { view: View }) => {
     if (location.hash !== hrefFor(next)) location.hash = hrefFor(next);
   }, []);
   return { route, go };

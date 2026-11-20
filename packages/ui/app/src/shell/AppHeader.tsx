@@ -1,9 +1,11 @@
 // The header across the content: the view title, the live state and the kill switch.
 // While paused, it becomes an amber band, so the state shows from across the room.
 
+import { PlayIcon } from "lucide-react";
 import type { Connection } from "../api.ts";
 import { Badge } from "../components/ui/badge.tsx";
 import { Button } from "../components/ui/button.tsx";
+import { Spinner } from "../components/ui/spinner.tsx";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { cn } from "../lib/cn.ts";
 import { clockTime, sinceText } from "../lib/format.ts";
@@ -31,6 +33,10 @@ interface AppHeaderProps {
   boardDown: boolean;
   now: Date;
   onShowNeedsYou: () => void;
+  /** Set while the loop has not started (D-026). */
+  setup?:
+    | { ready: boolean; starting: boolean; onStart: () => void; onFinish: () => void }
+    | undefined;
 }
 
 export function AppHeader({
@@ -44,6 +50,7 @@ export function AppHeader({
   boardDown,
   now,
   onShowNeedsYou,
+  setup,
 }: AppHeaderProps) {
   const paused = pause.shown.paused;
   const c = CONNECTION[connection];
@@ -107,6 +114,23 @@ export function AppHeader({
           <span className="tabular-nums">{needsYou}</span>
           <span className="hidden sm:inline">{needsYou === 1 ? "needs you" : "need you"}</span>
         </Button>
+      )}
+      {setup && (
+        <>
+          <Badge variant="warning" size="lg">
+            Not started
+          </Badge>
+          {setup.ready ? (
+            <Button disabled={setup.starting} onClick={setup.onStart}>
+              {setup.starting ? <Spinner /> : <PlayIcon aria-hidden="true" />}
+              Start
+            </Button>
+          ) : (
+            <Button onClick={setup.onFinish} variant="outline">
+              Finish setup
+            </Button>
+          )}
+        </>
       )}
       <PauseButton view={pause} onToggle={onTogglePause} />
     </header>
