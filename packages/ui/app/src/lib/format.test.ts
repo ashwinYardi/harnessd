@@ -11,11 +11,11 @@ test("duration reads as seconds, minutes and hours", () => {
   assert.equal(duration(-5), "0s");
 });
 
-test("budgetUsed is the share of the time budget spent, capped at 1", () => {
+test("budgetUsed is the share of the time budget spent, past 1 when over", () => {
   const start = "2026-11-20T10:00:00.000Z";
   const at = (ms: number) => new Date(Date.parse(start) + ms);
   assert.equal(budgetUsed(start, 1_800_000, at(450_000)), 0.25);
-  assert.equal(budgetUsed(start, 1_800_000, at(9_000_000)), 1);
+  assert.equal(budgetUsed(start, 1_800_000, at(1_854_000)), 1.03);
   assert.equal(budgetUsed(start, 0, at(1)), 0);
 });
 

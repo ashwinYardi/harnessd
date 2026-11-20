@@ -29,7 +29,7 @@ function IssueRow({ issue }: { issue: BoardIssue }) {
         <span className="issue-line">
           <span className="issue-key">{issue.key}</span>
           {PRIORITY[issue.priority] && (
-            <span className="tag" data-tone={issue.priority === 1 ? "signal" : undefined}>
+            <span className="tag" data-strong={issue.priority === 1 || undefined}>
               {PRIORITY[issue.priority]}
             </span>
           )}
@@ -120,6 +120,7 @@ export function Board({
       className="region region-board"
       aria-labelledby="board-title"
       aria-busy={board.status === "loading"}
+      {...regionProps}
     >
       <header className="region-head">
         <h2 id="board-title">Board</h2>
@@ -156,7 +157,7 @@ export function Board({
         </div>
       )}
       {shown && !neverRead && (
-        <div className="columns" {...regionProps}>
+        <div className="columns">
           {groupBoard(shown.issues).map((column) => (
             <BoardColumn key={column.id} column={column} />
           ))}

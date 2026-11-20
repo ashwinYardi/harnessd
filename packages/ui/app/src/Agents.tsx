@@ -12,7 +12,7 @@ function Budget({ run, now }: { run: RunView; now: Date }) {
   return (
     <span className="budget" data-warn={used >= BUDGET_WARN || undefined}>
       <span className="budget-bar" aria-hidden="true">
-        <span className="budget-fill" style={{ width: `${pct}%` }} />
+        <span className="budget-fill" style={{ width: `${Math.min(100, pct)}%` }} />
       </span>
       <span className="num">{pct}%</span>
       <span className="budget-of">of {budgetText(run.budgetMs)}</span>
@@ -86,9 +86,12 @@ export function Agents({
       className="region region-agents"
       aria-labelledby="agents-title"
       aria-busy={agents.status === "loading"}
+      {...regionProps}
     >
       <header className="region-head">
-        <h2 id="agents-title">Agents</h2>
+        <h2 id="agents-title" tabIndex={-1}>
+          Agents
+        </h2>
         {shown && (
           <span className="meta">
             {running} of {shown.maxConcurrent} running
@@ -123,7 +126,12 @@ export function Agents({
         </p>
       )}
       {shown && shown.agents.length > 0 && (
-        <div className="region-body" {...regionProps}>
+        <section
+          className="region-body"
+          // biome-ignore lint/a11y/noNoninteractiveTabindex: a scroll region must be reachable by keyboard
+          tabIndex={0}
+          aria-label="Agent table"
+        >
           <table className="agents">
             <colgroup>
               <col className="c-agent" />
@@ -151,7 +159,7 @@ export function Agents({
               ))}
             </tbody>
           </table>
-        </div>
+        </section>
       )}
     </section>
   );

@@ -36,10 +36,10 @@ function ThemeButton() {
       className="btn btn-quiet"
       onClick={() => setTheme(NEXT[theme])}
       title={`Theme: ${label}. Click for ${NEXT[theme]}.`}
+      aria-label={`Theme: ${label}`}
     >
       {theme === "light" ? <SunIcon /> : theme === "dark" ? <MoonIcon /> : <SystemIcon />}
       <span className="btn-label">{label}</span>
-      <span className="sr-only">theme</span>
     </button>
   );
 }
@@ -56,10 +56,20 @@ interface TopBarProps {
   connection: Connection;
   lastPollAt: string | null | undefined;
   needsYou: number;
+  /** True when the board could not be read, so the needs-you count is unknown. */
+  boardDown: boolean;
   now: Date;
 }
 
-export function TopBar({ pause, setPause, connection, lastPollAt, needsYou, now }: TopBarProps) {
+export function TopBar({
+  pause,
+  setPause,
+  connection,
+  lastPollAt,
+  needsYou,
+  boardDown,
+  now,
+}: TopBarProps) {
   const [busy, setBusy] = useState<"pausing" | "resuming" | null>(null);
   const [notice, setNotice] = useState("");
   const state = pause.status === "ready" ? pause.data : undefined;
@@ -71,7 +81,8 @@ export function TopBar({ pause, setPause, connection, lastPollAt, needsYou, now 
   }, [notice, busy]);
   const paused = busy === "pausing" || (busy === null && state?.paused === true);
 
-  const disabled = pause.status !== "ready" || busy !== null;
+  // Only a call in flight disables the kill switch. An unknown state still pauses.
+  const disabled = busy !== null;
 
   async function toggle() {
     if (disabled) return;
@@ -129,6 +140,7 @@ export function TopBar({ pause, setPause, connection, lastPollAt, needsYou, now 
             {lastPollAt ? `Last poll ${sinceText(lastPollAt, now)}` : "No poll yet"}
           </span>
         )}
+        {boardDown && <span className="bar-alert">Board not read</span>}
         {needsYou > 0 && (
           <span className="bar-alert">
             {needsYou}
@@ -149,10 +161,10 @@ export function TopBar({ pause, setPause, connection, lastPollAt, needsYou, now 
         className="btn btn-kill"
         onClick={toggle}
         aria-disabled={disabled || undefined}
-        aria-label={paused ? "Resume all agents" : "Pause all agents"}
       >
         {paused ? <PlayIcon /> : <PauseIcon />}
         <span>{pauseText}</span>
+        <span className="sr-only">{pauseText === "Pause all" ? " agents" : " all agents"}</span>
       </button>
     </header>
   );

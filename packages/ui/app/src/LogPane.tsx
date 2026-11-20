@@ -52,8 +52,10 @@ export function LogPane({ logs, retry }: { logs: Load<LogLine[]>; retry: () => v
       aria-busy={logs.status === "loading"}
     >
       <header className="region-head">
-        <h2 id="log-title">Log</h2>
-        <span className="meta">{follow ? "Following" : "Paused scrolling"}</span>
+        <h2 id="log-title" tabIndex={-1}>
+          Log
+        </h2>
+        <span className="meta">{follow ? "Following" : "Scrolled up"}</span>
       </header>
       {logs.status === "loading" && (
         <div className="region-body" aria-hidden="true">

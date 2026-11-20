@@ -11,10 +11,10 @@ export function duration(ms: number): string {
   return `${Math.floor(m / 60)}h ${pad(m % 60)}m`;
 }
 
-/** Share of the time budget spent, from 0 to 1. */
+/** Share of the time budget spent: 0 at the start, 1 at the budget, more when over. */
 export function budgetUsed(startedAt: string, budgetMs: number, now: Date): number {
   if (budgetMs <= 0) return 0;
-  return Math.min(1, Math.max(0, (now.getTime() - Date.parse(startedAt)) / budgetMs));
+  return Math.max(0, (now.getTime() - Date.parse(startedAt)) / budgetMs);
 }
 
 /** "950", "1.5k", "48k", "1.3M". */

@@ -20,6 +20,9 @@ export function App() {
   const api = useHarnessd();
   const now = useNow();
   const waiting = api.board.status === "ready" ? api.board.data.issues.filter(needsYou).length : 0;
+  const boardDown =
+    api.board.status === "error" ||
+    (api.board.status === "ready" && api.board.data.fetchedAt === null && !!api.board.data.error);
   const lastPollAt = api.agents.status === "ready" ? api.agents.data.lastPollAt : undefined;
 
   useEffect(() => {
@@ -28,12 +31,17 @@ export function App() {
 
   return (
     <div className="app">
+      <nav className="skip" aria-label="Skip links">
+        <a href="#agents-title">Skip to agents</a>
+        <a href="#log-title">Skip to log</a>
+      </nav>
       <TopBar
         pause={api.pause}
         setPause={api.setPause}
         connection={api.connection}
         lastPollAt={lastPollAt}
         needsYou={waiting}
+        boardDown={boardDown}
         now={now}
       />
       <main className="main">

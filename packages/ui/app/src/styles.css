@@ -22,6 +22,9 @@
   --band-btn: #f3f5f9;
   --band-btn-text: #14171c;
   --band-btn-hover: #ffffff;
+  --band-edge: #1a2130;
+  --band-live: #5fd39a;
+  --band-pending: #f2b85b;
 
   --signal: #b3261e;
   --signal-bg: #fcebea;
@@ -62,6 +65,7 @@
     --band-btn: #e6e9ef;
     --band-btn-text: #0b0e13;
     --band-btn-hover: #ffffff;
+    --band-edge: #2a303b;
 
     --signal: #ff9b93;
     --signal-bg: #2d1517;
@@ -98,6 +102,7 @@
   --band-btn: #e6e9ef;
   --band-btn-text: #0b0e13;
   --band-btn-hover: #ffffff;
+  --band-edge: #2a303b;
 
   --signal: #ff9b93;
   --signal-bg: #2d1517;
@@ -225,6 +230,7 @@ ul {
 
 .btn[aria-disabled="true"] {
   cursor: progress;
+  opacity: 0.85;
 }
 
 .btn-small {
@@ -251,6 +257,7 @@ ul {
   gap: 16px;
   min-height: 44px;
   padding: 0 12px 0 16px;
+  border-bottom: 1px solid var(--band-edge);
   background: var(--band);
   color: var(--band-text);
   transition: background-color 200ms cubic-bezier(0.16, 1, 0.3, 1);
@@ -258,6 +265,7 @@ ul {
 
 .bar[data-paused] {
   --band-text-2: #f4e6d2;
+  --band-edge: var(--band-paused);
   --band-focus: #ffffff;
   background: var(--band-paused);
 }
@@ -288,12 +296,12 @@ ul {
 }
 
 .conn .dot {
-  color: #5fd39a;
+  color: var(--band-live);
 }
 
 .conn[data-state="reconnecting"] .dot,
 .conn[data-state="connecting"] .dot {
-  color: #f2b85b;
+  color: var(--band-pending);
 }
 
 .bar-paused {
@@ -589,9 +597,10 @@ ul {
   line-height: 16px;
 }
 
-.tag[data-tone="signal"] {
-  border-color: var(--signal-line);
-  color: var(--signal);
+.tag[data-strong] {
+  border-color: var(--line-strong);
+  color: var(--text);
+  font-weight: 600;
 }
 
 .issue-agent {
@@ -875,6 +884,10 @@ tr[data-stopping] .task-action {
     min-width: 0;
   }
 
+  .bar .btn-quiet {
+    margin-left: auto;
+  }
+
   .agents {
     min-width: 560px;
   }
@@ -915,4 +928,37 @@ tr[data-stopping] .task-action {
   .alert-short {
     display: inline;
   }
+}
+
+/* --- skip links ------------------------------------------------------------ */
+
+.skip {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.skip a {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  z-index: 3;
+  padding: 4px 8px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  white-space: nowrap;
+  transform: translateY(-200%);
+}
+
+.skip a:focus-visible {
+  transform: none;
+}
+
+.region-head h2:focus {
+  outline: none;
+}
+
+.region-head h2:focus-visible {
+  outline: 2px solid var(--focus);
 }
