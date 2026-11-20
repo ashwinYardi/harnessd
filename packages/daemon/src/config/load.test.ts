@@ -300,3 +300,17 @@ test("defaultGlobalDir honours HARNESSD_HOME", () => {
   assert.equal(defaultGlobalDir({ HARNESSD_HOME: "" }), join(homedir(), ".harnessd"));
   assert.equal(defaultGlobalDir({}), join(homedir(), ".harnessd"));
 });
+
+test("secret references load from the global config.toml only (MET-33)", async () => {
+  const f = await fixture({
+    "home/.harnessd/config.toml": '[secrets.linear]\napi_key = "env:MY_LINEAR"\n',
+    "repo/.harnessd/config.toml": '[secrets.slack]\nwebhook_url = "env:HOOK"\n',
+  });
+  await loadConfig({ globalDir: f.globalDir, home: f.home });
+  await assert.rejects(
+    loadConfig({ globalDir: f.globalDir, workspaceDir: f.workspaceDir, home: f.home }),
+    configError(
+      `${f.workspaceDir}/config.toml: secrets: secret references belong in ~/.harnessd/config.toml only`,
+    ),
+  );
+});

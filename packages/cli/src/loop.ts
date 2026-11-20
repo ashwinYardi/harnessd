@@ -12,6 +12,7 @@ import {
   createGitWorktrees,
   createLogBuffer,
   createPauseController,
+  createSecretStore,
   createUiApi,
   createVisibility,
   type Daemon,
@@ -27,8 +28,11 @@ import {
   type Route,
   removeDaemonInfo,
   runStatus,
+  SecretError,
+  type SecretStore,
   type SetupRunner,
   type SlackFetch,
+  secretRoutes,
   setupRoutes,
   startDaemon,
   staticRoutes,
@@ -40,7 +44,7 @@ import { ConfigError, type MergedConfig } from "@harnessd/shared";
 import { UI_DIR } from "@harnessd/ui";
 import { type RunChecks, refusalLines, statusOptions } from "./doctor.ts";
 
-/** Read at the edge only; never written to disk or logs. */
+/** The fallback after the secret store (D-030). Read at the edge only; never logged. */
 export const LINEAR_API_KEY_ENV = "LINEAR_API_KEY";
 
 export const RUN_USAGE =
@@ -130,29 +134,55 @@ interface Built {
   visibility: Visibility;
 }
 
-/** Builds the loop from the config and the Linear key; a string says what is missing. */
-async function buildLoop(
-  parsed: RunArgs,
-  io: LoopIO,
-  env: NodeJS.ProcessEnv,
-  repoDir: string,
-  globalDir: string,
-  pauseStore: ReturnType<typeof createFilePauseStore>,
-  logs: ReturnType<typeof createLogBuffer>,
-): Promise<Built | string> {
-  const apiKey = env[LINEAR_API_KEY_ENV]?.trim();
-  if (!apiKey) {
-    return `${LINEAR_API_KEY_ENV} is not set. Export a Linear personal API key, e.g. ${LINEAR_API_KEY_ENV}=lin_api_... harnessd run`;
+/** What the loop needs that is not a status check. */
+interface Deps {
+  parsed: RunArgs;
+  io: LoopIO;
+  repoDir: string;
+  globalDir: string;
+  pauseStore: ReturnType<typeof createFilePauseStore>;
+  logs: ReturnType<typeof createLogBuffer>;
+  secrets: SecretStore;
+  log: (line: string) => void;
+}
+
+/** Why the loop cannot be built: the status check it stands for, and the text to print. */
+interface Blocker {
+  check: "linear.key" | "linear.team" | "config";
+  message: string;
+}
+
+const blocked = (check: Blocker["check"], message: string): Blocker => ({ check, message });
+
+/** Builds the loop from the config and the Linear key, or says what blocks it. */
+async function buildLoop(deps: Deps): Promise<Built | Blocker> {
+  const { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log } = deps;
+  // Saved value or reference first, then LINEAR_API_KEY (D-030).
+  try {
+    if ((await secrets.value("linear.api_key")) === undefined) {
+      return blocked(
+        "linear.key",
+        `No Linear key is saved and ${LINEAR_API_KEY_ENV} is not set. Paste a Linear personal API key in Settings, Connections, Linear.`,
+      );
+    }
+  } catch (e) {
+    if (e instanceof SecretError || e instanceof ConfigError) {
+      return blocked("linear.key", `Linear key: ${e.message}`);
+    }
+    throw e;
   }
   let config: MergedConfig;
   try {
     config = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
   } catch (e) {
-    return e instanceof ConfigError ? e.message : (e as Error).message;
+    return blocked("config", e instanceof ConfigError ? e.message : (e as Error).message);
   }
   const teamId = config.linear.team_id?.trim();
   if (!teamId) {
-    return 'linear.team_id is not set. Add it to .harnessd/config.toml under [linear], e.g. team_id = "MET".';
+    return blocked(
+      "linear.team",
+      'linear.team_id is not set. Add it to .harnessd/config.toml under [linear], e.g. team_id = "MET".',
+    );
   }
   const team: ListReadyOptions = { teamId };
   const project = config.linear.project?.trim();
@@ -160,14 +190,17 @@ async function buildLoop(
     if (UUID.test(project)) team.projectId = project;
     else team.projectName = project;
   }
-  const linear = new LinearClient({ apiKey: async () => apiKey });
-  const log = (line: string) => {
-    io.out(`${new Date().toISOString()} ${line}`);
-    logs.push(line);
-  };
+  // Read on each request, so a key replaced in Settings is used on the next tick.
+  const linear = new LinearClient({
+    apiKey: async () => {
+      const key = await secrets.value("linear.api_key");
+      if (key === undefined) throw new Error("No Linear key. Save one in Settings, Connections.");
+      return key;
+    },
+  });
   let loop: CoordinatorLoop | undefined;
   const visibility = createVisibility({
-    env,
+    webhookUrl: () => secrets.value("slack.webhook_url"),
     slack: config.slack,
     repoDir,
     inProgress: () => (loop?.running() ?? []).map((key) => ({ key })),
@@ -209,16 +242,11 @@ async function buildLoop(
   return { loop, linear, team, teamId, config, visibility };
 }
 
-/** The id of the status check that a missing key or team stands for. */
-function setupBlocker(reason: string): string {
-  if (reason.startsWith(LINEAR_API_KEY_ENV)) return "linear.key";
-  if (reason.startsWith("linear.team_id")) return "linear.team";
-  return "config";
-}
+const isBlocker = (b: Built | Blocker): b is Blocker => "check" in b;
 
 /**
- * Runs the coordinator loop for one repo. The Linear key comes from `LINEAR_API_KEY`
- * and the team from `linear.team_id` in the config.
+ * Runs the coordinator loop for one repo. The Linear key comes from the secret store,
+ * then `LINEAR_API_KEY` (D-030), and the team from `linear.team_id` in the config.
  *
  * With `--once`, a missing key, team or a blocking check stops it with exit 1. Without
  * `--once`, it serves the app anyway, in setup: the loop waits until every required check
@@ -237,11 +265,18 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   const pauseStore = createFilePauseStore(globalDir);
   const logs = createLogBuffer();
   const checks = io.checks ?? runStatus;
-  const options = statusOptions(repoDir, env);
+  // One store for the loop, the checks and Settings, so they share the op cache.
+  const secrets = createSecretStore({ globalDir, env });
+  const options = { ...statusOptions(repoDir, env), secrets };
+  const log = (line: string) => {
+    io.out(`${new Date().toISOString()} ${line}`);
+    logs.push(line);
+  };
+  const deps: Deps = { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log };
 
-  const built = await buildLoop(parsed, io, env, repoDir, globalDir, pauseStore, logs);
-  if (typeof built === "string" && parsed.once) {
-    io.err(`harnessd run: ${built}`);
+  const built = await buildLoop(deps);
+  if (isBlocker(built) && parsed.once) {
+    io.err(`harnessd run: ${built.message}`);
     return 1;
   }
   // The port is read on its own, so a missing key or team still serves the app.
@@ -262,12 +297,12 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   // Every harness and connection, before anything is dispatched (MET-27, D-023).
   const startChecks = await checks(options);
   let blocking = startChecks.filter(isBlocking).map((c) => c.id);
-  if (typeof built === "string") blocking = [...new Set([setupBlocker(built), ...blocking])];
+  if (isBlocker(built)) blocking = [...new Set([built.check, ...blocking])];
   if (blocking.length > 0 && parsed.once) {
     for (const line of refusalLines(startChecks)) io.err(line);
     return 1;
   }
-  if (typeof built === "string") io.err(`harnessd run: ${built}`);
+  if (isBlocker(built)) io.err(`harnessd run: ${built.message}`);
   if (startChecks.some(isBlocking)) {
     for (const line of refusalLines(startChecks, "the loop waits")) io.err(line);
   }
@@ -311,14 +346,14 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       handler: async () => {
         if (active) return { state: "running", blocking: [] };
         const now = await checks({ ...options, servingPort: true });
-        const next = await buildLoop(parsed, io, env, repoDir, globalDir, pauseStore, logs);
+        const next = await buildLoop(deps);
         blocking = now.filter(isBlocking).map((c) => c.id);
-        if (typeof next === "string") blocking = [...new Set([setupBlocker(next), ...blocking])];
-        if (typeof next === "string" || blocking.length > 0) {
+        if (isBlocker(next)) blocking = [...new Set([next.check, ...blocking])];
+        if (isBlocker(next) || blocking.length > 0) {
           throw new HttpError(
             409,
             "setup_incomplete",
-            `Fix these first: ${blocking.join(", ")}.${typeof next === "string" ? ` ${next}` : ""}`,
+            `Fix these first: ${blocking.join(", ")}.${isBlocker(next) ? ` ${next.message}` : ""}`,
           );
         }
         if (active) return { state: "running", blocking: [] };
@@ -342,10 +377,15 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       checks: (o) => checks({ ...options, ...o, servingPort: true }),
       ...(io.setupRunner ? { runner: io.setupRunner } : {}),
     });
+    const secretApi = secretRoutes({
+      store: secrets,
+      checks: (o) => checks({ ...options, ...o, servingPort: true }),
+      log,
+    });
     daemon = await startDaemon({
       port,
       pause,
-      routes: [...ui.routes, ...status, ...loopRoutes, ...setup.routes, ...page],
+      routes: [...ui.routes, ...status, ...loopRoutes, ...setup.routes, ...secretApi, ...page],
     });
   } catch (e) {
     const busy = (e as NodeJS.ErrnoException).code === "EADDRINUSE";
@@ -370,7 +410,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     );
     const paused = await pauseStore.read();
     if (paused.paused) io.out(pausedLine(paused.since, paused.reason));
-    if (blocking.length === 0 && typeof built !== "string") {
+    if (blocking.length === 0 && !isBlocker(built)) {
       active = built;
       loops.push(built.loop);
       return await drive(active, parsed, io);
@@ -411,7 +451,7 @@ async function drive(
   stopSignal?: Promise<string>,
 ): Promise<number> {
   const { loop, visibility } = built;
-  io.out(`harnessd run: ${visibility.status}`);
+  io.out(`harnessd run: ${await visibility.status()}`);
   // A summary missed while the daemon was off goes out now, once (D-021).
   await visibility.checkSummary();
   const summaries = parsed.once

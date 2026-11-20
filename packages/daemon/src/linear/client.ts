@@ -3,14 +3,15 @@ import {
   type Issue,
   LINEAR_API_KEY_SECRET,
   type LinkedIssue,
-  type SecretSource,
+  type SecretReader,
   type WorkflowStateName,
 } from "@harnessd/shared";
 import { compareByPriority, parseIssue, parseLinkedIssue, type RawIssue } from "./parse.ts";
 
 export const LINEAR_ENDPOINT = "https://api.linear.app/graphql";
 
-export const MISSING_KEY_MESSAGE = `Linear API key not set. Run "harnessd secrets set ${LINEAR_API_KEY_SECRET}".`;
+export const MISSING_KEY_MESSAGE =
+  "Linear API key not set. Paste it in Settings, Connections, Linear, or set LINEAR_API_KEY.";
 
 export type LinearErrorCode =
   | "missing_key"
@@ -35,8 +36,11 @@ export class LinearError extends Error {
 }
 
 export interface LinearClientOptions {
-  /** A SecretSource (read as "linear-api-key"), or a function returning the key. */
-  apiKey: SecretSource | (() => Promise<string | undefined>);
+  /**
+   * A SecretReader (read as "linear-api-key"), or a function returning the key. It is read
+   * on each request, so a key replaced in Settings applies at once (MET-33).
+   */
+  apiKey: SecretReader | (() => Promise<string | undefined>);
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   endpoint?: string;
@@ -159,7 +163,6 @@ const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
 /** Minimal Linear GraphQL client: Ready issues, sub-issues, relations, state moves and comments. */
 export class LinearClient {
   #readKey: () => Promise<string | undefined>;
-  #key: string | undefined;
   #fetch: typeof fetch;
   #sleep: (ms: number) => Promise<void>;
   #endpoint: string;
@@ -329,7 +332,6 @@ export class LinearClient {
       const result = await this.#send<T>(key, query, variables);
       if (result.ok) return result.data;
       const error = result.error;
-      if (error.code === "auth") this.#key = undefined;
       if (error.code !== "rate_limited" || attempt > 0) throw error;
       const waitMs = result.retryAfterMs ?? DEFAULT_RETRY_MS;
       if (waitMs > this.#maxRetryWaitMs) throw error;
@@ -374,7 +376,7 @@ export class LinearClient {
         ok: false,
         error: new LinearError(
           "auth",
-          `Linear rejected the API key (HTTP ${status}). Check it with "harnessd secrets set ${LINEAR_API_KEY_SECRET}".`,
+          `Linear rejected the API key (HTTP ${status}). Replace it in Settings, Connections, Linear.`,
           status,
         ),
       };
@@ -401,10 +403,8 @@ export class LinearClient {
   }
 
   async #apiKey(): Promise<string> {
-    if (this.#key) return this.#key;
     const key = (await this.#readKey())?.trim();
     if (!key) throw new LinearError("missing_key", MISSING_KEY_MESSAGE);
-    this.#key = key;
     return key;
   }
 

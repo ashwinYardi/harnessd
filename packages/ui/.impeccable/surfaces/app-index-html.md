@@ -10,7 +10,11 @@ related_targets: ["app/src/views/settings/Settings.tsx"]
 Mode: Operate. Visitor: the owner, a developer who checks in a few times a day and lives in keyboard-driven developer tools. Job: see what runs, what is blocked and what needs them; stop everything at once; reach any action by keyboard. Constraints: PRODUCT.md pinned aesthetic, D-025 stack, D-029 primitives, brand token and logos, loopback only, strict CSP, no web fonts, nothing copied from another product.
 
 ## Settings (MET-28)
+<<<<<<< HEAD
+An extension of this surface, after T3 Code's Settings → Providers: a sub-nav (Harnesses, Connections, Team), one card per harness or connection with its state badge, details, fix and actions, a Team table that saves through the validator, and a Start banner while the loop is in setup. Job: get from a fresh machine to a running loop in a few clicks. No secret is ever shown. The Linear and Slack cards take their secret in a write-only field (MET-33, D-030).
+=======
 An extension of this surface: a sub-nav (Harnesses, Connections, Team), one card per harness or connection with its service logo, state badge, details, fix and actions, a Team table that saves through the validator, and a Start banner while the loop is in setup. Job: get from a fresh machine to a running loop in a few clicks. No secret is ever shown or typed.
+>>>>>>> origin/main
 
 ## Direction contract
 THESIS: harnessd is a dense, quiet, keyboard-first tool. A sidebar, a status header and a Cmd+K palette that every developer knows; tight rows; real service logos in one color. It refuses the decorated kanban and the custom one-off look of MET-18.

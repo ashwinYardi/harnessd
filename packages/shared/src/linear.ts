@@ -80,11 +80,8 @@ export function isAreaLabel(value: string): value is AreaLabel {
   return (AREA_LABELS as readonly string[]).includes(value);
 }
 
-/**
- * Read-only view of the secret store. The store itself (keychain, env) ships separately;
- * this is the boundary integrations depend on.
- */
-export interface SecretSource {
+/** Read-only view of a secret store, by name. The daemon's store is in secrets/store.ts. */
+export interface SecretReader {
   get(name: string): Promise<string | undefined>;
 }
 

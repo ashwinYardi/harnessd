@@ -3,6 +3,7 @@
 import { post, request } from "./api.ts";
 import type { Check } from "./lib/checks.ts";
 import type { LoopState } from "./lib/route.ts";
+import type { SecretId, SecretState } from "./lib/secrets.ts";
 
 export type HarnessId = "claude-code" | "codex";
 export type HarnessAction = "install" | "update" | "signin";
@@ -47,3 +48,15 @@ export const saveTeam = (agents: Array<Omit<TeamAgent, "removable">>) =>
   post<{ agents: TeamAgent[]; synced: string[]; syncError?: string }>("/api/team", { agents });
 export const readLoop = () => request<LoopState>("/api/loop");
 export const startLoop = () => post<LoopState>("/api/start", {});
+
+/** The answer to a secret save or remove: the new state and that connection's checks. */
+export interface SecretSaved {
+  secret: SecretState;
+  checks: Check[];
+}
+
+export const readSecrets = () => request<{ secrets: SecretState[] }>("/api/secrets");
+/** Write-only: the value goes in and never comes back. */
+export const saveSecret = (id: SecretId, value: string) =>
+  post<SecretSaved>(`/api/secrets/${id}`, { value });
+export const removeSecret = (id: SecretId) => post<SecretSaved>(`/api/secrets/${id}/remove`, {});

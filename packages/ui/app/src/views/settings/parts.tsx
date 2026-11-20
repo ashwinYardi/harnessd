@@ -8,7 +8,7 @@ import {
 import { Badge } from "../../components/ui/badge.tsx";
 import type { Check } from "../../lib/checks.ts";
 import { cn } from "../../lib/cn.ts";
-import { envFix, isWaiting } from "../../lib/setup.ts";
+import { isWaiting, secretFix } from "../../lib/setup.ts";
 
 const ICON: Record<Check["state"], React.ReactNode> = {
   ok: <CircleCheckIcon className="text-success-foreground" />,
@@ -42,9 +42,9 @@ export function StateIcon({ state }: { state: Check["state"] }) {
   );
 }
 
-/** One check: its id, detail and, when it is not ok, the fix. A secret's fix names its variable. */
+/** One check: its id, detail and, when it is not ok, the fix. A secret's fix points at its field. */
 export function CheckLine({ check }: { check: Check }) {
-  const env = envFix(check);
+  const inline = secretFix(check);
   return (
     <li className="flex items-start gap-2.5 py-2">
       <StateIcon state={check.state} />
@@ -67,7 +67,7 @@ export function CheckLine({ check }: { check: Check }) {
               check.state === "warn" ? "text-warning-foreground" : "text-destructive-foreground",
             )}
           >
-            Fix: {env ?? check.fix}
+            Fix: {inline ?? check.fix}
           </p>
         )}
       </div>

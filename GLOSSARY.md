@@ -56,6 +56,14 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Setup command**: one fixed command the app runs for a harness: install, update or sign in. Nothing from the request reaches it (D-026). _Avoid_: script, action.
 
+<<<<<<< HEAD
+**Secret store**: the folder `~/.harnessd/secrets/`, one owner-only file per secret, with fixed ids such as `linear.api_key` (D-030). _Avoid_: vault (the vault is memory), keychain.
+
+**Secret reference**: an `op://vault/item/field` or `env:NAME` string that stands for a secret. Config holds the reference, never the value. _Avoid_: secret path.
+
+**Secret source**: where the lookup found a secret: `saved`, `1Password` or `env`. The status engine and the app show the source, never the value. _Avoid_: origin, provider.
+=======
 **Service logo**: the one-color logo of a service harnessd works with (GitHub, Linear, Slack, Claude, OpenAI, git), always next to its name (D-029). _Avoid_: brand icon, provider icon.
 
 **Brand token**: the `--brand` line in `index.css` that holds the accent for light and dark. Primary and ring read it (D-029). _Avoid_: theme color.
+>>>>>>> origin/main

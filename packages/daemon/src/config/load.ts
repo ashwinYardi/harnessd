@@ -216,7 +216,15 @@ export async function loadLayer(
   const configText = await readOptional(configPath);
   if (configText !== undefined) {
     const label = show(configPath);
-    const { agents, mcp, skills, ...settings } = parseConfigText(configText, label);
+    const { agents, mcp, skills, secrets, ...settings } = parseConfigText(configText, label);
+    // A repo must not point the owner's secrets elsewhere (MET-33).
+    if (secrets !== undefined && scope === "workspace") {
+      throw new ConfigError(
+        label,
+        "secrets",
+        "secret references belong in ~/.harnessd/config.toml only",
+      );
+    }
     layer.settings = settings;
     layer.mcp = mcp ?? {};
     layer.skillSettings = skills ?? {};

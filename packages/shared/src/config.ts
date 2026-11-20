@@ -5,7 +5,9 @@
 //
 // Note: index.ts re-exports this module and this module imports from index.ts.
 // Only touch imported values inside functions, never at module top level.
+
 import { HARNESSES, type HarnessId, isHarnessId } from "./index.ts";
+import { isSecretReference } from "./secrets.ts";
 
 /** Roles an agent can play (D-010). */
 export const AGENT_ROLES = ["coordinator", "backend", "frontend", "qa"] as const;
@@ -119,6 +121,14 @@ export interface HarnessSettings {
   bin?: string;
 }
 
+/** `[secrets.<service>]` tables of the global config.toml: one reference per secret. */
+export interface SecretReferences {
+  linear?: { api_key?: string };
+  slack?: { webhook_url?: string };
+}
+
+const SECRET_KEYS = { linear: ["api_key"], slack: ["webhook_url"] } as const;
+
 /** MCP server names: they become keys in .mcp.json and `[mcp_servers.<name>]` in Codex TOML. */
 export const MCP_NAME = /^[A-Za-z0-9_-]+$/;
 
@@ -144,6 +154,8 @@ export interface ConfigFile extends DeepPartial<Settings> {
   agents?: Record<string, AgentSettings>;
   mcp?: Record<string, McpServerConfig>;
   skills?: Record<string, SkillSettings>;
+  /** Global file only; the loader refuses it in a workspace (MET-33). */
+  secrets?: SecretReferences;
 }
 
 /** A piece of instruction text and the file it came from. */
@@ -523,6 +535,7 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
     "qa",
     "daemon",
     "harnesses",
+    "secrets",
     "agents",
     "mcp",
     "skills",
@@ -616,6 +629,32 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
       harnesses[id] = entry;
     }
     out.harnesses = harnesses;
+  }
+
+  if (root.secrets !== undefined) {
+    const t = c.table(root.secrets, "secrets", Object.keys(SECRET_KEYS));
+    const secrets: SecretReferences = {};
+    for (const service of ["linear", "slack"] as const) {
+      if (t[service] === undefined) continue;
+      const keys = SECRET_KEYS[service];
+      const s = c.table(t[service], `secrets.${service}`, keys);
+      const entry: Record<string, string> = {};
+      for (const key of keys) {
+        const value = s[key];
+        if (value === undefined) continue;
+        // The error never repeats the value: it may be a secret pasted in by mistake.
+        if (typeof value === "string" && isSecretReference(value)) {
+          entry[key] = value;
+        } else {
+          c.fail(
+            `secrets.${service}.${key}`,
+            'expected a reference such as "op://vault/item/field" or "env:NAME"; save a value in Settings, Connections',
+          );
+        }
+      }
+      secrets[service] = entry;
+    }
+    out.secrets = secrets;
   }
 
   if (root.agents !== undefined) {

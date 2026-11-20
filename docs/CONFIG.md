@@ -34,6 +34,12 @@ port = 4747                 # the local API on 127.0.0.1 (docs/API.md); 0 picks 
 [harnesses.claude-code]     # Settings → Harnesses writes this in ~/.harnessd/config.toml
 bin = "/opt/homebrew/bin/claude"   # absolute path; wins over HARNESSD_CLAUDE_BIN and PATH
 
+[secrets.linear]            # ~/.harnessd/config.toml only; a reference, never a value (D-030)
+api_key = "op://Private/Linear/credential"   # or "env:MY_LINEAR_KEY"
+
+[secrets.slack]
+webhook_url = "env:MY_SLACK_HOOK"
+
 [merge]                     # the merge gate (D-013, docs/LOOP.md "Merge")
 protected_paths = ["**/auth/**"]   # replaces the default list below
 label = "needs-human"       # put on a PR that waits for a human
@@ -73,7 +79,27 @@ env = { DOCS_MODE = "ro" }  # optional, string values
 
 Setting `protected_paths` replaces the whole list, so copy the defaults you want to keep.
 
-The Slack webhook url is a secret. It comes only from `HARNESSD_SLACK_WEBHOOK_URL`, never from config.toml: a `webhook_url` key is an unknown-key error.
+## Secrets
+The Linear key and the Slack webhook url are secrets (D-030). Settings, Connections saves them; docs/INSTALL.md "Secrets" has the steps.
+
+| Id | Reference key | Fallback variable |
+|---|---|---|
+| `linear.api_key` | `[secrets.linear] api_key` | `LINEAR_API_KEY` |
+| `slack.webhook_url` | `[secrets.slack] webhook_url` | `HARNESSD_SLACK_WEBHOOK_URL` |
+
+**Lookup order**, for each secret:
+1. A saved value in `~/.harnessd/secrets/<id>` (folder `0700`, file `0600`).
+2. Else a reference in `[secrets.<service>]` of `~/.harnessd/config.toml`.
+3. Else the fallback variable.
+
+A value and a reference are never both set: saving one removes the other.
+
+**References.** `op://vault/item/field` (or `op://vault/item/section/field`) is read with `op read --no-newline <reference>`, with no shell, at use time. `env:NAME` reads the variable `NAME`; `NAME` is letters, digits and `_`. A reference that cannot be read is an error, not a fall-through to the next step: `linear.key` fails and names the reason.
+
+**Rules.**
+- `[secrets]` is allowed only in the global config.toml. In a workspace config.toml it is an error, so a repo cannot point your secrets elsewhere.
+- A value in `[secrets]` that is not a reference is an error. The error never repeats the value.
+- `webhook_url` under `[slack]` is still an unknown-key error.
 
 Default agents: coordinator, backend, frontend and qa, all on `claude-code` (D-010). Settings → Team edits the `[agents.<name>]` tables of the workspace file and nothing else; comments and other tables stay (D-026). It can change a default agent but not remove it. The agent's name is its table key or file name; without an `avatar` the UI shows the name's initial. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
 

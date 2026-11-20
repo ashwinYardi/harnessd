@@ -8,8 +8,15 @@ import { createServer } from "node:net";
 import { join } from "node:path";
 import { ConfigError, DEFAULT_SETTINGS, type HarnessId, type MergedConfig } from "@harnessd/shared";
 import { loadConfig } from "../config/load.ts";
-import { SLACK_WEBHOOK_ENV } from "../coordinator/slack.ts";
 import { LinearClient, LinearError } from "../linear/client.ts";
+import {
+  createSecretStore,
+  type ResolvedSecret,
+  SECRET_ENV,
+  SecretError,
+  type SecretId,
+  type SecretStore,
+} from "../secrets/store.ts";
 import { missingHookEvents } from "../sync/settings.ts";
 import {
   compareSemver,
@@ -50,8 +57,6 @@ export interface KnownBadVersion {
 /** Harness releases harnessd is known not to work with. None is known yet. */
 export const KNOWN_BAD_VERSIONS: readonly KnownBadVersion[] = [];
 
-/** The env var the Slack notifier reads (MET-16). */
-
 export const STATUS_TIMEOUT_MS = 5_000;
 
 /** The Linear states the loop moves issues through. */
@@ -84,6 +89,10 @@ export interface StatusOptions {
   knownBadVersions?: readonly KnownBadVersion[];
   /** Runs only the checks of these harnesses, whether an agent uses them or not (MET-28). */
   harnessesOnly?: readonly HarnessId[];
+  /** Runs only these connections' checks, after a secret is saved (MET-33). */
+  connectionsOnly?: readonly ("linear" | "slack")[];
+  /** Where the Linear key and the Slack webhook come from. Default: the store in globalDir. */
+  secrets?: SecretStore;
 }
 
 export function isBlocking(check: Check): boolean {
@@ -117,7 +126,27 @@ interface Ctx {
   env: NodeJS.ProcessEnv;
   timeoutMs: number;
   config: MergedConfig | undefined;
+  secrets: SecretStore;
 }
+
+/** A secret, or why it could not be read. The reason never holds the value. */
+async function lookup(
+  ctx: Ctx,
+  id: SecretId,
+): Promise<ResolvedSecret | { error: string; reference: boolean } | undefined> {
+  try {
+    return await ctx.secrets.resolve(id);
+  } catch (e) {
+    if (e instanceof SecretError) return { error: e.message, reference: true };
+    if (e instanceof ConfigError) return { error: e.message, reference: false };
+    return { error: `could not read the secret: ${(e as Error).message}`, reference: false };
+  }
+}
+
+const SOURCE_FIX: Record<SecretId, string> = {
+  "linear.api_key": "Settings, Connections, Linear",
+  "slack.webhook_url": "Settings, Connections, Slack",
+};
 
 /**
  * Checks that run in order inside one group; groups run in parallel. Every command
@@ -466,20 +495,38 @@ function linearGroup(ctx: Ctx): Group {
   return {
     ids,
     run: async (deadline) => {
-      const key = ctx.env.LINEAR_API_KEY?.trim();
+      const secret = await lookup(ctx, "linear.api_key");
       const teamId = ctx.config?.linear.team_id?.trim();
-      if (!key) {
+      const waiting = [
+        notChecked("linear.team", "linear.key"),
+        notChecked("linear.states", "linear.key"),
+      ];
+      if (secret === undefined) {
         return [
           bad(
             "linear.key",
             "missing",
-            "LINEAR_API_KEY is not set",
-            "Create a personal API key in Linear, then: export LINEAR_API_KEY=lin_api_...",
+            `no key is saved and ${SECRET_ENV["linear.api_key"]} is not set`,
+            `Paste a Linear personal API key in ${SOURCE_FIX["linear.api_key"]}.`,
           ),
-          notChecked("linear.team", "linear.key"),
-          notChecked("linear.states", "linear.key"),
+          ...waiting,
         ];
       }
+      if ("error" in secret) {
+        return [
+          bad(
+            "linear.key",
+            "fail",
+            secret.error,
+            secret.reference
+              ? `Fix the 1Password reference, or replace it in ${SOURCE_FIX["linear.api_key"]}.`
+              : "Fix the key named above; see docs/CONFIG.md.",
+          ),
+          ...waiting,
+        ];
+      }
+      const key = secret.value;
+      const source = secret.source;
       const baseFetch = ctx.o.fetch ?? fetch;
       const client = new LinearClient({
         apiKey: async () => key,
@@ -505,16 +552,18 @@ function linearGroup(ctx: Ctx): Group {
           bad(
             "linear.key",
             "fail",
-            auth ? "Linear rejected LINEAR_API_KEY" : `Linear unreachable: ${(e as Error).message}`,
             auth
-              ? "Create a new personal API key in Linear and export it as LINEAR_API_KEY."
+              ? `Linear rejected the key (${source})`
+              : `Linear unreachable: ${(e as Error).message}`,
+            auth
+              ? `Create a new personal API key in Linear, then replace it in ${SOURCE_FIX["linear.api_key"]}.`
               : "Check the network, then run harnessd doctor again.",
           ),
           notChecked("linear.team", "linear.key"),
           notChecked("linear.states", "linear.key"),
         ];
       }
-      const out: Check[] = [ok("linear.key", "accepted")];
+      const out: Check[] = [ok("linear.key", `accepted (${source})`)];
       if (!teamId) {
         return [
           ...out,
@@ -559,18 +608,36 @@ function linearGroup(ctx: Ctx): Group {
 }
 
 function slackGroup(ctx: Ctx): Group {
+  const fix = `Create a Slack incoming webhook, then paste its url in ${SOURCE_FIX["slack.webhook_url"]}.`;
   return {
     ids: ["slack.webhook"],
-    run: async () => [
-      ctx.env[SLACK_WEBHOOK_ENV]?.trim()
-        ? ok("slack.webhook", `${SLACK_WEBHOOK_ENV} is set`)
-        : bad(
+    run: async () => {
+      const secret = await lookup(ctx, "slack.webhook_url");
+      if (secret === undefined) {
+        return [
+          bad(
             "slack.webhook",
             "warn",
-            `${SLACK_WEBHOOK_ENV} is not set; no Slack lines are sent`,
-            `Create a Slack incoming webhook, then: export ${SLACK_WEBHOOK_ENV}=https://hooks.slack.com/...`,
+            `no webhook is saved and ${SECRET_ENV["slack.webhook_url"]} is not set; no Slack lines are sent`,
+            fix,
           ),
-    ],
+        ];
+      }
+      if ("error" in secret) {
+        return [bad("slack.webhook", "warn", `${secret.error}; no Slack lines are sent`, fix)];
+      }
+      if (!secret.value.startsWith("https://")) {
+        return [
+          bad(
+            "slack.webhook",
+            "warn",
+            `the webhook (${secret.source}) is not an https url; no Slack lines are sent`,
+            fix,
+          ),
+        ];
+      }
+      return [ok("slack.webhook", `set (${secret.source})`)];
+    },
   };
 }
 
@@ -799,6 +866,13 @@ export async function runStatus(options: StatusOptions): Promise<Check[]> {
     env,
     timeoutMs,
     config,
+    secrets:
+      options.secrets ??
+      createSecretStore({
+        globalDir: options.globalDir,
+        env,
+        exec: options.exec ?? execFile,
+      }),
   };
   const harnesses = [...new Set(Object.values(config?.agents ?? {}).map((a) => a.harness))];
   if (harnesses.length === 0) harnesses.push("claude-code");
@@ -806,15 +880,21 @@ export async function runStatus(options: StatusOptions): Promise<Check[]> {
     a === "claude-code" ? -1 : b === "claude-code" ? 1 : a.localeCompare(b),
   );
 
-  const secrets = secretsIn(env);
-  const clean = (c: Check): Check => ({
-    ...c,
-    detail: redact(c.detail, secrets),
-    fix: redact(c.fix, secrets),
-  });
+  // Values read from the store are masked too; they are known once the groups have run.
+  const clean = (c: Check): Check => {
+    const secrets = [...ctx.secrets.known(), ...secretsIn(env)].sort((a, b) => b.length - a.length);
+    return { ...c, detail: redact(c.detail, secrets), fix: redact(c.fix, secrets) };
+  };
   if (options.harnessesOnly) {
     const only = await Promise.all(
       options.harnessesOnly.map((h) => guarded(harnessGroup(ctx, h), timeoutMs)),
+    );
+    return only.flat().map(clean);
+  }
+  if (options.connectionsOnly) {
+    const groups = { linear: linearGroup, slack: slackGroup };
+    const only = await Promise.all(
+      options.connectionsOnly.map((g) => guarded(groups[g](ctx), timeoutMs)),
     );
     return only.flat().map(clean);
   }

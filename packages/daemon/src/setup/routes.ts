@@ -16,6 +16,7 @@ import {
   validateTeam,
 } from "@harnessd/shared";
 import { parse } from "smol-toml";
+import { applyTableKey, withFileLock } from "../config/edit.ts";
 import { loadConfig } from "../config/load.ts";
 import { applyTeam, type TeamChange, TeamEditError } from "../config/team.ts";
 import { EventStream, HttpError, type Route, type SendEvent } from "../server/router.ts";
@@ -188,38 +189,7 @@ function validateConfigText(text: string, file: string): void {
 
 /** Sets or clears `bin` in `[harnesses.<id>]`, keeping every other line. */
 export function applyHarnessBin(text: string, harness: HarnessId, bin: string | null): string {
-  const lines = text === "" ? [] : text.replace(/\n$/, "").split("\n");
-  const header = lines.findIndex((l) =>
-    new RegExp(`^\\s*\\[\\s*harnesses\\.${harness}\\s*\\]`).test(l),
-  );
-  const value = bin === null ? undefined : `bin = ${JSON.stringify(bin)}`;
-  if (header === -1) {
-    if (value === undefined) return text;
-    const lead = lines.length > 0 && (lines.at(-1) ?? "").trim() !== "" ? [""] : [];
-    lines.push(...lead, `[harnesses.${harness}]`, value);
-  } else {
-    let end = header + 1;
-    while (end < lines.length && !/^\s*\[/.test(lines[end] ?? "")) end++;
-    const at = lines.slice(header + 1, end).findIndex((l) => /^\s*bin\s*=/.test(l));
-    if (value !== undefined) {
-      if (at === -1) lines.splice(header + 1, 0, value);
-      else lines[header + 1 + at] = value;
-    } else if (at !== -1) {
-      lines.splice(header + 1 + at, 1);
-      end--;
-      const body = lines.slice(header + 1, end);
-      if (body.every((l) => /^\s*(#.*)?$/.test(l))) {
-        let start = header;
-        while (start > 0 && (lines[start - 1] ?? "").trim() === "") start--;
-        lines.splice(start, end - start);
-      }
-    }
-  }
-  const out = lines
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .replace(/\n+$/, "");
-  return out === "" ? "" : `${out}\n`;
+  return applyTableKey(text, `harnesses.${harness}`, "bin", bin);
 }
 
 interface TeamAgentView {
@@ -340,9 +310,12 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
         throw new HttpError(400, "invalid_body", `The path must end in /${name}.`);
       }
     }
-    const text = applyHarnessBin(await readText(globalFile), harness, bin);
-    validateConfigText(text, "~/.harnessd/config.toml");
-    await writeAtomic(globalFile, text);
+    // The secret store edits the same file; the lock keeps either from losing the other.
+    await withFileLock(globalFile, async () => {
+      const text = applyHarnessBin(await readText(globalFile), harness, bin);
+      validateConfigText(text, "~/.harnessd/config.toml");
+      await writeAtomic(globalFile, text);
+    });
     return { bin };
   }
 

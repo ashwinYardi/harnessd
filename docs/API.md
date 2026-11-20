@@ -86,6 +86,29 @@ The Settings pages use these routes (code: `packages/daemon/src/setup/routes.ts`
 - **Job** is `{ id, harness, action, command, state, exitCode?, lines, startedAt }`. `state` is `running`, `ok` or `failed`. `lines` holds the last 200 output lines. Each change goes out as a `job` event on `/api/setup/events`; a new stream gets the current jobs first.
 - **Binary path** must be absolute, an executable file, and end in the CLI's own name (`/claude`, `/codex`), because the status engine and the loop run it. It is written to `[harnesses.<id>] bin` in `~/.harnessd/config.toml`. `null` removes it. Other lines of the file stay.
 - **Team.** The rows are checked by `validateTeam` (`packages/shared/src/team.ts`): names are lowercase letters, digits, `-` and `_`; roles and harnesses come from the config schema; the team has exactly one coordinator. A default agent, or one set outside the workspace config.toml, cannot be removed. Only changed agents are written, to `[agents.<name>]` tables of `<repo>/.harnessd/config.toml`. The new file is checked with the config validator before it is written; an invalid team writes nothing. Then `harnessd sync` runs.
-- **Secrets.** No route takes or returns a secret. Keys go in through each CLI's own sign-in, or as environment variables that Connections names.
+- **Secrets.** Harness keys go in through each CLI's own sign-in. The Linear key and the Slack webhook go in through the secret routes below. No route returns a secret.
+
+## Secret routes (MET-33)
+Settings, Connections saves the Linear key and the Slack webhook url with these routes (code: `packages/daemon/src/secrets/`, D-030). They are write-only.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/secrets` | | `{ "secrets": SecretState[] }` |
+| POST | `/api/secrets/linear.api_key` | `{ "value": "…" }` | `{ "secret": SecretState, "checks": Check[] }` |
+| POST | `/api/secrets/slack.webhook_url` | `{ "value": "…" }` | the same |
+| POST | `/api/secrets/linear.api_key/remove` | `{}` | the same |
+| POST | `/api/secrets/slack.webhook_url/remove` | `{}` | the same |
+
+- **SecretState** is `{ "id", "set": boolean, "source": "saved" | "1Password" | "env" | null }`. It never holds the value or the reference.
+- **value** is the secret, or a reference: `op://vault/item/field` or `env:NAME` (docs/CONFIG.md "Secrets"). A value goes to `~/.harnessd/secrets/<id>`; a reference goes to `~/.harnessd/config.toml`. Saving one removes the other.
+- **checks** are that connection's checks, run again after the change: `linear.*` or `slack.*`. A value that a check echoes is masked.
+- **Fixed ids.** Each id has its own route, so no text from a request names a file. Any other path is 404.
+- **Errors.** A bad body or a value the store refuses is 400 `invalid_body`. A broken global config.toml is 400 `invalid_config`, and nothing is written. No error, response, log line or event repeats a value. The log gets one line per change, such as `settings: saved linear.api_key (saved)`.
+- The routes pass the same checks as every other route: loopback Host (403), `content-type: application/json` (415), 64 KiB (413).
+
+```sh
+curl -s -X POST -H 'content-type: application/json' -d '{"value":"op://Private/Linear/credential"}' http://127.0.0.1:4747/api/secrets/linear.api_key
+# {"secret":{"id":"linear.api_key","set":true,"source":"1Password"},"checks":[…]}
+```
 
 New routes are added as `Route` values (`{ method, path, handler }`) through `startDaemon({ routes })`. The handler returns the JSON body of a 200, a `RawBody` (a file), or an `EventStream`, or throws `HttpError(status, code)`.

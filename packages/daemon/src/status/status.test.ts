@@ -4,6 +4,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { createSecretStore } from "../secrets/store.ts";
 import type { ExecOptions, ExecResult } from "./detect.ts";
 import { type Check, isBlocking, runStatus, type StatusOptions } from "./status.ts";
 
@@ -295,7 +296,11 @@ test("Linear: no key is missing, and the team and states are not checked", async
   const w = await world();
   const checks = await runStatus({ ...w.options, env: { PATH: "/bin" } });
   assert.equal(byId(checks, "linear.key").state, "missing");
-  assert.match(byId(checks, "linear.key").fix, /export LINEAR_API_KEY=lin_api_/);
+  assert.equal(byId(checks, "linear.key").detail, "no key is saved and LINEAR_API_KEY is not set");
+  assert.equal(
+    byId(checks, "linear.key").fix,
+    "Paste a Linear personal API key in Settings, Connections, Linear.",
+  );
   assert.equal(byId(checks, "linear.team").state, "missing");
   assert.equal(w.linearBodies.length, 0);
 });
@@ -549,4 +554,65 @@ test("harnessesOnly runs just those harness checks, used by an agent or not", as
     ],
   );
   assert.ok(!w.calls.some((c) => c.startsWith("/bin/gh")), "no GitHub call");
+});
+
+test("Linear and Slack read through the secret store and name the source, never the value", async () => {
+  const w = await world();
+  const saved = "lin_api_SAVEDVALUE123456";
+  const hook = "https://hooks.slack.com/services/T1/B1/SAVEDHOOK99";
+  const store = createSecretStore({ globalDir: w.globalDir, env: w.options.env });
+  await store.save("linear.api_key", saved);
+  await store.save("slack.webhook_url", hook);
+  w.replies.set("/bin/git worktree list --porcelain", failed(`fatal: ${saved} ${hook}`));
+  const checks = await runStatus(w.options);
+  assert.deepEqual(byId(checks, "linear.key"), {
+    id: "linear.key",
+    state: "ok",
+    detail: "accepted (saved)",
+    fix: "",
+  });
+  assert.equal(byId(checks, "slack.webhook").detail, "set (saved)");
+  const text = JSON.stringify(checks);
+  assert.doesNotMatch(text, /SAVEDVALUE|SAVEDHOOK/);
+
+  // The env source is named too.
+  const w2 = await world();
+  const env = await runStatus(w2.options);
+  assert.equal(byId(env, "linear.key").detail, "accepted (env)");
+  assert.equal(byId(env, "slack.webhook").detail, "set (env)");
+});
+
+test("a reference that cannot be read fails linear.key with the reason, and warns for Slack", async () => {
+  const w = await world();
+  await writeFile(
+    join(w.globalDir, "config.toml"),
+    '[secrets.linear]\napi_key = "op://Private/Linear/credential"\n[secrets.slack]\nwebhook_url = "env:NOT_SET_HOOK"\n',
+  );
+  const checks = await runStatus(w.options);
+  const key = byId(checks, "linear.key");
+  assert.equal(key.state, "fail");
+  assert.equal(key.detail, "1Password: the op CLI is not installed");
+  assert.equal(
+    key.fix,
+    "Fix the 1Password reference, or replace it in Settings, Connections, Linear.",
+  );
+  assert.equal(byId(checks, "linear.team").state, "missing");
+  assert.equal(w.linearBodies.length, 0);
+  const slack = byId(checks, "slack.webhook");
+  assert.equal(slack.state, "warn");
+  assert.equal(slack.detail, "env:NOT_SET_HOOK is not set; no Slack lines are sent");
+});
+
+test("connectionsOnly runs just those connection groups (MET-33)", async () => {
+  const w = await world();
+  const checks = await runStatus({ ...w.options, connectionsOnly: ["linear"] });
+  assert.deepEqual(
+    checks.map((c) => c.id),
+    ["linear.key", "linear.team", "linear.states"],
+  );
+  assert.deepEqual(
+    (await runStatus({ ...w.options, connectionsOnly: ["slack"] })).map((c) => c.id),
+    ["slack.webhook"],
+  );
+  assert.ok(!w.calls.some((c) => c.includes("gh")));
 });

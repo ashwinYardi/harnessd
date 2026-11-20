@@ -1,13 +1,14 @@
-// Slack #harnessd for one `harnessd run` (D-015, D-021): the notifier the loop uses and
-// the daily summary. Without HARNESSD_SLACK_WEBHOOK_URL it is NullNotifier, and `status`
-// is the one warning to log.
+// Slack #harnessd for one `harnessd run` (D-015, D-021, D-030): the notifier the loop
+// uses and the daily summary. The webhook is looked up before each post, so one saved in
+// Settings works with no restart. Without one nothing is posted, and `status` says so.
 import type { SlackConfig } from "@harnessd/shared";
-import { type NoticeIssue, type Notifier, NullNotifier } from "./notifier.ts";
+import type { NoticeIssue, Notifier } from "./notifier.ts";
 import { createSlackNotifier, SLACK_WEBHOOK_ENV, type SlackFetch } from "./slack.ts";
 import { createDailySummary, createFileSummaryStore, type SummaryStore } from "./summary.ts";
 
 export interface VisibilityOptions {
-  env: NodeJS.ProcessEnv;
+  /** The webhook url: the secret store's lookup (saved, reference, then the env var). */
+  webhookUrl: () => Promise<string | undefined>;
   slack: SlackConfig;
   /** summary.json goes to `<repo>/.harnessd/state/`. */
   repoDir: string;
@@ -21,9 +22,8 @@ export interface VisibilityOptions {
 }
 
 export interface Visibility {
-  enabled: boolean;
   /** One line for the start of `harnessd run`: where notices go, or the warning. */
-  status: string;
+  status(): Promise<string>;
   /** Give it to the loop. */
   notifier: Notifier;
   /** Sends the daily summary when one is due. Never throws. */
@@ -34,19 +34,21 @@ export interface Visibility {
 
 export function createVisibility(options: VisibilityOptions): Visibility {
   const { slack, log } = options;
-  const url = options.env[SLACK_WEBHOOK_ENV]?.trim();
-  const off = (why: string): Visibility => ({
-    enabled: false,
-    status: `slack: ${SLACK_WEBHOOK_ENV} ${why}, so harnessd posts no Slack notices or daily summary (docs/INSTALL.md)`,
-    notifier: new NullNotifier(),
-    checkSummary: async () => {},
-    flush: async () => {},
-  });
-  if (!url) return off("is not set");
-  if (!url.startsWith("https://")) return off("is not an https url");
+  /** The url when it can be used; else why not, for the start line. Never the value. */
+  async function webhook(): Promise<{ url: string } | { why: string }> {
+    let url: string | undefined;
+    try {
+      url = (await options.webhookUrl())?.trim();
+    } catch (error) {
+      return { why: `the webhook could not be read (${(error as Error).message})` };
+    }
+    if (!url) return { why: `no webhook is saved and ${SLACK_WEBHOOK_ENV} is not set` };
+    if (!url.startsWith("https://")) return { why: "the webhook is not an https url" };
+    return { url };
+  }
 
   const poster = createSlackNotifier({
-    webhookUrl: url,
+    webhookUrl: options.webhookUrl,
     log,
     ...(options.fetch ? { fetch: options.fetch } : {}),
   });
@@ -60,11 +62,17 @@ export function createVisibility(options: VisibilityOptions): Visibility {
     log,
   });
   return {
-    enabled: true,
-    status: `slack: posting notices to ${slack.channel}, daily summary at ${slack.summary_time} ${slack.time_zone}`,
+    async status() {
+      const w = await webhook();
+      return "url" in w
+        ? `slack: posting notices to ${slack.channel}, daily summary at ${slack.summary_time} ${slack.time_zone}`
+        : `slack: ${w.why}, so harnessd posts no Slack notices or daily summary (docs/INSTALL.md)`;
+    },
     notifier: summary.wrap(poster),
     async checkSummary() {
       try {
+        // No webhook yet: the summary waits, and goes out once a webhook is saved.
+        if (!("url" in (await webhook()))) return;
         await summary.check();
       } catch (error) {
         log(`summary: check failed: ${(error as Error).message}`);
