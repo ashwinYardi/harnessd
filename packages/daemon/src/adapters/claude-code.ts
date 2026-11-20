@@ -1,4 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import type { Readable } from "node:stream";
 import {
   type AdapterEvent,
@@ -31,9 +33,33 @@ const DEFAULT_KILL_GRACE_MS = 5_000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const SUMMARY_MAX = 120;
 
-/** Builds the argv for `claude` print mode with stream-json output. */
-export function claudeArgs(task: Task, options: ClaudeCodeOptions = {}): string[] {
-  const args = ["-p", task.prompt, "--output-format", "stream-json", "--verbose"];
+/**
+ * D-031: every run reads only project settings and the worktree's .mcp.json, never the owner's
+ * ~/.claude settings, CLAUDE.md, skills, hooks, plugins or ~/.claude.json MCP servers.
+ * claude fails when the --mcp-config file is missing, so a worktree without .mcp.json gets an
+ * empty inline config. --bare and --safe-mode are rejected on purpose.
+ */
+export const NO_MCP_SERVERS = '{"mcpServers":{}}';
+
+function isolationArgs(cwd: string | undefined): string[] {
+  const mcp =
+    cwd === undefined || existsSync(join(cwd, ".mcp.json")) ? ".mcp.json" : NO_MCP_SERVERS;
+  return ["--setting-sources", "project", "--strict-mcp-config", "--mcp-config", mcp];
+}
+
+/**
+ * Builds the argv for `claude` print mode with stream-json output.
+ * `cwd` is the run's directory; it decides how --mcp-config is passed.
+ */
+export function claudeArgs(task: Task, options: ClaudeCodeOptions = {}, cwd?: string): string[] {
+  const args = [
+    "-p",
+    task.prompt,
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    ...isolationArgs(cwd),
+  ];
   const model = task.model ?? options.model;
   if (model) args.push("--model", model);
   if (options.permissionMode) args.push("--permission-mode", options.permissionMode);
@@ -88,7 +114,7 @@ class EventLog implements AsyncIterable<AdapterEvent> {
 
 function startClaudeRun(task: Task, worktree: string, options: ClaudeCodeOptions): AdapterRun {
   const bin = options.bin ?? process.env.HARNESSD_CLAUDE_BIN ?? "claude";
-  const argv = claudeArgs(task, options);
+  const argv = claudeArgs(task, options, worktree);
   const graceMs = options.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
   const events = new EventLog();
   const startedAt = performance.now();

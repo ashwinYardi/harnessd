@@ -1,10 +1,23 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import type { AdapterEvent, AdapterRun, Task } from "@harnessd/shared";
-import { type ClaudeCodeOptions, createClaudeCodeAdapter, summarizeInput } from "./claude-code.ts";
+import {
+  type ClaudeCodeOptions,
+  claudeArgs,
+  createClaudeCodeAdapter,
+  NO_MCP_SERVERS,
+  summarizeInput,
+} from "./claude-code.ts";
 
 const FAKE = join(import.meta.dirname, "../../test/fixtures/fake-claude.mjs");
 const scratch = mkdtempSync(join(tmpdir(), "harnessd-claude-"));
@@ -106,6 +119,11 @@ test("passes prompt, model, permissions and worktree cwd to the CLI", async () =
     "--output-format",
     "stream-json",
     "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--mcp-config",
+    NO_MCP_SERVERS,
     "--model",
     "sonnet",
     "--permission-mode",
@@ -132,7 +150,41 @@ test("omits --model and permission flags when not configured", async () => {
     "--output-format",
     "stream-json",
     "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--mcp-config",
+    NO_MCP_SERVERS,
   ]);
+});
+
+test("every run skips the owner's user-level config (D-031)", () => {
+  const isolation = [
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--mcp-config",
+    ".mcp.json",
+  ];
+  const plain = claudeArgs(task());
+  const full = claudeArgs(task({ model: "sonnet" }), { permissionMode: "auto" });
+  for (const argv of [plain, full]) {
+    const at = argv.indexOf("--setting-sources");
+    assert.deepEqual(argv.slice(at, at + isolation.length), isolation);
+    assert.ok(!argv.includes("--bare"), "--bare skips skill hooks and keychain sign-in");
+    assert.ok(!argv.includes("--safe-mode"), "--safe-mode drops project skills and hooks");
+  }
+  assert.deepEqual(full.slice(-4), ["--model", "sonnet", "--permission-mode", "auto"]);
+});
+
+test("--mcp-config names the worktree's .mcp.json only when it exists", () => {
+  const repo = mkdtempSync(join(scratch, "repo-"));
+  const mcpArg = (argv: string[]) => argv[argv.indexOf("--mcp-config") + 1];
+  // claude exits with "MCP config file not found" for a missing path, so no file means no servers.
+  assert.equal(mcpArg(claudeArgs(task(), {}, repo)), NO_MCP_SERVERS);
+  assert.deepEqual(JSON.parse(NO_MCP_SERVERS), { mcpServers: {} });
+  writeFileSync(join(repo, ".mcp.json"), '{"mcpServers":{}}');
+  assert.equal(mcpArg(claudeArgs(task(), {}, repo)), ".mcp.json");
 });
 
 test("adapter model applies when the task sets none", async () => {
