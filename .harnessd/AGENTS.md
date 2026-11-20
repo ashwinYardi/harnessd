@@ -12,7 +12,12 @@
 - **Before you build an issue,** read and follow `.claude/skills/grill-with-docs/SKILL.md` and the two skills it names. Run it on autopilot: answer each question yourself from the spec, decisions, code and vault. Ask the human only for a D-011 trigger. Write new terms to `GLOSSARY.md` and new precedent as a decision record.
 - **Write code test-first** with `.claude/skills/tdd/`. Use `diagnosing-bugs` for a bug, and `codebase-design` before a new module.
 - **Before you open a PR,** run `.claude/skills/code-review/` on your own diff.
-- **For any UI work,** use `.claude/skills/impeccable/`. Read PRODUCT.md first, and read `impeccable/reference/craft-floor.md` before every UI edit. Run an impeccable audit before the PR. Follow the UX rules in PRODUCT.md.
+- **For any UI work,** use `.claude/skills/impeccable/` for real, never in a degraded mode without saying so in the PR. Read PRODUCT.md and DESIGN.md first, and read `impeccable/reference/craft-floor.md` before every UI edit.
+  - Plan with `/impeccable shape`. Before the PR, run `/impeccable critique` and `/impeccable audit`, then `/impeccable polish`.
+  - The design hook in `.claude/settings.json` scans each UI file you edit, and runs a deep pass when you stop. Fix its findings; do not silence them.
+  - Ask the `impeccable-finish-reviewer` agent to review the finished UI, and `impeccable-motion-reviewer` for motion. Apply their material fixes.
+  - CI runs `impeccable detect` on `packages/ui/app/src`. A finding fails CI.
+  - Follow the UX rules in PRODUCT.md.
 
 ## Agent skills
 
