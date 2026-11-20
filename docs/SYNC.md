@@ -18,6 +18,8 @@ Every repo gets the built-in memory server (docs/MEMORY.md) as `harnessd-memory`
 
 Agent-specific instructions are not written to AGENTS.md; adapters pass them per run.
 
+The loop runs the same sync into each worktree before an agent run (docs/LOOP.md "What an agent run sees").
+
 ## Skills
 Sync writes every merged skill that is not turned off (docs/CONFIG.md "Skills"). This includes the default skill pack that `harnessd init` installs in `~/.harnessd/skills/`.
 - SKILL.md gets `name`, `description`, the other frontmatter lines as they are, the generated note, then the body.

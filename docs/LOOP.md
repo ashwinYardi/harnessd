@@ -77,6 +77,28 @@ When the split is done, the parent moves to In Progress.
 
 The worktree is removed after every run, except a run a pause cancelled.
 
+## What an agent run sees
+A worktree is cut from `origin/main`, so it holds only what the repo commits. harnessd fills in the rest before the agent starts.
+
+- **Worktree sync.** Before each part run, resumed run and QA agent run, the loop writes the same native files as `harnessd sync` (docs/SYNC.md) into the worktree: skills, rules, AGENTS.md and CLAUDE.md, settings and MCP.
+  - It reads the workspace layer from the main repo's `.harnessd/`, so changes there count even when they are not committed.
+  - In a QA round, the sync runs after `qa.setup_command` and `qa.test_command`, just before the QA agent.
+  - Coordinator grill and plan runs get no sync.
+- **Sync failure.** A failed sync fails the run before the agent starts. The rule is the one for an error: a comment and one retry, then Needs input.
+- **Excluded files.** The generated files stay out of the agent's commits.
+  - Each run gets an exclude file outside the worktree. The loop sets it as `core.excludesFile` through the `GIT_CONFIG_*` environment variables.
+  - Generated files that the repo already tracks get `git update-index --skip-worktree`.
+  - An issue that asks for these files adds them with `git add -f`.
+- **Isolation flags.** Claude Code runs with `--setting-sources project --strict-mcp-config --mcp-config .mcp.json` (docs/decisions/D-031-agent-run-isolation.md).
+- **What the owner's config no longer gives.** The run does not load the user-level Claude Code config:
+  - the user permissions allowlist, user `env` and `apiKeyHelper`;
+  - user plugins, the user CLAUDE.md, skills and hooks;
+  - user MCP servers.
+
+  So a key goes in through `claude login` or an environment variable.
+- **Memory.** The prompt has a Memory section. It names `search_notes`, `read_note` and `write_note`, and the two vaults: `<repo>/.harnessd/vault/` and `$HARNESSD_HOME/vault/` (docs/MEMORY.md). The worktree's `.mcp.json` runs `harnessd mcp memory --workspace <main repo>`, so notes outlive the worktree.
+- **Hand-vendored skills.** A skill folder that sync did not generate stays as it is (D-020). Sync prints `kept <folder>` and does not write into it.
+
 ## Pause
 The global kill switch (D-014). It stops every agent in every workspace within 10 s.
 
