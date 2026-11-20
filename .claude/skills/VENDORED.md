@@ -12,3 +12,8 @@ Not vendored: `setup-matt-pocock-skills` (its output is `docs/agents/`, written 
 `impeccable/scripts/impeccable` downloads its engine binary on first run and checks it against `impeccable/scripts/engine-checksums.txt`. If the download is blocked, the skill falls back to reading PRODUCT.md and DESIGN.md directly.
 
 This is the setup for building harnessd itself. MET-21 adds the same pack to `harnessd init` for every user.
+
+## Impeccable agents and hook
+`npx impeccable@4.10.0 install --providers=claude,codex --scope=project` added these. They are Apache 2.0, from the same commit as the skill.
+- `.claude/agents/impeccable-*.md`: the finish reviewer, motion reviewer, documenter, asset producer and manual-edit applier.
+- `.claude/settings.json`: the design hook. It runs the detector after each Edit or Write on a UI file, and a deep pass on Stop. `harnessd sync` also writes this file, so sync must keep these hooks before harnessd syncs this repo.

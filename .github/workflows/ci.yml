@@ -26,3 +26,5 @@ jobs:
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+      - name: impeccable detect (UI anti-patterns)
+        run: npx -y impeccable@4.10.0 detect --github packages/ui/app/src
