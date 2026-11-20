@@ -6,6 +6,7 @@
       "**",
       "!**/dist",
       "!**/node_modules",
+      "!.claude/skills",
       "!**/*.md",
       "!**/test/fixtures/sync/*/expected"
     ]
