@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { createFilePauseStore, readDaemonInfo, startDaemon } from "@harnessd/daemon";
 import { run } from "./index.ts";
-import { parseRunArgs } from "./loop.ts";
+import { parseRunArgs, runLoop } from "./loop.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -27,7 +29,7 @@ async function setup(env: NodeJS.ProcessEnv, config?: string) {
     cwd: repo,
     env: { HARNESSD_HOME: home, ...env },
   };
-  return { repo, out, err, io };
+  return { repo, home, out, err, io };
 }
 
 test("run fails clearly without LINEAR_API_KEY and never prints a key", async () => {
@@ -79,4 +81,56 @@ test("parseRunArgs reads the dir, --once, --interval and --permission-mode", () 
   assert.equal(parseRunArgs(["a", "b"]), 'unexpected argument "b"');
   assert.equal(parseRunArgs(["--nope"]), 'unexpected argument "--nope"');
   assert.equal(parseRunArgs(["--permission-mode"]), "--permission-mode: expected a mode");
+});
+
+const PAUSED_CONFIG = '[linear]\nteam_id = "MET"\n\n[daemon]\nport = 0\n';
+
+test("run while paused starts the API, says it is paused and dispatches nothing", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause("deploy");
+  assert.equal(await run(["run", "--once"], s.io), 0);
+  assert.match(s.out[0] ?? "", /^harnessd run: API at http:\/\/127\.0\.0\.1:\d+$/);
+  assert.match(
+    s.out[1] ?? "",
+    /^harnessd run: paused since \S+ \(deploy\)\. Run "harnessd resume"/,
+  );
+  assert.equal(s.out.at(-1), "paused: nothing dispatched");
+  assert.equal(await readDaemonInfo(s.home), undefined, "daemon.json removed on stop");
+});
+
+test("run writes daemon.json and serves the pause API until it stops", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  let seen: unknown;
+  let url = "";
+  const code = await runLoop([], {
+    ...s.io,
+    stopSignal: async () => {
+      const info = await readDaemonInfo(s.home);
+      url = info?.url ?? "";
+      assert.equal(info?.pid, process.pid);
+      seen = await (await fetch(`${url}/api/pause`)).json();
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal((seen as { paused: boolean }).paused, true);
+  assert.equal(existsSync(join(s.home, "state", "daemon.json")), false);
+  await assert.rejects(fetch(`${url}/health`), "the server is closed");
+});
+
+test("run fails clearly when the API port is taken", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" });
+  const busy = await startDaemon();
+  try {
+    const port = new URL(busy.url).port;
+    await writeFile(
+      join(s.repo, ".harnessd", "config.toml"),
+      `[linear]\nteam_id = "MET"\n\n[daemon]\nport = ${port}\n`,
+    );
+    assert.equal(await run(["run", "--once"], s.io), 1);
+    assert.match(s.err.join("\n"), new RegExp(`port ${port} is in use`));
+  } finally {
+    await busy.close();
+  }
 });

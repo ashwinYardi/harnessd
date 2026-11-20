@@ -11,11 +11,12 @@ LINEAR_API_KEY=lin_api_... harnessd run [dir] [--once] [--interval <seconds>] [-
 - `linear.team_id` (a team key such as `MET`, or its UUID) is required. `linear.project` (a name or UUID) is optional. Both live in `.harnessd/config.toml`.
 - The loop ticks every 30 s by default. `--once` runs one tick and waits for its runs to finish.
 - Agents run with `--permission-mode auto` by default: nobody is there to approve prompts, and auto mode still screens risky actions. Each agent works in its own worktree (D-012), which keeps branches apart but is not a sandbox. `--permission-mode` overrides the default.
+- The local API (docs/API.md) starts with the loop on `127.0.0.1:<daemon.port>` (default 4747). Its url goes to `~/.harnessd/state/daemon.json`, which is removed on a clean stop. A port already in use stops the command with an error; give a second loop its own `daemon.port`.
 - SIGINT or SIGTERM stops the polling. Runs already started are allowed to finish.
 
 ## One tick
-1. **Re-queue.** Any run recorded in `loop.json` that this process does not own was left by a previous process. Its worktree is removed and its sub-issue goes back to Ready, with no attempt counted.
-2. **Pause check.** A `paused` hook is checked here. If it returns true, the tick stops. The `harnessd pause` command itself comes in MET-15.
+1. **Re-queue.** Any run recorded in `loop.json` that this process does not own was left by a previous process. Its worktree is removed and its sub-issue goes back to Ready, with no attempt counted. A run a pause had already marked keeps its worktree (see Pause).
+2. **Pause check.** The pause flag is re-read. If it is set, anything still running is cancelled and the tick stops.
 3. **Dispatch** eligible sub-issues, then **split** Ready issues, then **dispatch** again.
 4. **Save** `loop.json`.
 
@@ -69,8 +70,32 @@ When the split is done, the parent moves to In Progress.
 | error or timeout, first time | A comment is posted and the sub-issue goes back to Ready for one retry. |
 | error or timeout, second time | A comment is posted, the sub-issue moves to Needs input and one ping is sent. |
 | cancelled | The sub-issue goes back to Ready. No attempt is counted. |
+| cancelled by a pause | The worktree is kept. See Pause. |
 
-The worktree is removed after every run.
+The worktree is removed after every run, except a run a pause cancelled.
+
+## Pause
+The global kill switch (D-014). It stops every agent in every workspace within 10 s.
+
+```sh
+harnessd pause [--reason <text>]   # "Paused. 2 runs cancelled; worktrees kept."
+harnessd resume                    # "Resumed."
+```
+
+- **The flag.** `~/.harnessd/state/paused.json` (`$HARNESSD_HOME/state/` when set) holds `{ "paused": true, "since": "…", "reason": "…" }`. It is written atomically. A missing file means running. An unreadable one counts as paused, and `harnessd resume` replaces it.
+- **The commands.** Both write the flag first, then POST to the daemon that `daemon.json` names, so the effect is immediate. They exit 0 even when no daemon is running, since the flag still applies. The UI button (MET-18) will use the same API (docs/API.md).
+- **What stops.** While paused, a tick dispatches nothing, and grills and splits are skipped. Every run in flight is cancelled through its adapter (SIGTERM to the process group, then SIGKILL after the grace period, 5 s by default). Grill and plan runs are cancelled too, and their issue is grilled again after resume.
+- **No daemon reachable.** The loop re-reads the flag at the start of every tick and, while runs are in flight, every second. So a pause written with the daemon unreachable still stops runs within 10 s.
+- **A cancelled run:**
+  - keeps its worktree, for inspection;
+  - is listed under `interrupted` in `loop.json`, with the worktree path;
+  - goes back to Ready with the comment "Paused by harnessd pause; worktree kept at <path>";
+  - counts no attempt.
+
+  The run is marked in `loop.json` before it is killed. If the process stops before the cancel is recorded, the restart still keeps the worktree.
+- **A cancelled QA round** stops its tests and its QA agent, keeps the PR checkout in use and is recorded the same way. It posts no review, counts no QA failure and sends no part back. When QA runs again, the kept checkout is removed and the PR head is checked out afresh, in the same round.
+- **Resume.** The next dispatch of that sub-issue **reuses** the kept worktree: same branch and path, with the earlier work, committed or not. The prompt then says so, after any QA feedback. The kept worktree is removed only if the branch name changed in the meantime (the issue was renamed). Once the resumed run finishes, its worktree is removed as usual.
+- **Restart.** Paused survives a restart. `harnessd run` while paused starts the API and the loop in the paused state and prints `harnessd run: paused since … Run "harnessd resume" to dispatch again.`
 
 ## QA
 QA checks each part's PR against the parent's "Done when" list before anything merges (D-013). It starts once every part that blocks the QA sub-issue is In Review or Done. Done parts are skipped.
@@ -104,7 +129,9 @@ The whole round runs within the QA sub-issue's size budget. Failures are counted
 `<repo>/.harnessd/state/loop.json` is written atomically (temp file, fsync, rename). The folder has its own `.gitignore`.
 
 ```json
-{ "version": 1, "lastPollAt": "…", "inFlight": [{ "issueId": "…", "issueKey": "MET-41", "role": "backend", "agent": "backend", "worktree": "…", "branch": "…", "startedAt": "…", "pid": 123 }], "attempts": { "<issueId>": 1 }, "qaFailures": { "<parentId>": 1 }, "qaFeedback": { "<partId>": { "prUrl": "…", "reviewUrl": "…", "failing": ["…"] } } }
+{ "version": 1, "lastPollAt": "…", "inFlight": [{ "issueId": "…", "issueKey": "MET-41", "role": "backend", "agent": "backend", "worktree": "…", "branch": "…", "startedAt": "…", "pid": 123, "pausedAt": "…" }], "interrupted": [{ "issueId": "…", "issueKey": "MET-42", "role": "frontend", "agent": "frontend", "worktree": "…", "branch": "…", "interruptedAt": "…", "reason": "paused" }], "attempts": { "<issueId>": 1 }, "qaFailures": { "<parentId>": 1 }, "qaFeedback": { "<partId>": { "prUrl": "…", "reviewUrl": "…", "failing": ["…"] } } }
 ```
 
-Linear stays the source of truth. The file only records in-flight runs, failure counts and the QA feedback a sent-back part gets in its prompt. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.
+`pausedAt` is set only on an in-flight run that a pause is cancelling.
+
+Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts and the QA feedback a sent-back part gets in its prompt. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.

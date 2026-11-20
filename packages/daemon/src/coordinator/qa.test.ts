@@ -509,3 +509,18 @@ test("runShellCommand reports the exit code and output, and kills on timeout", a
   assert.equal(slow.timedOut, true);
   assert.ok(Date.now() - started < 10_000);
 });
+
+test("runShellCommand stops when its signal aborts, and never starts once aborted", async () => {
+  const abort = new AbortController();
+  const started = Date.now();
+  const running = runShellCommand("sleep 30", process.cwd(), 60_000, abort.signal);
+  setTimeout(() => abort.abort(), 100);
+  const stopped = await running;
+  assert.equal(stopped.timedOut, false);
+  assert.notEqual(stopped.exitCode, 0);
+  assert.ok(Date.now() - started < 10_000);
+
+  const never = await runShellCommand("echo ran", process.cwd(), 10_000, abort.signal);
+  assert.equal(never.error, "cancelled");
+  assert.equal(never.output, "");
+});

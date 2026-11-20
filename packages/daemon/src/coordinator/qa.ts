@@ -44,17 +44,21 @@ export interface CommandResult {
   error?: string;
 }
 
-/** Runs one shell command in `cwd`. Injectable so tests need no real toolchain. */
+/**
+ * Runs one shell command in `cwd`. Injectable so tests need no real toolchain. Aborting
+ * `signal` (a pause) stops the command.
+ */
 export type CommandRunner = (
   command: string,
   cwd: string,
   timeoutMs: number,
+  signal?: AbortSignal,
 ) => Promise<CommandResult>;
 
 export const MAX_COMMAND_OUTPUT = 64 * 1024;
 
-/** `sh -c <command>` in its own process group with CI=1; the group is killed on timeout. */
-export const runShellCommand: CommandRunner = (command, cwd, timeoutMs) =>
+/** `sh -c <command>` in its own process group with CI=1; the group is killed on timeout or abort. */
+export const runShellCommand: CommandRunner = (command, cwd, timeoutMs, signal) =>
   new Promise((resolve) => {
     let output = "";
     let timedOut = false;
@@ -64,10 +68,28 @@ export const runShellCommand: CommandRunner = (command, cwd, timeoutMs) =>
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", terminate);
       const result: CommandResult = { exitCode, timedOut, output };
       if (error !== undefined) result.error = error;
       resolve(result);
     };
+    let pid: number | undefined;
+    const kill = (sig: NodeJS.Signals) => {
+      try {
+        if (pid !== undefined) process.kill(-pid, sig);
+      } catch {
+        // already gone
+      }
+    };
+    function terminate() {
+      kill("SIGTERM");
+      setTimeout(() => kill("SIGKILL"), 5_000).unref();
+    }
+    if (signal?.aborted) {
+      finish(null, "cancelled");
+      return;
+    }
+    signal?.addEventListener("abort", terminate, { once: true });
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn("sh", ["-c", command], {
@@ -80,23 +102,16 @@ export const runShellCommand: CommandRunner = (command, cwd, timeoutMs) =>
       finish(null, message(error));
       return;
     }
+    pid = child.pid;
     const append = (chunk: string) => {
       output = (output + chunk).slice(-MAX_COMMAND_OUTPUT);
     };
     child.stdout?.setEncoding("utf8").on("data", append);
     child.stderr?.setEncoding("utf8").on("data", append);
-    const kill = (signal: NodeJS.Signals) => {
-      try {
-        if (child.pid !== undefined) process.kill(-child.pid, signal);
-      } catch {
-        // already gone
-      }
-    };
     timer = setTimeout(
       () => {
         timedOut = true;
-        kill("SIGTERM");
-        setTimeout(() => kill("SIGKILL"), 5_000).unref();
+        terminate();
       },
       Math.max(timeoutMs, 1),
     );
@@ -124,12 +139,13 @@ export async function runQaTests(
   timeoutMs: number,
   run: CommandRunner = runShellCommand,
   now: () => number = Date.now,
+  signal?: AbortSignal,
 ): Promise<TestRun> {
   const deadline = now() + timeoutMs;
   const steps = [commands.setup_command.trim(), commands.test_command.trim()].filter(Boolean);
   let last: TestRun | undefined;
   for (const command of steps) {
-    const result = await run(command, cwd, Math.max(deadline - now(), 1));
+    const result = await run(command, cwd, Math.max(deadline - now(), 1), signal);
     last = {
       passed: result.exitCode === 0 && !result.timedOut && result.error === undefined,
       command,
@@ -138,7 +154,7 @@ export async function runQaTests(
       output: result.output,
     };
     if (result.error !== undefined) last.error = result.error;
-    if (!last.passed) return last;
+    if (!last.passed || signal?.aborted) return last;
   }
   return last ?? { passed: false, command: "", exitCode: null, timedOut: false, output: "" };
 }
@@ -424,6 +440,11 @@ export interface QaRunDeps {
   now?: () => number;
   /** Told the worktree in use ("" once removed), so a crash can clean it up. */
   onWorktree?: (path: string) => void;
+  /**
+   * Aborted by a pause: the tests and the QA agent are stopped, no review is posted and
+   * the worktree in use is kept for the loop to record. The result is then `cancelled`.
+   */
+  signal?: AbortSignal;
   log?: (line: string) => void;
 }
 
@@ -431,6 +452,8 @@ export interface QaRunResult {
   /** `changes_requested` when any part must change; `error` when QA could not judge some. */
   outcome: "approved" | "changes_requested" | "error";
   reviews: PrReview[];
+  /** True when `signal` stopped the round early. Nothing was posted for the PR in progress. */
+  cancelled?: boolean;
 }
 
 /** Reviews every part's PR. Never throws: a broken step is an `error` review. */
@@ -440,6 +463,14 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
   const log = deps.log ?? (() => {});
   const deadline = now() + input.budgetMs;
   const checklist = qaChecklist(parent);
+  const cancelled = () => deps.signal?.aborted === true;
+  const stopped = (part: LinkedIssue, pr?: PullRequest): PrReview => ({
+    part,
+    ...(pr ? { pr } : {}),
+    decision: "error",
+    failing: [],
+    error: "cancelled by harnessd pause",
+  });
 
   async function post(pr: PullRequest, event: ReviewEvent, body: string) {
     try {
@@ -496,6 +527,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       };
     }
     deps.onWorktree?.(path);
+    if (cancelled()) return stopped(part, pr);
 
     let tests: TestRun;
     let verdict: ParsedQaVerdict;
@@ -504,9 +536,18 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         log(`${qa.key}: could not list the files of PR #${pr.number}: ${message(error)}`);
         return undefined;
       });
-      tests = await runQaTests(deps.commands, path, deadline - now(), deps.runCommand, now);
+      tests = await runQaTests(
+        deps.commands,
+        path,
+        deadline - now(),
+        deps.runCommand,
+        now,
+        deps.signal,
+      );
       const left = deadline - now();
-      if (left <= 0) {
+      if (cancelled()) {
+        verdict = { ok: false, error: "cancelled by harnessd pause" };
+      } else if (left <= 0) {
         verdict = { ok: false, error: "the QA budget ran out before the agent ran" };
       } else {
         const task: Task = {
@@ -529,13 +570,18 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
       }
     } catch (error) {
+      if (cancelled()) return stopped(part, pr);
       return { part, pr, decision: "error", failing: [], error: message(error) };
     } finally {
-      await deps.worktrees
-        .remove(path)
-        .catch((error) => log(`${qa.key}: could not remove ${path}: ${message(error)}`));
-      deps.onWorktree?.("");
+      // A pause keeps the worktree in use for inspection (MET-15); the loop records it.
+      if (!cancelled()) {
+        await deps.worktrees
+          .remove(path)
+          .catch((error) => log(`${qa.key}: could not remove ${path}: ${message(error)}`));
+        deps.onWorktree?.("");
+      }
     }
+    if (cancelled()) return stopped(part, pr);
 
     const decision = decideReview(checklist, tests, verdict);
     if (decision.decision === "error") {
@@ -573,12 +619,14 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
 
   const reviews: PrReview[] = [];
   for (const part of input.parts) {
+    if (cancelled()) break;
     if (part.state.toLowerCase() === "done") {
       log(`${qa.key}: ${part.key} is Done, not reviewed`);
       continue;
     }
     reviews.push(await review(part));
   }
+  if (cancelled()) return { outcome: "error", reviews, cancelled: true };
   const outcome = reviews.some((r) => r.decision === "request_changes")
     ? "changes_requested"
     : reviews.some((r) => r.decision === "error")

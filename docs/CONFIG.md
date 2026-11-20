@@ -26,6 +26,9 @@ project = "harnessd"
 [slack]
 channel = "#harnessd"
 
+[daemon]
+port = 4747                 # the local API on 127.0.0.1 (docs/API.md); 0 picks a free port
+
 [merge]
 # Replaces the default list: auth, payments, secrets (.env, *.pem, *.key),
 # .github/workflows/** (release and CI) and .harnessd/config.toml (merge gate).
