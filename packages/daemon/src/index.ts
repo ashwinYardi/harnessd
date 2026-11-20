@@ -38,6 +38,7 @@ export * from "./server/static.ts";
 export * from "./server/ui.ts";
 export * from "./setup/routes.ts";
 export * from "./status/detect.ts";
+export * from "./status/launchd.ts";
 export * from "./status/route.ts";
 export * from "./status/status.ts";
 export { tomlKey, tomlString } from "./sync/format.ts";

@@ -27,6 +27,7 @@ import {
   isExecutableFile,
   parseSemver,
 } from "./detect.ts";
+import { launchdPlistPath, parseServicePlist, wrapperExecPath } from "./launchd.ts";
 
 /**
  * ok: works. warn: works, but something is off; never blocks. fail: present but
@@ -80,6 +81,12 @@ export interface StatusOptions {
   /** Default process.version and process.execPath. */
   nodeVersion?: string;
   nodePath?: string;
+  /** Default process.platform. The service Node is checked on macOS only. */
+  platform?: NodeJS.Platform;
+  /** The launchd plist. Default ~/Library/LaunchAgents/dev.harnessd.daemon.plist under env.HOME. */
+  servicePlist?: string;
+  /** Reads a text file; undefined when it cannot be read. Default: fs.readFile. */
+  readText?: (path: string) => Promise<string | undefined>;
   /** Per group of checks. Default 5 s. */
   timeoutMs?: number;
   /** Default skill pack names, expected in `<globalDir>/skills/`. */
@@ -203,22 +210,80 @@ async function versionOf(ctx: Ctx, deadline: number, path: string): Promise<stri
   return res.code === 0 && line ? line.trim() : "version unknown";
 }
 
+const NODE_FIX_SERVICE = "Run the Install block with Node 24 active, then harnessd init.";
+
+/**
+ * The Node the launchd service runs, when it is not this one (MET-38). launchd loads no
+ * shell profile and no nvm, so the service can run another Node. Undefined: no plist,
+ * not macOS, an unreadable plist or wrapper, or the same Node; the check stays as it is.
+ */
+async function serviceNode(
+  ctx: Ctx,
+  current: string,
+): Promise<{ path: string } | { absent: string } | undefined> {
+  const platform = ctx.o.platform ?? process.platform;
+  if (platform !== "darwin") return undefined;
+  const home = ctx.env.HOME?.trim();
+  const file = ctx.o.servicePlist ?? (home ? launchdPlistPath(home) : undefined);
+  if (file === undefined) return undefined;
+  const read = ctx.o.readText ?? ((p: string) => readFile(p, "utf8").catch(() => undefined));
+  const text = await read(file);
+  const plist = text === undefined ? undefined : parseServicePlist(text);
+  if (plist === undefined) return undefined;
+  const program = await read(plist.program);
+  if (program === undefined) return undefined;
+  const wrapped = wrapperExecPath(program);
+  let path: string | undefined;
+  if (wrapped !== undefined) {
+    if (wrapped === current) return undefined;
+    if (!(await ctx.isExec(wrapped))) return { absent: `the service Node ${wrapped} is missing` };
+    path = wrapped;
+  } else {
+    path = await findOnPath({ PATH: plist.path ?? "" }, "node", ctx.isExec);
+    if (path === undefined) return { absent: "the service Node is not on its PATH" };
+    if (path === current) return undefined;
+  }
+  return { path };
+}
+
 function nodeGroup(ctx: Ctx): Group {
   return {
     ids: ["node"],
-    run: async () => {
+    run: async (deadline) => {
       const version = ctx.o.nodeVersion ?? process.version;
       const path = ctx.o.nodePath ?? process.execPath;
       const major = parseSemver(version)?.[0] ?? 0;
-      if (major >= 24) return [ok("node", `${version} (${path})`)];
-      return [
-        bad(
-          "node",
-          "fail",
-          `${version} (${path}); harnessd needs 24 or newer`,
-          "Install Node 24: nvm install 24 && nvm alias default 24, or brew install node@24.",
-        ),
-      ];
+      if (major < 24) {
+        return [
+          bad(
+            "node",
+            "fail",
+            `${version} (${path}); harnessd needs 24 or newer`,
+            "Install Node 24: nvm install 24 && nvm alias default 24, or brew install node@24.",
+          ),
+        ];
+      }
+      const here = `${version} (${path})`;
+      const service = await serviceNode(ctx, path);
+      if (service === undefined) return [ok("node", here)];
+      if ("absent" in service) {
+        return [bad("node", "fail", `${here}; ${service.absent}`, NODE_FIX_SERVICE)];
+      }
+      const res = await run(ctx, deadline, service.path, ["--version"]);
+      const line = firstLine(res.stdout);
+      if (res.code !== 0 || line === "") {
+        return [
+          bad(
+            "node",
+            "fail",
+            `${here}; the service Node ${service.path} does not run`,
+            NODE_FIX_SERVICE,
+          ),
+        ];
+      }
+      const uses = `${here}; the service uses ${line} (${service.path})`;
+      if ((parseSemver(line)?.[0] ?? 0) >= 24) return [ok("node", uses)];
+      return [bad("node", "fail", `${uses}; harnessd needs 24 or newer`, NODE_FIX_SERVICE)];
     },
   };
 }

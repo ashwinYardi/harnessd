@@ -62,7 +62,7 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 
 | Check | How | Not ok |
 |---|---|---|
-| `node` | the running Node; when the service uses a different Node, the detail names that Node too | `fail` below 24, or when the Node the service uses is below 24 or not found. Fix: `nvm install 24 && nvm alias default 24`, or `brew install node@24` |
+| `node` | the running Node, and on macOS the Node the launchd service runs when it differs | `fail` below 24. Fix: `nvm install 24 && nvm alias default 24`, or `brew install node@24`. The service Node below 24, missing or broken: `fail`. Fix: run the Install block with Node 24 active, then `harnessd init` |
 | `config` | loads global and workspace config.toml | `fail` with the file and key |
 | `harness.<id>.cli` | `[harnesses.<id>] bin` in the config, else `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, on PATH; then `--version` | `missing` when not found |
 | `harness.<id>.auth` | `claude auth status --json`; `codex login status` | `fail` when signed out; `warn` when the status cannot be read |
