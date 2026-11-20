@@ -31,6 +31,9 @@ time_zone = "Asia/Kolkata"  # an IANA time zone
 [daemon]
 port = 4747                 # the local API on 127.0.0.1 (docs/API.md); 0 picks a free port
 
+[harnesses.claude-code]     # Settings → Harnesses writes this in ~/.harnessd/config.toml
+bin = "/opt/homebrew/bin/claude"   # absolute path; wins over HARNESSD_CLAUDE_BIN and PATH
+
 [merge]                     # the merge gate (D-013, docs/LOOP.md "Merge")
 protected_paths = ["**/auth/**"]   # replaces the default list below
 label = "needs-human"       # put on a PR that waits for a human
@@ -72,7 +75,7 @@ Setting `protected_paths` replaces the whole list, so copy the defaults you want
 
 The Slack webhook url is a secret. It comes only from `HARNESSD_SLACK_WEBHOOK_URL`, never from config.toml: a `webhook_url` key is an unknown-key error.
 
-Default agents: coordinator, backend, frontend and qa, all on `claude-code` (D-010). The agent's name is its table key or file name; without an `avatar` the UI shows the name's initial. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
+Default agents: coordinator, backend, frontend and qa, all on `claude-code` (D-010). Settings → Team edits the `[agents.<name>]` tables of the workspace file and nothing else; comments and other tables stay (D-026). It can change a default agent but not remove it. The agent's name is its table key or file name; without an `avatar` the UI shows the name's initial. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
 
 ## agents/<name>.md
 Optional frontmatter with `role`, `harness`, `model` and `avatar`; the body is the agent's instructions.

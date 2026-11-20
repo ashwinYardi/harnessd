@@ -1,7 +1,7 @@
 // Settings → Harnesses (MET-28): one card per harness CLI, after T3 Code's Settings →
 // Providers. The card shows what the status engine found and runs the fixed setup commands.
 import { CopyIcon, DownloadIcon, LogInIcon, RefreshCwIcon, RotateCwIcon } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Load } from "../../api.ts";
 import { Button } from "../../components/ui/button.tsx";
 import { Card, CardFooter, CardHeader, CardPanel, CardTitle } from "../../components/ui/card.tsx";
@@ -274,21 +274,32 @@ export function Harnesses({ onChecksChanged }: { onChecksChanged: () => void }) 
     }
   }, []);
 
+  const changed = useRef(onChecksChanged);
+  changed.current = onChecksChanged;
   const recheck = useCallback(() => {
     void load();
-    onChecksChanged();
-  }, [load, onChecksChanged]);
+    changed.current();
+  }, [load]);
 
+  // One stream for the page. A job's result is announced once, when it leaves "running";
+  // jobs replayed on connect are shown but not announced again.
+  const seen = useRef(new Map<string, Job["state"]>());
   useEffect(() => {
     void load();
     const events = new EventSource("/api/setup/events");
     events.addEventListener("job", (e) => {
       const job = JSON.parse((e as MessageEvent<string>).data) as Job;
+      const before = seen.current.get(job.id);
+      seen.current.set(job.id, job.state);
       setJobs((j) => ({ ...j, [job.harness]: job }));
-      if (job.state === "ok" && job.action !== "signin") {
-        toast.add({ type: "success", title: `${job.command} finished` });
-        recheck();
-      } else if (job.state === "failed") {
+      if (before !== "running" || job.state === "running") return;
+      if (job.state === "ok") {
+        toast.add({
+          type: "success",
+          title: job.action === "signin" ? "Terminal opened" : `${job.command} finished`,
+        });
+        if (job.action !== "signin") recheck();
+      } else {
         toast.add({
           type: "error",
           title: "The command failed",
@@ -302,6 +313,7 @@ export function Harnesses({ onChecksChanged }: { onChecksChanged: () => void }) 
   async function act(card: HarnessCard, action: HarnessAction) {
     try {
       const job = await runHarnessAction(card.id, action);
+      seen.current.set(job.id, "running");
       setJobs((j) => ({ ...j, [card.id]: job }));
     } catch (e) {
       toast.add({

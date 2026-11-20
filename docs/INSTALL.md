@@ -55,8 +55,8 @@ It checks the machine and the workspace at `dir` (default: the current directory
 |---|---|---|
 | `ok` | It works. | no |
 | `warn` | It works, but something is off. | no |
-| `fail` | It is there but broken. | yes |
-| `missing` | It is required and absent. A check that waits on a blocking one is `missing` too, with the detail "not checked". | yes |
+| `fail` | It is there but broken. | yes (the loop waits in setup; D-026) |
+| `missing` | It is required and absent. A check that waits on a blocking one is `missing` too, with the detail "not checked". | yes (the loop waits in setup; D-026) |
 
 The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for a usage error.
 
@@ -64,7 +64,7 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 |---|---|---|
 | `node` | the running Node | `fail` below 24. Fix: `nvm install 24 && nvm alias default 24`, or `brew install node@24` |
 | `config` | loads global and workspace config.toml | `fail` with the file and key |
-| `harness.<id>.cli` | `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, on PATH; then `--version` | `missing` when not found |
+| `harness.<id>.cli` | `[harnesses.<id>] bin` in the config, else `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, on PATH; then `--version` | `missing` when not found |
 | `harness.<id>.auth` | `claude auth status --json`; `codex login status` | `fail` when signed out; `warn` when the status cannot be read |
 | `harness.<id>.version` | the version against a list of known-bad releases | `warn` |
 | `github.cli` | `$HARNESSD_GH_BIN` or `gh` on PATH | `missing` |

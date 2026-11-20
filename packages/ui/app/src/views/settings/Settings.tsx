@@ -123,7 +123,7 @@ export function Settings({
             <h2 className="font-semibold text-base">{current?.title}</h2>
             <p className="text-muted-foreground text-sm">{current?.about}</p>
           </header>
-          {page === "harnesses" && <Harnesses onChecksChanged={() => void status.retry()} />}
+          {page === "harnesses" && <Harnesses onChecksChanged={status.retry} />}
           {page === "connections" && <Connections status={status} />}
           {page === "team" && <Team />}
         </div>
