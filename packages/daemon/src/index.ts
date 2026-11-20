@@ -22,6 +22,7 @@ export * from "./coordinator/state.ts";
 export * from "./github/client.ts";
 export * from "./linear/client.ts";
 export * from "./memory/decisions.ts";
+export * from "./memory/glossary.ts";
 export * from "./memory/server.ts";
 export * from "./memory/vault.ts";
 export * from "./server/daemon.ts";

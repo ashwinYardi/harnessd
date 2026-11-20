@@ -1,12 +1,15 @@
-// The coordinator's self-grill (SPEC "Autonomy loop" steps 2-3, D-011). See docs/COORDINATOR.md.
+// The coordinator's self-grill (SPEC "Autonomy loop" steps 2-3, D-011), with the
+// grill-with-docs method (D-017) run headless (D-021). See docs/COORDINATOR.md.
 import {
   type Call,
   ESCALATION_TRIGGER_LABELS,
   type Escalation,
+  type GlossaryTerm,
   type GrillResult,
   type HarnessAdapter,
   type Issue,
   isEscalationTrigger,
+  type Precedent,
   type ResolvedAgentConfig,
   type Task,
 } from "@harnessd/shared";
@@ -43,8 +46,18 @@ export interface ProposedEscalation {
 }
 
 export type ParsedGrillReply =
-  | { ok: true; calls: Call[]; escalation: ProposedEscalation | null }
+  | {
+      ok: true;
+      calls: Call[];
+      escalation: ProposedEscalation | null;
+      /** Present when the reply has `terms`. */
+      terms?: GlossaryTerm[];
+      /** Present when the reply has `precedents`. */
+      precedents?: Precedent[];
+    }
   | { ok: false; error: string };
+
+const REPLY_KEYS = ["calls", "escalation", "terms", "precedents"];
 
 /** The JSON inside a reply: the whole text, or the first ``` / ```json fenced block. */
 export function extractJson(text: string): string {
@@ -60,9 +73,14 @@ function isObj(value: unknown): value is Obj {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function checkKeys(value: Obj, keys: readonly string[], path: string): string | undefined {
+function checkKeys(
+  value: Obj,
+  keys: readonly string[],
+  path: string,
+  optional: readonly string[] = [],
+): string | undefined {
   for (const key of Object.keys(value)) {
-    if (!keys.includes(key)) return `${path}: unknown key "${key}"`;
+    if (!keys.includes(key) && !optional.includes(key)) return `${path}: unknown key "${key}"`;
   }
   for (const key of keys) {
     if (typeof value[key] !== "string" || (value[key] as string).trim() === "") {
@@ -82,8 +100,7 @@ export function parseGrillReply(text: string): ParsedGrillReply {
   }
   if (!isObj(value)) return { ok: false, error: "expected a JSON object" };
   for (const key of Object.keys(value)) {
-    if (key !== "calls" && key !== "escalation")
-      return { ok: false, error: `unknown key "${key}"` };
+    if (!REPLY_KEYS.includes(key)) return { ok: false, error: `unknown key "${key}"` };
   }
   if (!Array.isArray(value.calls)) return { ok: false, error: "calls: expected an array" };
   if (!("escalation" in value)) return { ok: false, error: "escalation: missing (use null)" };
@@ -100,20 +117,58 @@ export function parseGrillReply(text: string): ParsedGrillReply {
     });
   }
 
+  let escalation: ProposedEscalation | null = null;
   const raw = value.escalation;
-  if (raw === null) return { ok: true, calls, escalation: null };
-  if (!isObj(raw)) return { ok: false, error: "escalation: expected null or an object" };
-  const problem = checkKeys(raw, ["trigger", "question", "why"], "escalation");
-  if (problem) return { ok: false, error: problem };
-  return {
-    ok: true,
-    calls,
-    escalation: {
+  if (raw !== null) {
+    if (!isObj(raw)) return { ok: false, error: "escalation: expected null or an object" };
+    const problem = checkKeys(raw, ["trigger", "question", "why"], "escalation");
+    if (problem) return { ok: false, error: problem };
+    escalation = {
       trigger: (raw.trigger as string).trim(),
       question: (raw.question as string).trim(),
       why: (raw.why as string).trim(),
-    },
-  };
+    };
+  }
+  const parsed: ParsedGrillReply = { ok: true, calls, escalation };
+
+  if ("terms" in value) {
+    if (!Array.isArray(value.terms)) return { ok: false, error: "terms: expected an array" };
+    const terms: GlossaryTerm[] = [];
+    for (const [i, t] of value.terms.entries()) {
+      if (!isObj(t)) return { ok: false, error: `terms[${i}]: expected an object` };
+      const problem = checkKeys(t, ["term", "definition"], `terms[${i}]`, ["avoid"]);
+      if (problem) return { ok: false, error: problem };
+      const avoid = t.avoid ?? [];
+      if (!Array.isArray(avoid) || !avoid.every((a) => typeof a === "string" && a.trim() !== "")) {
+        return { ok: false, error: `terms[${i}].avoid: expected an array of non-empty strings` };
+      }
+      terms.push({
+        term: (t.term as string).trim(),
+        definition: (t.definition as string).trim(),
+        avoid: (avoid as string[]).map((a) => a.trim()),
+      });
+    }
+    parsed.terms = terms;
+  }
+
+  if ("precedents" in value) {
+    if (!Array.isArray(value.precedents)) {
+      return { ok: false, error: "precedents: expected an array" };
+    }
+    const precedents: Precedent[] = [];
+    for (const [i, p] of value.precedents.entries()) {
+      if (!isObj(p)) return { ok: false, error: `precedents[${i}]: expected an object` };
+      const problem = checkKeys(p, ["title", "decision", "why"], `precedents[${i}]`);
+      if (problem) return { ok: false, error: problem };
+      precedents.push({
+        title: (p.title as string).trim(),
+        decision: (p.decision as string).trim(),
+        why: (p.why as string).trim(),
+      });
+    }
+    parsed.precedents = precedents;
+  }
+  return parsed;
 }
 
 /** Collapses whitespace so each call stays one bullet. */
@@ -121,14 +176,32 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/** What the grill adds to the vault besides decision notes. */
+export interface GrillDocs {
+  terms?: GlossaryTerm[];
+  precedents?: Precedent[];
+}
+
 /** The single Linear comment posted per grill. */
-export function formatGrillComment(calls: Call[], escalation: Escalation | null): string {
+export function formatGrillComment(
+  calls: Call[],
+  escalation: Escalation | null,
+  docs: GrillDocs = {},
+): string {
   const count = `${calls.length} ${calls.length === 1 ? "call" : "calls"}`;
   const status = escalation ? "needs input" : "proceeding";
   const lines = [`**Coordinator grill**: ${status}, ${count}.`, ""];
   if (calls.length === 0) lines.push("- No open questions.");
   for (const c of calls) {
     lines.push(`- ${oneLine(c.question)} → ${oneLine(c.answer)} (basis: ${oneLine(c.basis)})`);
+  }
+  if (docs.terms && docs.terms.length > 0) {
+    lines.push("", "**New terms** (workspace vault glossary):");
+    for (const t of docs.terms) lines.push(`- ${oneLine(t.term)}: ${oneLine(t.definition)}`);
+  }
+  if (docs.precedents && docs.precedents.length > 0) {
+    lines.push("", "**Draft decision records** (for a docs PR):");
+    for (const p of docs.precedents) lines.push(`- ${oneLine(p.title)}: ${oneLine(p.decision)}`);
   }
   if (escalation) {
     lines.push(
@@ -256,6 +329,8 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     });
   }
 
+  const terms = parsed.terms ?? [];
+  const precedents = parsed.precedents ?? [];
   let step = "write decision notes";
   try {
     for (const call of calls) {
@@ -267,8 +342,19 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
         basis: call.basis,
       });
     }
+    step = "write glossary terms";
+    if (deps.decisions.term) {
+      for (const t of terms) await deps.decisions.term({ issue: issue.key, ...t });
+    }
+    step = "write draft decision records";
+    if (deps.decisions.draft) {
+      for (const p of precedents) await deps.decisions.draft({ issue: issue.key, ...p });
+    }
     step = "post the Linear comment";
-    await deps.linear.comment(issue.id, formatGrillComment(calls, escalation));
+    await deps.linear.comment(
+      issue.id,
+      formatGrillComment(calls, escalation, { terms, precedents }),
+    );
     if (escalation) {
       step = "move the issue to Needs input";
       await deps.linear.moveTo(issue.id, "Needs input");
@@ -281,7 +367,15 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       escalation,
       outcome: "error",
       error: `could not ${step}: ${(error as Error).message}`,
+      terms,
+      precedents,
     };
   }
-  return { calls, escalation, outcome: escalation ? "needs_input" : "proceed" };
+  return {
+    calls,
+    escalation,
+    outcome: escalation ? "needs_input" : "proceed",
+    terms,
+    precedents,
+  };
 }

@@ -15,3 +15,9 @@ Two Obsidian-compatible markdown vaults (D-005): `~/.harnessd/vault/` (global, o
 
 ## Decision notes
 When the coordinator settles a question itself (SPEC, autonomy loop step 2), it calls `writeDecisionNote(vault, { issue, title, question, decision, basis })` from `packages/daemon/src/memory/decisions.ts`. That writes `decisions/<ISSUE>-<slug>.md` with frontmatter `issue`, `question`, `decision` and `basis`, and the same three as sections in the body, so `search_notes` finds past calls.
+
+## Glossary and draft decision records
+The coordinator grill (docs/COORDINATOR.md) also writes two kinds of note to the workspace vault. Both are written once and never overwritten.
+
+- `glossary/<slug>.md`: one new term, from `writeGlossaryTerm(vault, { issue, term, definition, avoid })` in `packages/daemon/src/memory/glossary.ts`. Frontmatter: `term`, `issue`, `avoid`.
+- `decision-drafts/<ISSUE>-<slug>.md`: a draft decision record for a docs PR, from `writeDraftDecision(vault, { issue, title, decision, why })`. Frontmatter: `issue`, `status: draft`.
