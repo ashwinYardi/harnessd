@@ -1,6 +1,6 @@
 // Settings → Harnesses (MET-28): one card per harness CLI, with its maker's logo. The card
 // shows what the status engine found and runs the fixed setup commands. During a sign-in it
-// shows the login link and device code, or the one command to copy (MET-59, D-031).
+// shows the login link and device code, or the one command to copy (MET-59, part of MET-48).
 import {
   CheckIcon,
   CopyIcon,
@@ -74,7 +74,7 @@ function CopyButton({ text, label }: { text: string; label: string }) {
 function CopyField({ text, label }: { text: string; label: string }) {
   return (
     <div className="flex min-w-0 items-center gap-2">
-      <code className="flex h-7 min-w-0 select-all items-center truncate rounded-[var(--control-radius)] border bg-background px-2.5 font-mono text-xs">
+      <code className="block h-7 min-w-0 select-all truncate leading-[26px] rounded-[var(--control-radius)] border bg-background px-2.5 font-mono text-xs">
         {text}
       </code>
       <CopyButton label={label} text={text} />
@@ -104,8 +104,8 @@ function SigninPrompt({
           <a
             className={buttonVariants({ size: "sm" })}
             href={link.href}
-            rel="noopener noreferrer"
-            target="_blank"
+            rel={link.rel}
+            target={link.target}
           >
             <ExternalLinkIcon aria-hidden="true" />
             Open sign-in page
@@ -128,7 +128,13 @@ function SigninPrompt({
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <CopyField label="the command" text={card.commands.signin} />
-            <Button disabled={checking} onClick={onRecheck} size="sm" variant="outline">
+            <Button
+              disabled={checking}
+              focusableWhenDisabled
+              onClick={onRecheck}
+              size="sm"
+              variant="outline"
+            >
               {checking ? <Spinner /> : <RotateCwIcon aria-hidden="true" />}
               Recheck
             </Button>
@@ -361,6 +367,7 @@ function HarnessCardView({
       </CardFooter>
       {job && (
         <div className="grid gap-2 px-4 pb-3">
+          <JobOutput job={job} />
           <SigninPrompt
             card={card}
             checking={checking}
@@ -368,7 +375,6 @@ function HarnessCardView({
             onRecheck={onRecheck}
             signedIn={s.signedIn}
           />
-          <JobOutput job={job} />
         </div>
       )}
     </Card>

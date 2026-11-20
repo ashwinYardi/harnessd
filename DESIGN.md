@@ -142,7 +142,7 @@ A 1 px border and a change of surface first. Controls take a faint `shadow-xs/5`
 - **Pause control:** always in the header at the right. Outline with a pause icon while running; primary "Resume" while paused. The click changes the header and the label at once (optimistic). The daemon's answer confirms it. A failure rolls back and shows an error toast. Never a confirmation.
 - **Service logo** (`components/service-logo.tsx`): a 16 px Simple Icons mark in `currentColor`, before the service's name on Harnesses and Connections cards; 14 px before the harness id in the agent list and the Team table. The text label is always there, so the logo is `aria-hidden`; `named` gives it its own accessible name where no text sits next to it. Port and skills show text only. In the agent list and the Team table, a harness with no mark keeps an empty 14 px slot, so every name starts at one edge.
 - **Command palette:** Cmd+K or Ctrl+K, or Commands in the sidebar. It lists every action: pause or resume, each view, run the checks again, read the board again, load the log again, and the three themes. Up, Down, Home, End, Enter, Esc.
-- **Toasts:** bottom right, at most four, 5 s. Every async result gets one: pause, resume, check again.
+- **Toasts:** bottom right, at most four, 5 s. Every async result gets one: pause, resume, check again. A Copy button is the one exception: its label reads "Copied" for 1.5 s, and a toast shows only when the copy fails.
 - **Held updates:** while the pointer or focus is in the board or the agent table, live changes wait. A "Show N updates" button applies them.
 - **States:** every view has a skeleton for loading, a sentence for empty that says what fills it, and an error card with Retry.
 

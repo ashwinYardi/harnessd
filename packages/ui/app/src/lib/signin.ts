@@ -1,10 +1,13 @@
-// What the harness card shows during a sign-in job (MET-59, D-031): the login link, the
+// What the harness card shows during a sign-in job (MET-59, part of MET-48): the login link, the
 // device code, or the one command to copy. The browser opens only on the person's click.
 import type { Job } from "../setupApi.ts";
 
 export interface LoginLink {
   href: string;
   host: string;
+  /** A new tab; in Electron the shell opens it in the default browser. */
+  target: "_blank";
+  rel: "noopener noreferrer";
 }
 
 /** Only an https url becomes a link. Any other scheme, or a url that does not parse, is dropped. */
@@ -12,7 +15,9 @@ export function loginLink(url: string | undefined): LoginLink | undefined {
   if (!url?.startsWith("https://")) return undefined;
   try {
     const u = new URL(url);
-    return u.protocol === "https:" && u.host ? { href: url, host: u.host } : undefined;
+    return u.protocol === "https:" && u.host
+      ? { href: url, host: u.host, target: "_blank", rel: "noopener noreferrer" }
+      : undefined;
   } catch {
     return undefined;
   }
@@ -34,8 +39,9 @@ const NONE: SigninPanel = { link: undefined, code: undefined, fallback: false };
  */
 export function signinPanel(job: Job | null, signedIn: boolean): SigninPanel {
   if (job?.action !== "signin" || signedIn) return NONE;
-  if (job.state === "running") return { link: loginLink(job.url), code: job.code, fallback: false };
-  const prompted = loginLink(job.url) !== undefined || job.code !== undefined;
+  const link = loginLink(job.url);
+  if (job.state === "running") return { link, code: job.code, fallback: false };
+  const prompted = link !== undefined || job.code !== undefined;
   return { ...NONE, fallback: job.state === "failed" || !prompted };
 }
 

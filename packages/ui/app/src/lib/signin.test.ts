@@ -18,6 +18,8 @@ test("loginLink keeps only an https url and names its host", () => {
   assert.deepEqual(loginLink("https://auth.example.com/device?x=1"), {
     href: "https://auth.example.com/device?x=1",
     host: "auth.example.com",
+    target: "_blank",
+    rel: "noopener noreferrer",
   });
   assert.equal(loginLink(undefined), undefined);
   assert.equal(loginLink("http://auth.example.com/device"), undefined);
@@ -31,7 +33,12 @@ test("signinPanel shows the link and the code while the sign-in runs", () => {
   assert.deepEqual(
     signinPanel(job({ url: "https://auth.example.com/device", code: "ABCD-EFGH" }), false),
     {
-      link: { href: "https://auth.example.com/device", host: "auth.example.com" },
+      link: {
+        href: "https://auth.example.com/device",
+        host: "auth.example.com",
+        target: "_blank",
+        rel: "noopener noreferrer",
+      },
       code: "ABCD-EFGH",
       fallback: false,
     },
