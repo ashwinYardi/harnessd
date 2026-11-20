@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import {
+  chmod,
   lstat,
   mkdir,
   mkdtemp,
   readFile,
   readlink,
   rm,
+  stat as statFile,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -65,4 +67,18 @@ test("paths outside the root and directories in the way are refused", async () =
     writeSyncFiles(root, [{ path: "AGENTS.md", content: "" }]),
     /is a directory/,
   );
+});
+
+test("a copied file keeps its bytes and executable bit, and is skipped when identical", async () => {
+  const root = await tempRoot();
+  const src = join(root, "src-run");
+  await writeFile(src, Buffer.from([0x23, 0x21, 0x00, 0xff]));
+  await chmod(src, 0o755);
+  const files = [{ path: "out/run", copyFrom: src }];
+  assert.deepEqual(await writeSyncFiles(root, files), ["out/run"]);
+  assert.deepEqual(await readFile(join(root, "out/run")), Buffer.from([0x23, 0x21, 0x00, 0xff]));
+  assert.equal((await statFile(join(root, "out/run"))).mode & 0o111, 0o111);
+  assert.deepEqual(await writeSyncFiles(root, files), []);
+  await chmod(join(root, "out/run"), 0o644);
+  assert.deepEqual(await writeSyncFiles(root, files), ["out/run"]);
 });

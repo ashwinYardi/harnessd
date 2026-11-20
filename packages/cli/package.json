@@ -22,7 +22,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-pack.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test 'src/**/*.test.ts'"
   },

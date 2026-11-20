@@ -10,6 +10,11 @@
     },
     "test": {
       "dependsOn": ["^build"]
+    },
+    "@harnessd/cli#build": {
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/.claude/skills/**"],
+      "outputs": ["dist/**"]
     }
   }
 }

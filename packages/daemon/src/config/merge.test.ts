@@ -12,6 +12,7 @@ function layer(scope: ConfigLayer["scope"], extra: Partial<ConfigLayer> = {}): C
     rules: [],
     skills: [],
     mcp: {},
+    skillSettings: {},
     ...extra,
   };
 }
@@ -169,6 +170,41 @@ test("rules and skills merge by name, later layer winning", () => {
       ["bench", "b"],
       ["deploy", "w"],
     ],
+  );
+});
+
+test("a skill turned off in a later layer is dropped, and a later layer can turn it back on", () => {
+  const skill = (name: string) => ({
+    name,
+    dir: `g/${name}`,
+    source: `g/${name}/SKILL.md`,
+    body: "",
+  });
+  const global = layer("global", {
+    skills: [skill("tdd"), skill("research"), skill("prototype")],
+    skillSettings: { tdd: { commit: "abc" }, prototype: { enabled: false } },
+  });
+  const merged = mergeLayers([
+    global,
+    layer("workspace", {
+      skillSettings: {
+        research: { enabled: false },
+        prototype: { enabled: true },
+        nope: { enabled: false },
+      },
+    }),
+  ]);
+  assert.deepEqual(
+    merged.skills.map((s) => s.name),
+    ["prototype", "tdd"],
+  );
+  assert.deepEqual(
+    resolveAgentConfig(merged, "backend").skills.map((s) => s.name),
+    ["prototype", "tdd"],
+  );
+  assert.deepEqual(
+    mergeLayers([global]).skills.map((s) => s.name),
+    ["research", "tdd"],
   );
 });
 

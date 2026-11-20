@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { ConfigError } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
 import { tomlKey, tomlString, yamlString } from "./format.ts";
-import { codexConfig, generateSyncFiles, syncedMcpServers } from "./generate.ts";
+import { codexConfig, GENERATED_NOTE, generateSyncFiles, syncedMcpServers } from "./generate.ts";
 
 test("generateSyncFiles lists every native file in a stable order", () => {
   const paths = generateSyncFiles(mergeLayers([])).map((f) => f.path);
@@ -23,6 +23,31 @@ test("a skill name that would escape .claude/skills is a config error", () => {
     () => generateSyncFiles(merged),
     (e: unknown) => e instanceof ConfigError && /skills? names may only use/.test(e.message),
   );
+});
+
+test("a skill goes to Claude Code and Codex with its frontmatter and every file", () => {
+  const merged = mergeLayers([]);
+  merged.skills = [
+    {
+      name: "ui",
+      description: "Design",
+      dir: "/g/skills/ui",
+      source: "/g/skills/ui/SKILL.md",
+      body: "Body",
+      frontmatter: ["user-invocable: true", "argument-hint: >", "  [target]"],
+      files: ["LICENSE", "scripts/run"],
+    },
+  ];
+  const files = generateSyncFiles(merged).filter((f) => f.path.includes("skills/"));
+  const md = `---\nname: ui\ndescription: Design\nuser-invocable: true\nargument-hint: >\n  [target]\n---\n<!-- ${GENERATED_NOTE} -->\n\nBody\n`;
+  assert.deepEqual(files, [
+    { path: ".claude/skills/ui/SKILL.md", content: md },
+    { path: ".claude/skills/ui/LICENSE", copyFrom: "/g/skills/ui/LICENSE" },
+    { path: ".claude/skills/ui/scripts/run", copyFrom: "/g/skills/ui/scripts/run" },
+    { path: ".agents/skills/ui/SKILL.md", content: md },
+    { path: ".agents/skills/ui/LICENSE", copyFrom: "/g/skills/ui/LICENSE" },
+    { path: ".agents/skills/ui/scripts/run", copyFrom: "/g/skills/ui/scripts/run" },
+  ]);
 });
 
 test("codex config writes empty env tables", () => {
