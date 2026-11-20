@@ -18,13 +18,18 @@ import {
   type DaemonInfo,
   DEFAULT_LOOP_INTERVAL_MS,
   defaultGlobalDir,
+  HttpError,
   isBlocking,
   LinearClient,
   type ListReadyOptions,
   loadConfig,
+  mergeLayers,
+  type Route,
   removeDaemonInfo,
   runStatus,
+  type SetupRunner,
   type SlackFetch,
+  setupRoutes,
   startDaemon,
   staticRoutes,
   statusRoutes,
@@ -94,6 +99,8 @@ export interface LoopIO {
   fetch?: SlackFetch;
   /** Runs the status checks (MET-27). Default: the real machine. */
   checks?: RunChecks;
+  /** Runs the fixed setup commands (install, update, sign in). Default: the real machine. */
+  setupRunner?: SetupRunner;
 }
 
 /** How often a due daily summary is looked for. */
@@ -114,9 +121,108 @@ function untilSignal(): Promise<string> {
   });
 }
 
+interface Built {
+  loop: CoordinatorLoop;
+  linear: LinearClient;
+  team: ListReadyOptions;
+  teamId: string;
+  config: MergedConfig;
+  visibility: Visibility;
+}
+
+/** Builds the loop from the config and the Linear key; a string says what is missing. */
+async function buildLoop(
+  parsed: RunArgs,
+  io: LoopIO,
+  env: NodeJS.ProcessEnv,
+  repoDir: string,
+  globalDir: string,
+  pauseStore: ReturnType<typeof createFilePauseStore>,
+  logs: ReturnType<typeof createLogBuffer>,
+): Promise<Built | string> {
+  const apiKey = env[LINEAR_API_KEY_ENV]?.trim();
+  if (!apiKey) {
+    return `${LINEAR_API_KEY_ENV} is not set. Export a Linear personal API key, e.g. ${LINEAR_API_KEY_ENV}=lin_api_... harnessd run`;
+  }
+  let config: MergedConfig;
+  try {
+    config = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
+  } catch (e) {
+    return e instanceof ConfigError ? e.message : (e as Error).message;
+  }
+  const teamId = config.linear.team_id?.trim();
+  if (!teamId) {
+    return 'linear.team_id is not set. Add it to .harnessd/config.toml under [linear], e.g. team_id = "MET".';
+  }
+  const team: ListReadyOptions = { teamId };
+  const project = config.linear.project?.trim();
+  if (project) {
+    if (UUID.test(project)) team.projectId = project;
+    else team.projectName = project;
+  }
+  const linear = new LinearClient({ apiKey: async () => apiKey });
+  const log = (line: string) => {
+    io.out(`${new Date().toISOString()} ${line}`);
+    logs.push(line);
+  };
+  let loop: CoordinatorLoop | undefined;
+  const visibility = createVisibility({
+    env,
+    slack: config.slack,
+    repoDir,
+    inProgress: () => (loop?.running() ?? []).map((key) => ({ key })),
+    log,
+    ...(io.fetch ? { fetch: io.fetch } : {}),
+  });
+  loop = createCoordinatorLoop({
+    config,
+    linear,
+    adapters: {
+      "claude-code": createClaudeCodeAdapter({
+        permissionMode: parsed.permissionMode,
+        // The path set in Settings → Harnesses wins over HARNESSD_CLAUDE_BIN and PATH.
+        ...(config.harnesses["claude-code"]?.bin
+          ? { bin: config.harnesses["claude-code"].bin }
+          : {}),
+      }),
+    },
+    worktrees: createGitWorktrees({ repoDir, root: join(globalDir, "worktrees") }),
+    github: createGhCli({ cwd: repoDir }),
+    store: createFileLoopStore(repoDir),
+    repoDir,
+    skillsDir: join(globalDir, "skills"),
+    team,
+    intervalMs: parsed.intervalMs,
+    paused: async () => (await pauseStore.read()).paused,
+    notifier: visibility.notifier,
+    log,
+    // The UI's live log shows each tool call (MET-18); stdout stays one line per step.
+    onAgentEvent: (run, event) => {
+      if (event.type === "tool") {
+        logs.push(`${event.name} ${event.summary}`, {
+          source: run.agent,
+          issueKey: run.issueKey,
+        });
+      }
+    },
+  });
+  return { loop, linear, team, teamId, config, visibility };
+}
+
+/** The id of the status check that a missing key or team stands for. */
+function setupBlocker(reason: string): string {
+  if (reason.startsWith(LINEAR_API_KEY_ENV)) return "linear.key";
+  if (reason.startsWith("linear.team_id")) return "linear.team";
+  return "config";
+}
+
 /**
  * Runs the coordinator loop for one repo. The Linear key comes from `LINEAR_API_KEY`
- * and the team from `linear.team_id` in the config; both are checked before anything runs.
+ * and the team from `linear.team_id` in the config.
+ *
+ * With `--once`, a missing key, team or a blocking check stops it with exit 1. Without
+ * `--once`, it serves the app anyway, in setup: the loop waits until every required check
+ * passes and the owner presses Start (POST /api/start, D-026).
  */
 export async function runLoop(args: readonly string[], io: LoopIO): Promise<number> {
   const parsed = parseRunArgs(args);
@@ -126,111 +232,121 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     return 2;
   }
   const env = io.env ?? process.env;
-  const apiKey = env[LINEAR_API_KEY_ENV]?.trim();
-  if (!apiKey) {
-    io.err(
-      `harnessd run: ${LINEAR_API_KEY_ENV} is not set. Export a Linear personal API key, e.g. ${LINEAR_API_KEY_ENV}=lin_api_... harnessd run`,
-    );
-    return 1;
-  }
   const repoDir = resolve(io.cwd ?? process.cwd(), parsed.dir ?? ".");
   const globalDir = defaultGlobalDir(env);
-
   const pauseStore = createFilePauseStore(globalDir);
   const logs = createLogBuffer();
-  let loop: CoordinatorLoop;
-  let linear: LinearClient;
-  let config: MergedConfig;
-  let team: ListReadyOptions;
-  let visibility: Visibility;
-  let teamId: string | undefined;
+  const checks = io.checks ?? runStatus;
+  const options = statusOptions(repoDir, env);
+
+  const built = await buildLoop(parsed, io, env, repoDir, globalDir, pauseStore, logs);
+  if (typeof built === "string" && parsed.once) {
+    io.err(`harnessd run: ${built}`);
+    return 1;
+  }
+  // The port is read on its own, so a missing key or team still serves the app.
   let port: number;
+  let fallback: MergedConfig;
   try {
-    config = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
-    teamId = config.linear.team_id?.trim();
-    if (!teamId) {
-      io.err(
-        'harnessd run: linear.team_id is not set. Add it to .harnessd/config.toml under [linear], e.g. team_id = "MET".',
-      );
+    fallback = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
+    port = fallback.daemon.port;
+  } catch (e) {
+    if (parsed.once) {
+      io.err(`harnessd run: ${e instanceof ConfigError ? e.message : (e as Error).message}`);
       return 1;
     }
-    port = config.daemon.port;
-    team = { teamId };
-    const project = config.linear.project?.trim();
-    if (project) {
-      if (UUID.test(project)) team.projectId = project;
-      else team.projectName = project;
-    }
-    linear = new LinearClient({ apiKey: async () => apiKey });
-    const log = (line: string) => {
-      io.out(`${new Date().toISOString()} ${line}`);
-      logs.push(line);
-    };
-    visibility = createVisibility({
-      env,
-      slack: config.slack,
-      repoDir,
-      inProgress: () => loop.running().map((key) => ({ key })),
-      log,
-      ...(io.fetch ? { fetch: io.fetch } : {}),
-    });
-    loop = createCoordinatorLoop({
-      config,
-      linear,
-      adapters: {
-        "claude-code": createClaudeCodeAdapter({ permissionMode: parsed.permissionMode }),
-      },
-      worktrees: createGitWorktrees({ repoDir, root: join(globalDir, "worktrees") }),
-      github: createGhCli({ cwd: repoDir }),
-      store: createFileLoopStore(repoDir),
-      repoDir,
-      skillsDir: join(globalDir, "skills"),
-      team,
-      intervalMs: parsed.intervalMs,
-      paused: async () => (await pauseStore.read()).paused,
-      notifier: visibility.notifier,
-      log,
-      // The UI's live log shows each tool call (MET-18); stdout stays one line per step.
-      onAgentEvent: (run, event) => {
-        if (event.type === "tool") {
-          logs.push(`${event.name} ${event.summary}`, {
-            source: run.agent,
-            issueKey: run.issueKey,
-          });
-        }
-      },
-    });
-  } catch (e) {
-    io.err(`harnessd run: ${e instanceof ConfigError ? e.message : (e as Error).message}`);
-    return 1;
+    fallback = mergeLayers([]);
+    port = fallback.daemon.port;
   }
 
   // Every harness and connection, before anything is dispatched (MET-27, D-023).
-  const checks = io.checks ?? runStatus;
-  const options = statusOptions(repoDir, env);
   const startChecks = await checks(options);
-  if (startChecks.some(isBlocking)) {
+  let blocking = startChecks.filter(isBlocking).map((c) => c.id);
+  if (typeof built === "string") blocking = [...new Set([setupBlocker(built), ...blocking])];
+  if (blocking.length > 0 && parsed.once) {
     for (const line of refusalLines(startChecks)) io.err(line);
     return 1;
+  }
+  if (typeof built === "string") io.err(`harnessd run: ${built}`);
+  if (startChecks.some(isBlocking)) {
+    for (const line of refusalLines(startChecks, "the loop waits")) io.err(line);
   }
   for (const c of startChecks.filter((c) => c.state === "warn")) {
     io.err(`harnessd run: warn ${c.id}: ${c.detail}`);
   }
 
   // The local API (docs/API.md), so `harnessd pause` and the UI reach this loop at once.
-  const pause = createPauseController({ store: pauseStore, loops: [loop] });
+  const loops: CoordinatorLoop[] = [];
+  const pause = createPauseController({ store: pauseStore, loops });
+  let active: Built | undefined;
+  let started: (() => void) | undefined;
   const ui = createUiApi({
-    board: createBoardSource({ read: () => linear.listBoard(team), loop: () => loop.snapshot() }),
-    agents: () => agentsView(config, loop.snapshot()),
+    board: createBoardSource({
+      read: () =>
+        active
+          ? active.linear.listBoard(active.team)
+          : Promise.reject(new Error("The loop has not started. Finish setup in Settings.")),
+      loop: () => (active ? active.loop.snapshot() : { lastPollAt: null, runs: [], blocked: [] }),
+    }),
+    agents: () =>
+      active
+        ? agentsView(active.config, active.loop.snapshot())
+        : agentsView(fallback, { lastPollAt: null, runs: [], blocked: [] }),
     logs,
     pause,
   });
+
+  const loopRoutes: Route[] = [
+    {
+      method: "GET",
+      path: "/api/loop",
+      handler: async () => ({
+        state: active ? "running" : "setup",
+        blocking: active ? [] : blocking,
+      }),
+    },
+    {
+      method: "POST",
+      path: "/api/start",
+      handler: async () => {
+        if (active) return { state: "running", blocking: [] };
+        const now = await checks({ ...options, servingPort: true });
+        const next = await buildLoop(parsed, io, env, repoDir, globalDir, pauseStore, logs);
+        blocking = now.filter(isBlocking).map((c) => c.id);
+        if (typeof next === "string") blocking = [...new Set([setupBlocker(next), ...blocking])];
+        if (typeof next === "string" || blocking.length > 0) {
+          throw new HttpError(
+            409,
+            "setup_incomplete",
+            `Fix these first: ${blocking.join(", ")}.${typeof next === "string" ? ` ${next}` : ""}`,
+          );
+        }
+        if (active) return { state: "running", blocking: [] };
+        active = next;
+        loops.push(next.loop);
+        started?.();
+        return { state: "running", blocking: [] };
+      },
+    },
+  ];
+
   let daemon: Daemon;
   let page: Awaited<ReturnType<typeof staticRoutes>>;
   try {
     page = await staticRoutes(io.uiDir ?? UI_DIR);
     const status = statusRoutes(() => checks({ ...options, servingPort: true }));
-    daemon = await startDaemon({ port, pause, routes: [...ui.routes, ...status, ...page] });
+    const setup = setupRoutes({
+      repoDir,
+      globalDir,
+      env,
+      checks: (o) => checks({ ...options, ...o, servingPort: true }),
+      ...(io.setupRunner ? { runner: io.setupRunner } : {}),
+    });
+    daemon = await startDaemon({
+      port,
+      pause,
+      routes: [...ui.routes, ...status, ...loopRoutes, ...setup.routes, ...page],
+    });
   } catch (e) {
     const busy = (e as NodeJS.ErrnoException).code === "EADDRINUSE";
     io.err(
@@ -252,25 +368,28 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
         ? `harnessd run: UI and API at ${daemon.url}`
         : `harnessd run: API at ${daemon.url} (UI not built)`,
     );
-    const pause = await pauseStore.read();
-    if (pause.paused) io.out(pausedLine(pause.since, pause.reason));
-    io.out(`harnessd run: ${visibility.status}`);
-    // A summary missed while the daemon was off goes out now, once (D-021).
-    await visibility.checkSummary();
-    const summaries = parsed.once
-      ? undefined
-      : setInterval(() => void visibility.checkSummary(), SUMMARY_CHECK_MS);
-    try {
-      return await drive(
-        loop,
-        parsed,
-        io,
-        `polling ${teamId} every ${parsed.intervalMs / 1000}s in ${repoDir}`,
-      );
-    } finally {
-      clearInterval(summaries);
-      await visibility.flush(SLACK_FLUSH_MS);
+    const paused = await pauseStore.read();
+    if (paused.paused) io.out(pausedLine(paused.since, paused.reason));
+    if (blocking.length === 0 && typeof built !== "string") {
+      active = built;
+      loops.push(built.loop);
+      return await drive(active, parsed, io);
     }
+    io.out(`harnessd run: Finish setup at ${daemon.url}/#/settings, then press Start.`);
+    // Wait for Start or the stop signal, whichever comes first.
+    const stop = (io.stopSignal ?? untilSignal)();
+    const start = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    const first = await Promise.race([
+      stop.then((s) => ({ stop: s })),
+      start.then(() => ({ stop: "" })),
+    ]);
+    if (first.stop || !active) {
+      io.out(`harnessd run: ${first.stop || "stopped"}, the loop never started`);
+      return 0;
+    }
+    return await drive(active, parsed, io, stop);
   } finally {
     ui.close();
     await daemon.close();
@@ -286,39 +405,50 @@ export function pausedLine(since: string | undefined, reason: string | undefined
 
 /** Runs one tick (`--once`) or polls until the stop signal. */
 async function drive(
-  loop: CoordinatorLoop,
+  built: Built,
   parsed: RunArgs,
   io: LoopIO,
-  polling: string,
+  stopSignal?: Promise<string>,
 ): Promise<number> {
-  if (parsed.once) {
-    try {
-      const report = await loop.tick();
-      await loop.idle();
-      if (report.paused) {
-        io.out("paused: nothing dispatched");
+  const { loop, visibility } = built;
+  io.out(`harnessd run: ${visibility.status}`);
+  // A summary missed while the daemon was off goes out now, once (D-021).
+  await visibility.checkSummary();
+  const summaries = parsed.once
+    ? undefined
+    : setInterval(() => void visibility.checkSummary(), SUMMARY_CHECK_MS);
+  try {
+    if (parsed.once) {
+      try {
+        const report = await loop.tick();
+        await loop.idle();
+        if (report.paused) {
+          io.out("paused: nothing dispatched");
+          return 0;
+        }
+        io.out(
+          `split ${report.split.length}, dispatched ${report.dispatched.length}, ` +
+            `escalated ${report.escalated.length}, re-queued ${report.requeued.length}`,
+        );
         return 0;
+      } catch (e) {
+        io.err(`harnessd run: ${(e as Error).message}`);
+        return 1;
       }
-      io.out(
-        `split ${report.split.length}, dispatched ${report.dispatched.length}, ` +
-          `escalated ${report.escalated.length}, re-queued ${report.requeued.length}`,
-      );
-      return 0;
-    } catch (e) {
-      io.err(`harnessd run: ${(e as Error).message}`);
-      return 1;
     }
+    io.out(`harnessd run: polling ${built.teamId} every ${parsed.intervalMs / 1000}s`);
+    loop.start();
+    const signal = await (stopSignal ?? (io.stopSignal ?? untilSignal)());
+    loop.stop();
+    const running = loop.running();
+    io.out(
+      `harnessd run: ${signal}, stopped polling` +
+        (running.length > 0 ? `; waiting for ${running.join(", ")}` : ""),
+    );
+    await loop.idle();
+    return 0;
+  } finally {
+    clearInterval(summaries);
+    await visibility.flush(SLACK_FLUSH_MS);
   }
-
-  io.out(`harnessd run: ${polling}`);
-  loop.start();
-  const signal = await (io.stopSignal ?? untilSignal)();
-  loop.stop();
-  const running = loop.running();
-  io.out(
-    `harnessd run: ${signal}, stopped polling` +
-      (running.length > 0 ? `; waiting for ${running.join(", ")}` : ""),
-  );
-  await loop.idle();
-  return 0;
 }

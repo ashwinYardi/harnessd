@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ConfigError, DEFAULT_SETTINGS, parseAgentSettings, parseConfigFile } from "./index.ts";
+import {
+  ConfigError,
+  DEFAULT_SETTINGS,
+  HARNESSES,
+  parseAgentSettings,
+  parseConfigFile,
+} from "./index.ts";
 
 const FILE = "~/.harnessd/config.toml";
 
@@ -54,7 +60,7 @@ test("unknown keys are rejected with their path", () => {
   );
   rejects(
     { colour: "red" },
-    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, daemon, agents, mcp, skills`,
+    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, daemon, harnesses, agents, mcp, skills`,
   );
   rejects(
     { limits: { budget_minutes: { L: 300 } } },
@@ -203,4 +209,20 @@ test("skill tables take enabled, upstream, commit and version", () => {
     { skills: { tdd: { commit: "" } } },
     `${FILE}: skills.tdd.commit: expected a non-empty string`,
   );
+});
+
+test("parseConfigFile reads [harnesses.<id>] bin, and only for known harnesses", () => {
+  assert.deepEqual(
+    parseConfigFile({ harnesses: { "claude-code": { bin: "/opt/bin/claude" } } }, FILE).harnesses,
+    { "claude-code": { bin: "/opt/bin/claude" } },
+  );
+  rejects(
+    { harnesses: { cursorx: { bin: "/x" } } },
+    `${FILE}: harnesses.cursorx: unknown key, expected one of ${HARNESSES.join(", ")}`,
+  );
+  rejects(
+    { harnesses: { codex: { bin: "codex" } } },
+    `${FILE}: harnesses.codex.bin: expected an absolute path`,
+  );
+  assert.deepEqual(DEFAULT_SETTINGS.harnesses, {});
 });

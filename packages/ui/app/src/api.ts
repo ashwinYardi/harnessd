@@ -15,6 +15,20 @@ export type Load<T> =
 /** "live" once the event stream is open; "reconnecting" while the browser retries it. */
 export type Connection = "connecting" | "live" | "reconnecting";
 
+/** An API error, with the field errors a form shows inline. */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly code: string | undefined;
+  readonly fields: Record<string, string>;
+
+  constructor(status: number, message: string, code?: string, fields: Record<string, string> = {}) {
+    super(message);
+    this.status = status;
+    this.code = code;
+    this.fields = fields;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
@@ -22,12 +36,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   } catch {
     throw new Error("The daemon is not reachable. Check that harnessd run is running.");
   }
-  const body = (await res.json().catch(() => undefined)) as { message?: string } | undefined;
-  if (!res.ok) throw new Error(body?.message ?? `HTTP ${res.status}`);
+  const body = (await res.json().catch(() => undefined)) as
+    | { message?: string; error?: string; fields?: Record<string, string> }
+    | undefined;
+  if (!res.ok) {
+    throw new ApiError(
+      res.status,
+      body?.message ?? `HTTP ${res.status}`,
+      body?.error,
+      body?.fields,
+    );
+  }
   return body as T;
 }
 
-const post = <T>(path: string, body: unknown) =>
+export const post = <T>(path: string, body: unknown) =>
   request<T>(path, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -127,3 +150,5 @@ import type { Check } from "./lib/checks.ts";
 export type { Check };
 
 export const readStatus = () => request<{ checks: Check[] }>("/api/status");
+
+export { request };

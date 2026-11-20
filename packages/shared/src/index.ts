@@ -21,4 +21,5 @@ export * from "./adapter.ts";
 export * from "./config.ts";
 export * from "./coordinator.ts";
 export * from "./linear.ts";
+export * from "./team.ts";
 export * from "./ui.ts";

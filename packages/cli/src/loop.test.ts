@@ -254,3 +254,80 @@ test("run starts on warnings only and serves the checks at GET /api/status", asy
   });
   assert.deepEqual(seen, [false, true], "the API run knows this daemon holds the port");
 });
+
+const FAILING: Check[] = [
+  {
+    id: "harness.claude-code.cli",
+    state: "missing",
+    detail: "claude is not on PATH",
+    fix: "Install it",
+  },
+];
+
+test("run on a blocking check serves the app in setup and dispatches nothing", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  let loop: unknown;
+  const code = await runLoop([], {
+    ...s.io,
+    checks: async () => FAILING,
+    stopSignal: async () => {
+      const info = await readDaemonInfo(s.home);
+      loop = await (await fetch(`${info?.url}/api/loop`)).json();
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(loop, { state: "setup", blocking: ["harness.claude-code.cli"] });
+  assert.match(s.err.join("\n"), /1 check failed; the loop waits/);
+  assert.match(s.out.join("\n"), /Finish setup at http:\/\/127\.0\.0\.1:\d+\/#\/settings/);
+});
+
+test("POST /api/start refuses while a check blocks, then starts the loop once all pass", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  let checks = FAILING;
+  const answers: unknown[] = [];
+  const code = await runLoop([], {
+    ...s.io,
+    checks: async () => checks,
+    stopSignal: async () => {
+      const url = (await readDaemonInfo(s.home))?.url ?? "";
+      const start = () =>
+        fetch(`${url}/api/start`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+      const refused = await start();
+      answers.push(refused.status, await refused.json());
+      checks = [];
+      const ok = await start();
+      answers.push(ok.status, await ok.json());
+      answers.push(await (await fetch(`${url}/api/loop`)).json());
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.equal(answers[0], 409);
+  assert.equal((answers[1] as { error: string }).error, "setup_incomplete");
+  assert.match((answers[1] as { message: string }).message, /harness\.claude-code\.cli/);
+  assert.equal(answers[2], 200);
+  assert.deepEqual(answers[3], { state: "running", blocking: [] });
+  assert.deepEqual(answers[4], { state: "running", blocking: [] });
+});
+
+test("run without LINEAR_API_KEY serves setup and names the variable, never a value", async () => {
+  const s = await setup({}, PAUSED_CONFIG);
+  let loop: unknown;
+  const code = await runLoop([], {
+    ...s.io,
+    stopSignal: async () => {
+      const info = await readDaemonInfo(s.home);
+      loop = await (await fetch(`${info?.url}/api/loop`)).json();
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(loop, { state: "setup", blocking: ["linear.key"] });
+  assert.match(s.err.join("\n"), /LINEAR_API_KEY is not set/);
+});

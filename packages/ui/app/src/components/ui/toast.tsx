@@ -34,7 +34,7 @@ function ToastList() {
           <Toast.Root
             className={cn(
               "relative w-full select-none rounded-lg border bg-popover text-popover-foreground shadow-lg/5 not-dark:bg-clip-padding",
-              "transition-[opacity,translate] duration-150 ease-out data-starting-style:translate-y-2 data-starting-style:opacity-0 data-ending-style:opacity-0",
+              "data-limited:hidden transition-[opacity,translate] duration-150 ease-out data-starting-style:translate-y-2 data-starting-style:opacity-0 data-ending-style:opacity-0",
             )}
             key={t.id}
             toast={t}

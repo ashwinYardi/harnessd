@@ -11,9 +11,10 @@
 
 | Status | Code |
 |---|---|
-| 400 | `invalid_json`, `invalid_body` |
+| 400 | `invalid_json`, `invalid_body` (a form error adds `"fields": { "<row>.<field>": "…" }`), `invalid_config` (a config.toml on disk that the validator rejects; a write that would make one is `invalid_body`), `unsupported` |
 | 403 | `forbidden_host` |
 | 404 | `not_found` |
+| 409 | `busy`, `setup_incomplete` |
 | 405 | `method_not_allowed`, with an `Allow` header |
 | 413 | `payload_too_large` |
 | 415 | `unsupported_media_type` |
@@ -63,5 +64,28 @@ The UI's read models are typed in `packages/shared/src/ui.ts`.
   data: {"seq":42,"at":"…","source":"backend","issueKey":"MET-41","level":"info","text":"Edit src/app.ts"}
   ```
 - **The UI's files** are read once at start from `packages/ui/dist/app`, the Vite build. Each file is its own exact route, so no other path is served. The HTML carries a strict `content-security-policy` (only its own scripts, styles and connections; no framing). One inline style is allowed by its hash: the fixed scrollbar rule that Base UI renders (D-025). Hashed assets are cached for a year. If the UI is not built, `harnessd run` says so and serves the API alone.
+
+## Settings routes (MET-28)
+The Settings pages use these routes (code: `packages/daemon/src/setup/routes.ts`, D-026). Every POST is loopback only, needs `content-type: application/json` and passes the Host check above, like every other route.
+
+| Method | Path | Body | Response |
+|---|---|---|---|
+| GET | `/api/loop` | | `{ "state": "setup" \| "running", "blocking": string[] }` |
+| POST | `/api/start` | `{}` | the same, once the loop runs; 409 `setup_incomplete` names the blockers |
+| GET | `/api/harnesses` | | `{ "harnesses": HarnessCard[] }` for `claude-code` and `codex` |
+| POST | `/api/harnesses/<id>/install` | `{}` | `Job` |
+| POST | `/api/harnesses/<id>/update` | `{}` | `Job` |
+| POST | `/api/harnesses/<id>/signin` | `{}` | `Job`; 400 `unsupported` off macOS, with the command to run |
+| POST | `/api/harnesses/<id>/path` | `{ "path": "/abs/path" }` or `{ "path": null }` | `{ "bin" }` |
+| GET | `/api/setup/events` | | `text/event-stream` of `job` events |
+| GET | `/api/team` | | `{ "agents": [{ "name", "role", "harness", "model", "removable" }] }` |
+| POST | `/api/team` | `{ "agents": [{ "name", "role", "harness", "model"? }] }` | the new team, plus `synced` (files `harnessd sync` wrote) or `syncError` |
+
+- **HarnessCard** is `{ id, name, required, bin, checks, commands, job }`. `checks` are the status engine's `harness.<id>.*` checks, run for this harness whether an agent uses it or not. `required` is true when an agent uses it. `commands` are the setup commands as text, for a person to run by hand.
+- **Setup commands are fixed.** Each action route runs one argv known in code: `npm install -g <package>`, `npm install -g <package>@latest`, and on macOS `osascript` that opens Terminal with `claude auth login` or `codex login`. The body must be `{}`; any key is a 400. No shell runs. One command runs per harness at a time (409 `busy`). A command gets SIGTERM after 10 minutes, and SIGKILL 5 s later. Config writes run one at a time.
+- **Job** is `{ id, harness, action, command, state, exitCode?, lines, startedAt }`. `state` is `running`, `ok` or `failed`. `lines` holds the last 200 output lines. Each change goes out as a `job` event on `/api/setup/events`; a new stream gets the current jobs first.
+- **Binary path** must be absolute, an executable file, and end in the CLI's own name (`/claude`, `/codex`), because the status engine and the loop run it. It is written to `[harnesses.<id>] bin` in `~/.harnessd/config.toml`. `null` removes it. Other lines of the file stay.
+- **Team.** The rows are checked by `validateTeam` (`packages/shared/src/team.ts`): names are lowercase letters, digits, `-` and `_`; roles and harnesses come from the config schema; the team has exactly one coordinator. A default agent, or one set outside the workspace config.toml, cannot be removed. Only changed agents are written, to `[agents.<name>]` tables of `<repo>/.harnessd/config.toml`. The new file is checked with the config validator before it is written; an invalid team writes nothing. Then `harnessd sync` runs.
+- **Secrets.** No route takes or returns a secret. Keys go in through each CLI's own sign-in, or as environment variables that Connections names.
 
 New routes are added as `Route` values (`{ method, path, handler }`) through `startDaemon({ routes })`. The handler returns the JSON body of a 200, a `RawBody` (a file), or an `EventStream`, or throws `HttpError(status, code)`.

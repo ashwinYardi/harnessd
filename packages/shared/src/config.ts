@@ -113,6 +113,12 @@ export interface SkillSettings {
   version?: string;
 }
 
+/** One `[harnesses.<id>]` table: where a harness CLI lives on this machine (MET-28). */
+export interface HarnessSettings {
+  /** Absolute path to the CLI. When set, the status engine and the loop use it, not PATH. */
+  bin?: string;
+}
+
 /** MCP server names: they become keys in .mcp.json and `[mcp_servers.<name>]` in Codex TOML. */
 export const MCP_NAME = /^[A-Za-z0-9_-]+$/;
 
@@ -124,6 +130,7 @@ export interface Settings {
   merge: MergeConfig;
   qa: QaConfig;
   daemon: DaemonConfig;
+  harnesses: Partial<Record<HarnessId, HarnessSettings>>;
 }
 
 export type DeepPartial<T> = T extends readonly unknown[]
@@ -273,6 +280,7 @@ export const DEFAULT_SETTINGS: Settings = {
     test_command: "pnpm test",
   },
   daemon: { port: 4747 },
+  harnesses: {},
 };
 
 /** The default team (D-010): every agent on Claude Code. */
@@ -479,6 +487,7 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
     "merge",
     "qa",
     "daemon",
+    "harnesses",
     "agents",
     "mcp",
     "skills",
@@ -555,6 +564,23 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
   if (root.daemon !== undefined) {
     const t = c.table(root.daemon, "daemon", ["port"]);
     out.daemon = t.port === undefined ? {} : { port: c.port(t.port, "daemon.port") };
+  }
+
+  if (root.harnesses !== undefined) {
+    const t = c.table(root.harnesses, "harnesses", HARNESSES);
+    const harnesses: Partial<Record<HarnessId, HarnessSettings>> = {};
+    for (const id of HARNESSES) {
+      if (t[id] === undefined) continue;
+      const h = c.table(t[id], `harnesses.${id}`, ["bin"]);
+      const entry: HarnessSettings = {};
+      if (h.bin !== undefined) {
+        const bin = c.string(h.bin, `harnesses.${id}.bin`);
+        if (!bin.startsWith("/")) c.fail(`harnesses.${id}.bin`, "expected an absolute path");
+        entry.bin = bin;
+      }
+      harnesses[id] = entry;
+    }
+    out.harnesses = harnesses;
   }
 
   if (root.agents !== undefined) {
