@@ -71,15 +71,15 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 | `github.auth` | `gh auth status --active` | `fail`: run `gh auth login` |
 | `github.push` | `gh repo view --json viewerPermission` | `fail` below WRITE, or with no GitHub remote |
 | `github.ci` | the default branch's rulesets, and its classic protection when gh may read it | `warn` when no check is required |
-| `linear.key` | one GraphQL read with `LINEAR_API_KEY` | `missing` when unset; `fail` when rejected or unreachable |
+| `linear.key` | one GraphQL read with the key from the secret lookup (below); the detail names the source: `saved`, `1Password` or `env` | `missing` when unset; `fail` when rejected, unreachable, or a reference cannot be read |
 | `linear.team` | `linear.team_id`, as a key or a UUID | `missing` when unset; `fail` when unknown |
 | `linear.states` | Ready, In Progress, In Review, Done and Needs input | `fail`, with the missing names |
-| `slack.webhook` | `HARNESSD_SLACK_WEBHOOK_URL` is set | `warn` only |
+| `slack.webhook` | the webhook from the secret lookup is set and is an https url; the detail names the source | `warn` only |
 | `git.worktrees` | `git worktree list` in the workspace | `fail` outside a git clone |
 | `daemon.port` | binds `127.0.0.1:<daemon.port>` | `warn` when a running harnessd holds it; `fail` when anything else does |
 | `skills.pack` | each default skill in `~/.harnessd/skills/` | `warn`: run `harnessd init` |
 
-Harnesses are checked once for each harness an agent uses. Checks run in parallel. No command runs past 5 s, so `doctor` returns within a few seconds. No check spends tokens. Sign-in checks read only the exit code and named JSON fields, never the account or the token. Output never shows a key, a token or a webhook: each value of 6 characters or more of an environment variable with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in its name is replaced by `***`. The Slack notifier reads `HARNESSD_SLACK_WEBHOOK_URL` (D-021).
+Harnesses are checked once for each harness an agent uses. Checks run in parallel. No command runs past 5 s, so `doctor` returns within a few seconds. No check spends tokens. Sign-in checks read only the exit code and named JSON fields, never the account or the token. Output never shows a key, a token or a webhook: each value of 6 characters or more of an environment variable with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in its name, and each value read from the secret store, is replaced by `***`. The loop and the Slack notifier read through the same lookup (D-029).
 
 ## The launchd service
 | | |
@@ -93,24 +93,37 @@ Harnesses are checked once for each harness an agent uses. Checks run in paralle
 
 `HARNESSD_HOME` is passed on when it was set for `init`.
 
-`harnessd run` needs `LINEAR_API_KEY` (docs/LOOP.md). init never writes secrets to disk, so give the key to launchd for this login session, then restart the service:
+## Secrets
+harnessd needs a Linear personal API key, and a Slack webhook url if you want Slack. Set both in the app. No shell profile edit and no restart is needed (D-029).
+
+1. Open the url that `harnessd run` prints, then Settings, Connections.
+2. On the Linear card, paste the key into **API key** and press **Save**. On the Slack card, paste the webhook url into **Webhook url**.
+3. The card shows "Set" and the source, and its checks run again. Press **Start** when nothing blocks.
+
+The app is write-only: it never shows a saved value again. **Replace** saves a new value. **Remove** deletes the saved value or reference.
+
+**The store.** A saved value goes to `~/.harnessd/secrets/<id>` (under `$HARNESSD_HOME` when set): `linear.api_key` and `slack.webhook_url`. The folder is `0700`, and each file is `0600`. Each save writes a temp file, then renames it, so a reader never sees half a value.
+
+**References.** Instead of a value, enter a reference. The app saves it in `~/.harnessd/config.toml`, never the value (docs/CONFIG.md "Secrets"):
+- `op://vault/item/field` reads the value with the 1Password CLI (`op read`) each time it is used. The result is kept in memory for 5 minutes. Install `op` and sign in first.
+- `env:NAME` reads the variable `NAME`.
+
+**Lookup.** For each secret, harnessd uses the saved value or reference first, then the environment variable (`LINEAR_API_KEY`, `HARNESSD_SLACK_WEBHOOK_URL`). So an existing setup with variables keeps working. A running daemon reads the lookup again on each Linear request and each Slack post, so a new value applies on the next tick.
+
+Without a key, the service serves the app and the loop waits in setup (D-026). You can still use variables, for example for a headless machine:
 ```sh
 launchctl setenv LINEAR_API_KEY lin_api_...
 launchctl kickstart -k gui/$(id -u)/dev.harnessd.daemon
 ```
-Until the key is set, the service logs the missing-key error to `daemon.err.log` and retries every 30 s. `launchctl setenv` does not survive a reboot.
+`launchctl setenv` does not survive a reboot. A saved value does.
 
 ### Slack
 harnessd posts to Slack **#harnessd** through an incoming webhook (D-015, D-021). Without one it posts nothing, logs one warning at start and works as before.
 1. In Slack, create an app for your workspace, turn on **Incoming Webhooks** and add a webhook for #harnessd. Copy its url.
-2. Give the url to launchd, then restart the service:
-   ```sh
-   launchctl setenv HARNESSD_SLACK_WEBHOOK_URL https://hooks.slack.com/services/...
-   launchctl kickstart -k gui/$(id -u)/dev.harnessd.daemon
-   ```
-3. Check `daemon.out.log` for `slack: posting notices to #harnessd, daily summary at 21:00 Asia/Kolkata`.
+2. Paste the url into **Webhook url** on the Slack card in Settings, Connections, and press **Save** (see "Secrets" above). `HARNESSD_SLACK_WEBHOOK_URL` still works as a fallback.
+3. The Slack card shows `slack.webhook` as `set (saved)`.
 
-The url is a secret. harnessd reads it from the environment only and never writes it to disk or logs. It must start with `https://`. The webhook fixes the channel; `slack.channel` is only a label. Set `slack.summary_time` and `slack.time_zone` in `.harnessd/config.toml` (docs/CONFIG.md).
+The url is a secret. harnessd keeps it in the secret store and never writes it to config.toml or logs. The notifier reads it before each post, so a new url applies at once. It must start with `https://`. The webhook fixes the channel; `slack.channel` is only a label. Set `slack.summary_time` and `slack.time_zone` in `.harnessd/config.toml` (docs/CONFIG.md).
 
 What harnessd posts:
 - **A notice per event:** one line per merge, per block (Needs input, an escalation, two QA or gate failures) and per protected PR that waits for a human. Each line links the issue and the PR, when there is one.

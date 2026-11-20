@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 import { type Load, readStatus } from "../api.ts";
 import { toast } from "../components/ui/toast.tsx";
 import { type Check, isBlocking } from "../lib/checks.ts";
+import { mergeChecks } from "../lib/secrets.ts";
 
 export function useStatus() {
   const [status, setStatus] = useState<Load<Check[]>>({ status: "loading" });
@@ -37,7 +38,13 @@ export function useStatus() {
   }, [load]);
   const recheck = useCallback(() => load(true), [load]);
   const retry = useCallback(() => load(), [load]);
-  return { status, checking, recheck, retry };
+  /** Puts one connection's re-run checks in place, after a secret is saved (MET-33). */
+  const replace = useCallback((prefix: string, fresh: Check[]) => {
+    setStatus((s) =>
+      s.status === "ready" ? { status: "ready", data: mergeChecks(s.data, prefix, fresh) } : s,
+    );
+  }, []);
+  return { status, checking, recheck, retry, replace };
 }
 
 export type Status = ReturnType<typeof useStatus>;

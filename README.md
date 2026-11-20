@@ -126,14 +126,16 @@ Flags, paths, the service and uninstall: [docs/INSTALL.md](docs/INSTALL.md).
 4. **Run.**
 
    ```bash
-   LINEAR_API_KEY=lin_api_... harnessd run
+   harnessd run
    ```
+
+   Paste your Linear API key in Settings, Connections. No shell edit is needed ([docs/INSTALL.md](docs/INSTALL.md#secrets)).
 
    The background service can run it for you instead: [docs/INSTALL.md](docs/INSTALL.md#the-launchd-service).
 
 5. **Open the app** at [http://127.0.0.1:4747](http://127.0.0.1:4747). If anything still blocks, it opens Settings:
    - **Harnesses:** install, update or sign in to each CLI.
-   - **Connections:** each GitHub, Linear and Slack check, with its fix.
+   - **Connections:** each GitHub, Linear and Slack check, with its fix. Paste the Linear key and the Slack webhook here.
    - **Team:** the role, harness and model of each agent.
 
    When nothing blocks, press **Start**. Then move an issue to Ready in Linear and watch the board.

@@ -79,16 +79,16 @@ export function connectionCards(checks: readonly Check[]): ConnectionCard[] {
   });
 }
 
-/** Secrets are set as environment variables only; the UI says where, never asks for a value. */
-const ENV: Record<string, string> = {
-  "linear.key": "LINEAR_API_KEY",
-  "slack.webhook": "HARNESSD_SLACK_WEBHOOK_URL",
-};
+/** The checks whose card has a secret field (MET-33). */
+const SECRET_CHECKS = new Set(["linear.key", "slack.webhook"]);
 
-export function envFix(check: Check): string | undefined {
-  const name = ENV[check.id];
-  if (!name) return undefined;
-  return `Set ${name} in your shell profile (for example ~/.zprofile), then restart harnessd.`;
+/**
+ * The daemon's fix for a secret's check names the Settings page. Inside the card, the
+ * field is right there, so the fix points at it instead. Never asks for a value in text.
+ */
+export function secretFix(check: Check): string | undefined {
+  if (!SECRET_CHECKS.has(check.id)) return undefined;
+  return check.fix.replace(/ in Settings, Connections, (Linear|Slack)\./, " in the field below.");
 }
 
 /** A check that was not run because another one blocks (D-023: detail "not checked"). */

@@ -4,9 +4,9 @@ import type { Check } from "./checks.ts";
 import {
   blockingAreas,
   connectionCards,
-  envFix,
   harnessSummary,
   isWaiting,
+  secretFix,
   startState,
 } from "./setup.ts";
 
@@ -78,16 +78,30 @@ test("connectionCards groups checks into GitHub, Linear, Slack, git, port and sk
   );
 });
 
-test("envFix says where to set a secret's variable, and never asks for its value", () => {
+test("secretFix points a secret's fix at the field in its card", () => {
   assert.equal(
-    envFix(c("linear.key", "missing")),
-    "Set LINEAR_API_KEY in your shell profile (for example ~/.zprofile), then restart harnessd.",
+    secretFix(
+      c(
+        "linear.key",
+        "missing",
+        "",
+        "Paste a Linear personal API key in Settings, Connections, Linear.",
+      ),
+    ),
+    "Paste a Linear personal API key in the field below.",
   );
   assert.equal(
-    envFix(c("slack.webhook", "warn")),
-    "Set HARNESSD_SLACK_WEBHOOK_URL in your shell profile (for example ~/.zprofile), then restart harnessd.",
+    secretFix(
+      c(
+        "slack.webhook",
+        "warn",
+        "",
+        "Create a Slack incoming webhook, then paste its url in Settings, Connections, Slack.",
+      ),
+    ),
+    "Create a Slack incoming webhook, then paste its url in the field below.",
   );
-  assert.equal(envFix(c("github.auth", "fail")), undefined);
+  assert.equal(secretFix(c("github.auth", "fail", "", "Run gh auth login.")), undefined);
 });
 
 test("blockingAreas counts things to fix, not checks: a harness or a connection each count once", () => {

@@ -10,7 +10,7 @@ related_targets: ["app/src/views/settings/Settings.tsx"]
 Mode: Operate. Visitor: the owner, a developer who checks in a few times a day and uses T3 Code daily. Job: see what runs, what is blocked and what needs them; stop everything at once; reach any action by keyboard. Constraints: PRODUCT.md pinned aesthetic, D-025 stack and tokens, loopback only, strict CSP, no web fonts, no T3 Code brand.
 
 ## Settings (MET-28)
-An extension of this surface, after T3 Code's Settings → Providers: a sub-nav (Harnesses, Connections, Team), one card per harness or connection with its state badge, details, fix and actions, a Team table that saves through the validator, and a Start banner while the loop is in setup. Job: get from a fresh machine to a running loop in a few clicks. No secret is ever shown or typed.
+An extension of this surface, after T3 Code's Settings → Providers: a sub-nav (Harnesses, Connections, Team), one card per harness or connection with its state badge, details, fix and actions, a Team table that saves through the validator, and a Start banner while the loop is in setup. Job: get from a fresh machine to a running loop in a few clicks. No secret is ever shown. The Linear and Slack cards take their secret in a write-only field (MET-33, D-029).
 
 ## Direction contract
 THESIS: harnessd feels like a sibling of T3 Code: the same sidebar, header, palette, controls and density, so the owner knows it on sight. It refuses the decorated kanban and the custom one-off look of MET-18.

@@ -14,6 +14,7 @@ import {
   type Check,
   createBoardSource,
   createLogBuffer,
+  createSecretStore,
   createUiApi,
   HttpError,
   type LoopSnapshot,
@@ -21,6 +22,7 @@ import {
   type PauseControl,
   type PauseState,
   type Route,
+  secretRoutes,
   setupRoutes,
   startDaemon,
   staticRoutes,
@@ -245,6 +247,79 @@ const harnessChecks = (): Check[] => [
     fix: "Update it: npm i -g @openai/codex@latest",
   },
 ];
+// Linear and Slack read the real secret store in the scratch folder (MET-33). A key that
+// contains "bad" is rejected, so the error state can be shown.
+let connectionChecks: Check[] = [];
+async function connections(only?: readonly string[]): Promise<Check[]> {
+  const out: Check[] = [];
+  if (!only || only.includes("linear")) {
+    const key = await secrets.resolve("linear.api_key").catch(() => undefined);
+    if (!key) {
+      out.push(
+        {
+          id: "linear.key",
+          state: "missing",
+          detail: "no key is saved and LINEAR_API_KEY is not set",
+          fix: "Paste a Linear personal API key in Settings, Connections, Linear.",
+        },
+        {
+          id: "linear.team",
+          state: "missing",
+          detail: "not checked",
+          fix: "Fix linear.key first.",
+        },
+        {
+          id: "linear.states",
+          state: "missing",
+          detail: "not checked",
+          fix: "Fix linear.key first.",
+        },
+      );
+    } else if (key.value.includes("bad")) {
+      out.push(
+        {
+          id: "linear.key",
+          state: "fail",
+          detail: `Linear rejected the key (${key.source})`,
+          fix: "Create a new personal API key in Linear, then replace it in Settings, Connections, Linear.",
+        },
+        {
+          id: "linear.team",
+          state: "missing",
+          detail: "not checked",
+          fix: "Fix linear.key first.",
+        },
+        {
+          id: "linear.states",
+          state: "missing",
+          detail: "not checked",
+          fix: "Fix linear.key first.",
+        },
+      );
+    } else {
+      out.push(
+        ok("linear.key", `accepted (${key.source})`),
+        ok("linear.team", "MET"),
+        ok("linear.states", "Ready, In Progress, In Review, Done, Needs input"),
+      );
+    }
+  }
+  if (!only || only.includes("slack")) {
+    const hook = await secrets.resolve("slack.webhook_url").catch(() => undefined);
+    out.push(
+      hook
+        ? ok("slack.webhook", `set (${hook.source})`)
+        : {
+            id: "slack.webhook",
+            state: "warn",
+            detail:
+              "no webhook is saved and HARNESSD_SLACK_WEBHOOK_URL is not set; no Slack lines are sent",
+            fix: "Create a Slack incoming webhook, then paste its url in Settings, Connections, Slack.",
+          },
+    );
+  }
+  return out;
+}
 const CHECKS = (): Check[] => [
   ok("node", "v24.11.0 (/opt/homebrew/bin/node)"),
   ok("config", "5 agents"),
@@ -254,30 +329,15 @@ const CHECKS = (): Check[] => [
   ok("github.auth", "signed in as demo-owner"),
   ok("github.push", "demo/harnessd: WRITE"),
   ok("github.ci", "main requires: ci"),
-  setup
-    ? {
-        id: "linear.key",
-        state: "missing",
-        detail: "LINEAR_API_KEY is not set",
-        fix: "Create a personal API key in Linear, then: export LINEAR_API_KEY=lin_api_...",
-      }
-    : ok("linear.key", "LINEAR_API_KEY is set"),
-  setup
-    ? { id: "linear.team", state: "missing", detail: "not checked", fix: "Fix linear.key first." }
-    : ok("linear.team", "MET"),
-  setup
-    ? { id: "linear.states", state: "missing", detail: "not checked", fix: "Fix linear.key first." }
-    : ok("linear.states", "Ready, In Progress, In Review, Done, Needs input"),
-  {
-    id: "slack.webhook",
-    state: "warn",
-    detail: "HARNESSD_SLACK_WEBHOOK_URL is not set",
-    fix: "Set HARNESSD_SLACK_WEBHOOK_URL to post merges and blocks to Slack.",
-  },
+  ...connectionChecks,
   ok("git.worktrees", "3 worktrees in /Users/demo/harnessd"),
   ok("daemon.port", "4848 is served by this daemon"),
   ok("skills.pack", "16 of 16 skills in place"),
 ];
+const fresh = async (): Promise<Check[]> => {
+  connectionChecks = await connections();
+  return CHECKS();
+};
 const blocking = () =>
   CHECKS()
     .filter((c) => c.state === "fail" || c.state === "missing")
@@ -289,6 +349,10 @@ const repoDir = join(scratch, "repo");
 const globalDir = join(scratch, "global");
 await mkdir(join(repoDir, ".harnessd"), { recursive: true });
 await mkdir(globalDir, { recursive: true });
+const secrets = createSecretStore({ globalDir, env: {} });
+// Without --setup the demo starts with a saved key, as on a set-up machine.
+if (!setup) await secrets.save("linear.api_key", "lin_api_demo0000000000000000");
+connectionChecks = await connections();
 await writeFile(
   join(repoDir, ".harnessd", "config.toml"),
   '# Demo workspace.\n[linear]\nteam_id = "MET"\n\n# QA runs on Codex.\n[agents.qa]\nharness = "codex"\nmodel = "gpt-5"\n\n# Writes the docs.\n[agents.docs]\nrole = "frontend"\nharness = "claude-code"\n',
@@ -300,7 +364,7 @@ const setupApi = setupRoutes({
   platform: "darwin",
   checks: async (o) => {
     await sleep(300);
-    return o.harnessesOnly ? harnessChecks() : CHECKS();
+    return o.harnessesOnly ? harnessChecks() : fresh();
   },
   isExecutable: async (p) => p.startsWith("/opt/"),
   sync: async () => ({ changed: ["AGENTS.md", ".claude/agents/docs.md"], skipped: [] }),
@@ -323,12 +387,16 @@ const loopRoutes: Route[] = [
   {
     method: "GET",
     path: "/api/loop",
-    handler: () => ({ state: started ? "running" : "setup", blocking: started ? [] : blocking() }),
+    handler: async () => {
+      await fresh();
+      return { state: started ? "running" : "setup", blocking: started ? [] : blocking() };
+    },
   },
   {
     method: "POST",
     path: "/api/start",
-    handler: () => {
+    handler: async () => {
+      await fresh();
       const now = blocking();
       if (now.length > 0)
         throw new HttpError(409, "setup_incomplete", `Fix these first: ${now.join(", ")}.`);
@@ -355,9 +423,16 @@ const daemon = await startDaemon({
     ),
     ...statusRoutes(async () => {
       await sleep(400);
-      return CHECKS();
+      return fresh();
     }),
     ...setupApi.routes,
+    ...secretRoutes({
+      store: secrets,
+      checks: async (o) => {
+        await sleep(300);
+        return connections(o.connectionsOnly);
+      },
+    }),
     ...loopRoutes,
     ...(await staticRoutes(UI_DIR)),
   ],
