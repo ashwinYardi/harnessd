@@ -151,3 +151,86 @@ test("a workspace can turn off a global skill", async () => {
   const { changed } = await syncRepo(options);
   assert.ok(!changed.some((p) => p.includes("skills/deploy/")));
 });
+
+/** The Impeccable-style native folder in a temp global skill. */
+const HOOK_GROUP = {
+  matcher: "Edit|Write",
+  hooks: [{ type: "command", command: "scan", timeout: 5 }],
+};
+
+async function withNativeSkill(options: Awaited<ReturnType<typeof setup>>) {
+  const globalDir = join(options.home, "global");
+  await cp(options.globalDir, globalDir, { recursive: true });
+  const native = join(globalDir, "skills", "ui", ".harnessd-native");
+  await mkdir(join(native, "claude-agents"), { recursive: true });
+  await writeFile(join(globalDir, "skills", "ui", "SKILL.md"), "Design.\n");
+  await writeFile(
+    join(native, "hooks.json"),
+    JSON.stringify({ claude: { PostToolUse: [HOOK_GROUP] }, codex: { PostToolUse: [HOOK_GROUP] } }),
+  );
+  await writeFile(
+    join(native, "claude-agents", "ui-reviewer.md"),
+    "---\nname: ui-reviewer\n---\nReview.\n",
+  );
+  return { ...options, globalDir };
+}
+
+test("sync merges skill hooks into user settings and keeps them over two runs", async () => {
+  const options = await withNativeSkill(await setup("full"));
+  const mine = { matcher: "Bash", hooks: [{ type: "command", command: "audit" }] };
+  await mkdir(join(options.repoDir, ".claude"), { recursive: true });
+  await writeFile(
+    join(options.repoDir, ".claude", "settings.json"),
+    JSON.stringify({ permissions: { allow: ["Bash(ls)"] }, hooks: { PreToolUse: [mine] } }),
+  );
+  const { changed } = await syncRepo(options);
+  assert.ok(changed.includes(".codex/hooks.json"));
+  assert.ok(changed.includes(".claude/agents/ui-reviewer.md"));
+  const read = async (p: string) => JSON.parse(await readFile(join(options.repoDir, p), "utf8"));
+  const settings = await read(".claude/settings.json");
+  assert.deepEqual(settings.permissions, { allow: ["Bash(ls)"] });
+  assert.deepEqual(settings.hooks, { PreToolUse: [mine], PostToolUse: [HOOK_GROUP] });
+  assert.deepEqual((await read(".codex/hooks.json")).hooks, { PostToolUse: [HOOK_GROUP] });
+  const before = await snapshot(options.repoDir);
+  assert.deepEqual((await syncRepo(options)).changed, []);
+  assert.deepEqual(await snapshot(options.repoDir), before);
+});
+
+test("a workspace that turns the skill off gets no hook and no agent", async () => {
+  const options = await withNativeSkill(await setup("full"));
+  await writeFile(
+    join(options.repoDir, ".harnessd", "config.toml"),
+    "[skills.ui]\nenabled = false\n",
+  );
+  await syncRepo(options);
+  const settings = JSON.parse(
+    await readFile(join(options.repoDir, ".claude", "settings.json"), "utf8"),
+  );
+  assert.equal(settings.hooks, undefined);
+  assert.ok(!(await exists(join(options.repoDir, ".codex", "hooks.json"))));
+  assert.ok(!(await exists(join(options.repoDir, ".claude", "agents", "ui-reviewer.md"))));
+});
+
+test("an agent file sync did not generate is kept and reported", async () => {
+  const options = await withNativeSkill(await setup("full"));
+  const agents = join(options.repoDir, ".claude", "agents");
+  await mkdir(agents, { recursive: true });
+  await writeFile(join(agents, "ui-reviewer.md"), "Hand-installed.\n");
+  await writeFile(join(agents, "mine.md"), "Mine.\n");
+  const { changed, skipped } = await syncRepo(options);
+  assert.deepEqual(skipped, [".claude/agents/ui-reviewer.md"]);
+  assert.ok(!changed.includes(".claude/agents/ui-reviewer.md"));
+  assert.equal(await readFile(join(agents, "ui-reviewer.md"), "utf8"), "Hand-installed.\n");
+  assert.equal(await readFile(join(agents, "mine.md"), "utf8"), "Mine.\n");
+});
+
+test("a .claude/settings.json that is not JSON stops sync and is left alone", async () => {
+  const options = await setup("full");
+  await mkdir(join(options.repoDir, ".claude"), { recursive: true });
+  await writeFile(join(options.repoDir, ".claude", "settings.json"), "{ not json");
+  await assert.rejects(syncRepo(options), /\.claude\/settings\.json/);
+  assert.equal(
+    await readFile(join(options.repoDir, ".claude", "settings.json"), "utf8"),
+    "{ not json",
+  );
+});

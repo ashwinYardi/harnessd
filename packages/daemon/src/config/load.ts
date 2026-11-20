@@ -8,11 +8,14 @@ import {
   type ConfigFile,
   type ConfigLayer,
   type ConfigScope,
+  type HookEvents,
   type MergedConfig,
   parseAgentSettings,
   parseConfigFile,
   type Rule,
   type Skill,
+  type SkillAgent,
+  type SkillNative,
 } from "@harnessd/shared";
 import { parse, TomlError } from "smol-toml";
 import { parseFrontmatter } from "./frontmatter.ts";
@@ -78,6 +81,81 @@ async function listOptional(path: string): Promise<Dirent[]> {
 /** The marker init writes in each default skill folder (docs/CONFIG.md "Skills"). */
 export const PACK_MARKER = ".harnessd-pack";
 
+/**
+ * The folder in a skill that holds its harness files: `hooks.json` and
+ * `claude-agents/<name>.md` (docs/SYNC.md "Hooks and agents"). Sync does not copy it.
+ */
+export const NATIVE_DIR = ".harnessd-native";
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Checks the shape of one harness's hooks in hooks.json. */
+function parseHookEvents(value: unknown, label: string, key: string): HookEvents {
+  if (!isObject(value)) throw new ConfigError(label, key, "expected a table of hook events");
+  for (const [event, groups] of Object.entries(value)) {
+    if (!Array.isArray(groups)) {
+      throw new ConfigError(label, `${key}.${event}`, "expected an array of hook groups");
+    }
+    groups.forEach((group, i) => {
+      const at = `${key}.${event}[${i}]`;
+      if (!isObject(group) || !Array.isArray(group.hooks)) {
+        throw new ConfigError(label, at, "expected { matcher?, hooks: [...] }");
+      }
+      if (group.matcher !== undefined && typeof group.matcher !== "string") {
+        throw new ConfigError(label, `${at}.matcher`, "expected a string");
+      }
+      group.hooks.forEach((hook, j) => {
+        if (!isObject(hook) || typeof hook.command !== "string") {
+          throw new ConfigError(label, `${at}.hooks[${j}].command`, "expected a string");
+        }
+        if (typeof hook.type !== "string") {
+          throw new ConfigError(label, `${at}.hooks[${j}].type`, "expected a string");
+        }
+      });
+    });
+  }
+  return value as HookEvents;
+}
+
+/** Reads a skill's `.harnessd-native/` folder; undefined when it has none. */
+async function loadNative(
+  skillDir: string,
+  show: (path: string) => string,
+): Promise<SkillNative | undefined> {
+  const dir = join(skillDir, NATIVE_DIR);
+  const native: SkillNative = {};
+  const hooksPath = join(dir, "hooks.json");
+  const hooksText = await readOptional(hooksPath);
+  if (hooksText !== undefined) {
+    const label = show(hooksPath);
+    let data: unknown;
+    try {
+      data = JSON.parse(hooksText);
+    } catch (e) {
+      throw new ConfigError(label, undefined, `invalid JSON: ${(e as Error).message}`);
+    }
+    if (!isObject(data)) throw new ConfigError(label, undefined, "expected a JSON object");
+    for (const key of Object.keys(data)) {
+      if (key !== "claude" && key !== "codex") {
+        throw new ConfigError(label, key, "unknown key; expected claude or codex");
+      }
+    }
+    if (data.claude !== undefined)
+      native.claudeHooks = parseHookEvents(data.claude, label, "claude");
+    if (data.codex !== undefined) native.codexHooks = parseHookEvents(data.codex, label, "codex");
+  }
+  const agents: SkillAgent[] = [];
+  for (const ent of await listOptional(join(dir, "claude-agents"))) {
+    if (!ent.isFile() || !ent.name.endsWith(".md")) continue;
+    const text = await readFile(join(dir, "claude-agents", ent.name), "utf8");
+    agents.push({ name: ent.name.slice(0, -".md".length), text });
+  }
+  if (agents.length > 0) native.claudeAgents = agents;
+  return Object.keys(native).length > 0 ? native : undefined;
+}
+
 /** Every file in a skill folder but SKILL.md and the pack marker, `/`-separated and sorted. */
 async function skillFiles(dir: string): Promise<string[]> {
   const out: string[] = [];
@@ -85,7 +163,7 @@ async function skillFiles(dir: string): Promise<string[]> {
     const entries = await readdir(join(dir, rel), { withFileTypes: true });
     for (const ent of entries) {
       const path = rel === "" ? ent.name : `${rel}/${ent.name}`;
-      if (path === "SKILL.md" || path === PACK_MARKER) continue;
+      if (path === "SKILL.md" || path === PACK_MARKER || path === NATIVE_DIR) continue;
       if (ent.isDirectory()) await walk(path);
       else if (ent.isFile()) out.push(path);
     }
@@ -220,6 +298,8 @@ export async function loadLayer(
     if (extra.length > 0) skill.frontmatter = extra;
     const files = await skillFiles(skillDir);
     if (files.length > 0) skill.files = files;
+    const native = await loadNative(skillDir, show);
+    if (native !== undefined) skill.native = native;
     layer.skills.push(skill);
   }
 

@@ -325,6 +325,8 @@ function planSkill(
   marker: SkillPin | undefined,
   table: SkillSettings | undefined,
   configFile: string,
+  /** True when the installed marker differs from the one this build ships (a newer format). */
+  staleMarker = false,
 ): SkillPlan {
   if (present && marker === undefined) return { action: "foreign" };
   const fix = `Set skills.${skill.name}.commit = "${skill.commit}" in ${configFile}`;
@@ -345,7 +347,7 @@ function planSkill(
     return { action: marker === undefined ? "skip" : "keep", note, ...extra };
   }
   if (marker === undefined) return { action: "install", ...extra };
-  return { action: marker.commit === pinned ? "keep" : "update", ...extra };
+  return { action: marker.commit === pinned && !staleMarker ? "keep" : "update", ...extra };
 }
 
 /**
@@ -378,11 +380,14 @@ async function installSkills({ io, sys }: Step): Promise<boolean> {
   for (const skill of pack) {
     const dest = join(skillsDir, skill.name);
     const present = await sys.fs.exists(dest);
-    const marker = parseMarker(await sys.fs.read(join(dest, PACK_MARKER)));
+    const markerText = await sys.fs.read(join(dest, PACK_MARKER));
+    const marker = parseMarker(markerText);
+    const shipped = await sys.fs.read(join(sys.packDir, skill.name, PACK_MARKER));
+    const stale = shipped !== undefined && markerText !== shipped;
     plans.push({
       skill,
       dest,
-      plan: planSkill(skill, present, marker, tables[skill.name], configFile),
+      plan: planSkill(skill, present, marker, tables[skill.name], configFile, stale),
     });
   }
 

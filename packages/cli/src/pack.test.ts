@@ -3,9 +3,10 @@ import { mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { buildPack, PACK } from "./pack.ts";
+import { buildPack, PACK, PACK_FORMAT } from "./pack.ts";
 
-const VENDORED = join(import.meta.dirname, "../../../.claude/skills");
+const REPO = join(import.meta.dirname, "../../..");
+const VENDORED = join(REPO, ".claude/skills");
 
 const roots: string[] = [];
 after(async () => {
@@ -56,4 +57,36 @@ test("buildPack copies each whole skill folder with its licence, marker and a ma
   // Extra files and the executable bit come along.
   assert.ok((await readdir(join(out, "tdd"))).includes("tests.md"));
   assert.equal((await stat(join(out, "impeccable", "scripts", "impeccable"))).mode & 0o100, 0o100);
+});
+
+test("impeccable ships its design hook and its Claude Code agents, as the repo installs them", async () => {
+  const out = await mkdtemp(join(tmpdir(), "harnessd-pack-"));
+  roots.push(out);
+  await buildPack(VENDORED, out);
+  const native = join(out, "impeccable", ".harnessd-native");
+  const hooks = JSON.parse(await readFile(join(native, "hooks.json"), "utf8"));
+  // The repo's .claude/settings.json is what `npx impeccable install` wrote (VENDORED.md).
+  const settings = JSON.parse(await readFile(join(REPO, ".claude/settings.json"), "utf8"));
+  assert.deepEqual(hooks.claude, settings.hooks);
+  assert.deepEqual(Object.keys(hooks.claude), ["SessionStart", "PostToolUse", "Stop"]);
+  assert.deepEqual(Object.keys(hooks.codex), ["PostToolUse", "Stop"]);
+  assert.match(
+    hooks.codex.Stop[0].hooks[0].command,
+    /\.agents\/skills\/impeccable\/scripts\/impeccable/,
+  );
+  const agents = (await readdir(join(REPO, ".claude/agents"))).filter((n) =>
+    n.startsWith("impeccable-"),
+  );
+  assert.equal(agents.length, 5);
+  assert.deepEqual((await readdir(join(native, "claude-agents"))).sort(), agents.sort());
+  for (const name of agents) {
+    assert.equal(
+      await readFile(join(native, "claude-agents", name), "utf8"),
+      await readFile(join(REPO, ".claude/agents", name), "utf8"),
+    );
+  }
+  // Only impeccable has harness files; every marker names the pack format.
+  await assert.rejects(stat(join(out, "tdd", ".harnessd-native")));
+  const marker = JSON.parse(await readFile(join(out, "tdd", ".harnessd-pack"), "utf8"));
+  assert.equal(marker.format, PACK_FORMAT);
 });

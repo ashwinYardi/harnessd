@@ -1,8 +1,15 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { loadConfig } from "../config/load.ts";
-import { GENERATED_NOTE, generateSyncFiles, SKILL_ROOTS, type SyncFile } from "./generate.ts";
-import { writeSyncFiles } from "./write.ts";
+import {
+  CLAUDE_AGENTS_DIR,
+  GENERATED_NOTE,
+  generateSyncFiles,
+  SKILL_ROOTS,
+  type SyncFile,
+} from "./generate.ts";
+import { mergeSettings } from "./settings.ts";
+import { type WritableFile, writeSyncFiles } from "./write.ts";
 
 export interface SyncOptions {
   /** Repo root; its `.harnessd/` is the workspace layer and native files land here. */
@@ -16,7 +23,10 @@ export interface SyncOptions {
 export interface SyncResult {
   /** Repo-relative paths that were written; [] when everything was up to date. */
   changed: string[];
-  /** Skill folders left alone because sync did not generate them, such as `.claude/skills/tdd`. */
+  /**
+   * Skill folders and agent files left alone because sync did not generate them, such as
+   * `.claude/skills/tdd` or `.claude/agents/impeccable-finish-reviewer.md`.
+   */
   skipped: string[];
 }
 
@@ -46,13 +56,46 @@ async function isOwnSkillFolder(repoDir: string, folder: string): Promise<boolea
   return md.includes(`\n---\n<!-- ${GENERATED_NOTE} -->\n`);
 }
 
-async function dropForeignSkills(repoDir: string, files: SyncFile[]) {
+async function readOptional(path: string): Promise<string | undefined> {
+  try {
+    return await readFile(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw e;
+  }
+}
+
+/** An agent file is sync's own when it is absent or has the generated note after its frontmatter. */
+async function isOwnAgentFile(repoDir: string, path: string): Promise<boolean> {
+  const text = await readOptional(join(repoDir, path));
+  if (text === undefined) return true;
+  const note = `<!-- ${GENERATED_NOTE} -->\n`;
+  return text.startsWith(note) || text.includes(`\n---\n${note}`);
+}
+
+/** The unit sync owns or not: a skill folder, an agent file, or undefined for the rest. */
+function ownedUnit(path: string): { unit: string; kind: "skill" | "agent" } | undefined {
+  const folder = skillFolder(path);
+  if (folder !== undefined) return { unit: folder, kind: "skill" };
+  if (path.startsWith(`${CLAUDE_AGENTS_DIR}/`)) return { unit: path, kind: "agent" };
+  return undefined;
+}
+
+async function dropForeign(repoDir: string, files: SyncFile[]) {
   const own = new Map<string, boolean>();
   const kept: SyncFile[] = [];
   for (const file of files) {
-    const folder = skillFolder(file.path);
+    const owned = ownedUnit(file.path);
+    const folder = owned?.unit;
     if (folder !== undefined) {
-      if (!own.has(folder)) own.set(folder, await isOwnSkillFolder(repoDir, folder));
+      if (!own.has(folder)) {
+        own.set(
+          folder,
+          owned?.kind === "agent"
+            ? await isOwnAgentFile(repoDir, folder)
+            : await isOwnSkillFolder(repoDir, folder),
+        );
+      }
       if (!own.get(folder)) continue;
     }
     kept.push(file);
@@ -78,6 +121,16 @@ export async function syncRepo(options: SyncOptions): Promise<SyncResult> {
     workspaceDir,
     ...(options.home === undefined ? {} : { home: options.home }),
   });
-  const { files, skipped } = await dropForeignSkills(options.repoDir, generateSyncFiles(config));
-  return { changed: await writeSyncFiles(options.repoDir, files), skipped };
+  const { files, skipped } = await dropForeign(options.repoDir, generateSyncFiles(config));
+  // Read every settings file before writing any, so a bad one stops sync with nothing written.
+  const writable: WritableFile[] = [];
+  for (const file of files) {
+    if (!("settings" in file)) {
+      writable.push(file);
+      continue;
+    }
+    const existing = await readOptional(join(options.repoDir, file.path));
+    writable.push({ path: file.path, content: mergeSettings(existing, file.settings, file.path) });
+  }
+  return { changed: await writeSyncFiles(options.repoDir, writable), skipped };
 }

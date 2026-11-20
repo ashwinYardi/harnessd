@@ -153,6 +153,39 @@ export interface Rule {
 }
 
 /** `skills/<folder>/SKILL.md`. The name is the frontmatter `name`, else the folder name. */
+/** One hook command, as Claude Code and Codex write it. Other keys stay as they are. */
+export interface HookCommand {
+  type: string;
+  command: string;
+  [key: string]: unknown;
+}
+
+/** A matcher group of hooks for one event. */
+export interface HookGroup {
+  matcher?: string;
+  hooks: HookCommand[];
+  [key: string]: unknown;
+}
+
+/** The `hooks` table of a harness settings file: event name to matcher groups. */
+export type HookEvents = Record<string, HookGroup[]>;
+
+/** A Claude Code subagent file that a skill ships, `.claude/agents/<name>.md`. */
+export interface SkillAgent {
+  name: string;
+  text: string;
+}
+
+/**
+ * Harness files a skill ships besides the skill folder, from its `.harnessd-native/`
+ * folder: hooks for Claude Code and Codex, and Claude Code subagents. See docs/SYNC.md.
+ */
+export interface SkillNative {
+  claudeHooks?: HookEvents;
+  codexHooks?: HookEvents;
+  claudeAgents?: SkillAgent[];
+}
+
 export interface Skill {
   name: string;
   description?: string;
@@ -165,6 +198,8 @@ export interface Skill {
   frontmatter?: string[];
   /** Every other file in the folder, relative and `/`-separated, sorted. Sync copies them. */
   files?: string[];
+  /** Hooks and subagents from `.harnessd-native/`; sync merges them into the harness files. */
+  native?: SkillNative;
 }
 
 /** One agent as defined by a single layer (config.toml table plus `agents/<name>.md`). */

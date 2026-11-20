@@ -96,9 +96,15 @@ Optional frontmatter with `name` (defaults to the folder name) and `description`
 | code-review, codebase-design, diagnosing-bugs, domain-modeling, grill-with-docs, grilling, implement, improve-codebase-architecture, prototype, research, tdd, to-spec, to-tickets | mattpocock/skills | MIT |
 | impeccable | pbakaus/impeccable | Apache 2.0 |
 
-The commits are in `.claude/skills/VENDORED.md`. Each folder is the whole upstream skill: SKILL.md, reference files, scripts and `agents/`. Each folder has its upstream licence as `LICENSE` (impeccable also has `NOTICE.md`). Each folder also has a `.harnessd-pack` marker with the upstream and commit. Sync does not copy the marker.
+The commits are in `.claude/skills/VENDORED.md`. Each folder is the whole upstream skill: SKILL.md, reference files, scripts and `agents/`. Each folder has its upstream licence as `LICENSE` (impeccable also has `NOTICE.md`). Each folder also has a `.harnessd-pack` marker with the upstream, the commit and the pack format. Sync does not copy the marker.
 
-**Pins.** For each default skill without a `[skills.<name>]` table, init appends one to the global config.toml, with `upstream` and `commit`. init adds only new tables; it never changes your text. init installs or replaces a skill folder only when the pin names the commit that this harnessd ships. So a newer `@harnessd/cli` never changes a skill until you change its pin:
+**Hooks and agents.** impeccable also has a `.harnessd-native/` folder, from the same upstream commit (D-026):
+- `hooks.json`: the design hook for Claude Code and Codex.
+- `claude-agents/`: the five Impeccable agents, such as `impeccable-finish-reviewer.md`.
+
+They are part of the skill folder, so the pin covers them. Sync merges the hooks into `.claude/settings.json` and `.codex/hooks.json`, and writes the agents to `.claude/agents/` (docs/SYNC.md "Hooks and agents"). `enabled = false` turns off the skill, its hooks and its agents. Your own skill can ship the same folder.
+
+**Pins.** For each default skill without a `[skills.<name>]` table, init appends one to the global config.toml, with `upstream` and `commit`. init adds only new tables; it never changes your text. init installs or replaces a skill folder only when the pin names the commit that this harnessd ships. So a newer `@harnessd/cli` never changes a skill until you change its pin. One exception keeps the commit: when the marker names an older pack format, init copies the folder again at the same commit. This adds `.harnessd-native/` to an impeccable folder from before MET-30.
 - If the pin is older than the shipped commit, init keeps the folder and prints the `commit` to set.
 - To update, set `commit` to the printed value and run `harnessd init` again.
 - init reads pins from the global file only.
