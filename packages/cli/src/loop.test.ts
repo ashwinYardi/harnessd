@@ -405,3 +405,35 @@ test("first launch: a key saved in Settings starts the loop with no restart, and
   assert.doesNotMatch(everything, /FIRSTLAUNCH|FIRSTHOOK/);
   assert.match(seen.join("\n"), /event: log/);
 });
+
+test("GET /api/loop reads the current checks, so a saved key clears linear.key with no restart", async () => {
+  const s = await setup({}, PAUSED_CONFIG);
+  // Paused, so the started loop makes no Linear call.
+  await createFilePauseStore(s.home).pause();
+  const answers: Record<string, unknown> = {};
+  const code = await runLoop([], {
+    ...s.io,
+    stopSignal: async () => {
+      const url = (await readDaemonInfo(s.home))?.url ?? "";
+      const post = async (path: string, body: unknown) =>
+        (
+          await fetch(url + path, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(body),
+          })
+        ).json();
+      answers.before = await (await fetch(`${url}/api/loop`)).json();
+      await post("/api/secrets/linear.api_key", { value: "lin_api_CURRENTCHECKS0123" });
+      answers.after = await (await fetch(`${url}/api/loop`)).json();
+      answers.start = await post("/api/start", {});
+      answers.running = await (await fetch(`${url}/api/loop`)).json();
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(answers.before, { state: "setup", blocking: ["linear.key"] });
+  assert.deepEqual(answers.after, { state: "setup", blocking: [] });
+  assert.deepEqual(answers.start, { state: "running", blocking: [] });
+  assert.deepEqual(answers.running, { state: "running", blocking: [] });
+});
