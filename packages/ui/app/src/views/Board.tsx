@@ -54,7 +54,7 @@ function IssueRow({ issue, paused }: { issue: BoardIssue; paused: boolean }) {
           )}
           <ExternalLinkIcon
             aria-hidden="true"
-            className="ms-auto size-3 opacity-0 transition-opacity group-hover:opacity-100"
+            className="ms-auto size-3 opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
           />
         </span>
         <span className="line-clamp-2 text-foreground leading-snug">{issue.title}</span>

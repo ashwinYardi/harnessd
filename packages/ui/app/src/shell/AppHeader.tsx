@@ -59,8 +59,13 @@ export function AppHeader({
       <div className="flex min-w-0 flex-1 items-center gap-3 text-muted-foreground text-xs">
         <Tooltip>
           <TooltipTrigger
-            render={<span className="inline-flex items-center gap-1.5" />}
-            aria-label={`Connection: ${c.text}`}
+            render={
+              <button
+                type="button"
+                className="inline-flex cursor-default items-center gap-1.5 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              />
+            }
+            aria-label={`Connection: ${c.text}. ${c.hint}`}
           >
             <span aria-hidden="true" className={cn("size-1.5 rounded-full", c.dot)} />
             <span className="hidden sm:inline">{c.text}</span>
@@ -68,20 +73,23 @@ export function AppHeader({
           <TooltipPopup side="bottom">{c.hint}</TooltipPopup>
         </Tooltip>
         <p className="min-w-0 truncate" role="status" aria-live="polite">
-          {paused ? (
+          {paused && (
             <span className="font-medium text-warning-foreground">
               {pause.busy === "pausing"
                 ? "Pausing all agents."
                 : `Paused${since ? ` since ${clockTime(since)}` : ""}${pause.confirmed.reason ? `: ${pause.confirmed.reason}` : ""}. Nothing is dispatched.`}
             </span>
-          ) : pauseUnknown ? (
+          )}
+          {!paused && pauseUnknown && (
             <span className="text-warning-foreground">Pause state unknown: {pauseUnknown}</span>
-          ) : (
-            <span className="hidden md:inline">
-              {lastPollAt ? `Last poll ${sinceText(lastPollAt, now)}` : "No poll yet"}
-            </span>
           )}
         </p>
+        {/* Outside the live region: it changes every second. */}
+        {!paused && !pauseUnknown && (
+          <span className="hidden truncate md:inline">
+            {lastPollAt ? `Last poll ${sinceText(lastPollAt, now)}` : "No poll yet"}
+          </span>
+        )}
       </div>
       {boardDown && (
         <Badge variant="warning" size="lg">
@@ -92,7 +100,7 @@ export function AppHeader({
         <button
           type="button"
           onClick={onShowNeedsYou}
-          className="inline-flex h-7 cursor-pointer items-center gap-1.5 rounded-md bg-destructive px-2.5 font-medium text-sm text-white outline-none transition-colors duration-100 hover:bg-destructive/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+          className="relative inline-flex min-h-7 cursor-pointer items-center gap-1.5 whitespace-nowrap rounded-md bg-destructive pointer-coarse:after:absolute pointer-coarse:after:top-1/2 pointer-coarse:after:left-1/2 pointer-coarse:after:size-11 pointer-coarse:after:-translate-1/2 px-2.5 font-medium text-sm text-white outline-none transition-colors duration-100 hover:bg-destructive/90 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
         >
           <span className="tabular-nums">{needsYou}</span>
           <span className="hidden sm:inline">{needsYou === 1 ? "needs you" : "need you"}</span>

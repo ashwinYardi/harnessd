@@ -22,10 +22,12 @@ export function Logs({ logs, retry }: { logs: Load<LogLine[]>; retry: () => void
   const shown = frozen ?? lines;
   const unseen = frozen ? lines.filter((l) => l.seq > (frozen.at(-1)?.seq ?? 0)).length : 0;
 
+  // Runs when lines arrive, not on every clock tick.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run only when lines arrive
   useLayoutEffect(() => {
     const el = body.current;
     if (el && follow) el.scrollTop = el.scrollHeight;
-  });
+  }, [shown.length, follow]);
 
   function onScroll() {
     const el = body.current;

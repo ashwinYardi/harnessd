@@ -112,6 +112,7 @@ function CommandBody<T extends Command>({
       <div className="flex items-center gap-2 border-b px-4">
         <SearchIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" />
         <input
+          aria-label="Command"
           aria-activedescendant={current ? `${id}-${index}` : undefined}
           aria-autocomplete="list"
           aria-controls={`${id}-list`}
@@ -136,6 +137,7 @@ function CommandBody<T extends Command>({
         id={`${id}-list`}
         role="listbox"
         aria-label="Commands"
+        tabIndex={-1}
       >
         {items.length === 0 && (
           <p className="px-2 py-6 text-center text-muted-foreground text-sm">

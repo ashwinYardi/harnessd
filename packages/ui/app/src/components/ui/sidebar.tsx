@@ -94,7 +94,7 @@ function SidebarMenuItem({ className, ...props }: React.ComponentProps<"li">) {
 }
 
 const MENU_BUTTON =
-  "flex h-8 w-full cursor-pointer items-center justify-center gap-2 overflow-hidden rounded-[var(--control-radius)] px-2 text-left font-medium text-sidebar-muted-foreground text-sm outline-hidden ring-ring transition-colors duration-100 hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset active:bg-sidebar-row-active md:justify-start md:px-2.5 aria-[current=page]:bg-sidebar-row-active aria-[current=page]:text-sidebar-foreground aria-[current=page]:shadow-xs/5 dark:aria-[current=page]:shadow-none [&>svg]:size-4 [&>svg]:shrink-0";
+  "relative flex h-8 w-full cursor-pointer items-center justify-center gap-2 overflow-hidden rounded-[var(--control-radius)] px-2 text-left font-medium text-sidebar-muted-foreground text-sm outline-hidden ring-ring transition-colors duration-100 hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset active:bg-sidebar-row-active md:justify-start md:px-2.5 aria-[current=page]:bg-sidebar-row-active aria-[current=page]:text-sidebar-foreground aria-[current=page]:shadow-xs/5 dark:aria-[current=page]:shadow-none [&>svg]:size-4 [&>svg]:shrink-0 pointer-coarse:after:absolute pointer-coarse:after:inset-x-0 pointer-coarse:after:top-1/2 pointer-coarse:after:h-11 pointer-coarse:after:-translate-y-1/2";
 
 function SidebarMenuButton({
   className,

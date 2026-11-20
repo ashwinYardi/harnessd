@@ -1,6 +1,6 @@
 // The app shell: a left sidebar of views, a header with the kill switch, and the command
 // palette (Cmd+K) that runs every action.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useHarnessd } from "./api.ts";
 import { CommandPalette } from "./components/ui/command.tsx";
 import { SidebarInset } from "./components/ui/sidebar.tsx";
@@ -41,6 +41,7 @@ export function App() {
   const pause = usePause(api.pause, api.setPause);
   const status = useStatus();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const { recheck } = status;
 
   const waiting = api.board.status === "ready" ? api.board.data.issues.filter(needsYou).length : 0;
   const boardDown =
@@ -56,9 +57,21 @@ export function App() {
       ? status.status.data.filter((c) => c.state === "fail" || c.state === "missing").length
       : 0;
 
+  const title = NAV.find((n) => n.view === route.view)?.title ?? "Board";
   useEffect(() => {
-    document.title = waiting > 0 ? `(${waiting}) harnessd` : "harnessd";
-  }, [waiting]);
+    document.title = `${waiting > 0 ? `(${waiting}) ` : ""}${title} · harnessd`;
+  }, [waiting, title]);
+
+  // A view change moves focus to the content, so a screen reader hears the new view.
+  const firstView = useRef(true);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: runs on each view change by design
+  useEffect(() => {
+    if (firstView.current) {
+      firstView.current = false;
+      return;
+    }
+    document.getElementById("main")?.focus({ preventScroll: true });
+  }, [route.view]);
 
   const goTo = useCallback((view: View) => go({ view }), [go]);
 
@@ -136,7 +149,7 @@ export function App() {
         title: "Run the checks again",
         group: "Settings",
         keywords: ["doctor", "status"],
-        run: () => void status.recheck(),
+        run: () => void recheck(),
       },
       {
         id: "reload-board",
@@ -156,9 +169,16 @@ export function App() {
       themeCmd("light", "Use the light theme"),
       themeCmd("dark", "Use the dark theme"),
     ];
-  }, [pause.view.shown.paused, pause.toggle, route.view, goTo, theme, setTheme, status, api.retry]);
-
-  const title = NAV.find((n) => n.view === route.view)?.title ?? "Board";
+  }, [
+    pause.view.shown.paused,
+    pause.toggle,
+    route.view,
+    goTo,
+    theme,
+    setTheme,
+    recheck,
+    api.retry,
+  ]);
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -190,7 +210,7 @@ export function App() {
           pauseUnknown={pause.unknown}
           title={title}
         />
-        <main className="flex min-h-0 flex-1 flex-col" id="main" tabIndex={-1}>
+        <main className="flex min-h-0 flex-1 flex-col" id="main" aria-label={title} tabIndex={-1}>
           {route.view === "board" && (
             <Board
               board={api.board}

@@ -77,7 +77,9 @@ export function useStatus() {
   useEffect(() => {
     void load();
   }, [load]);
-  return { status, checking, recheck: () => load(true), retry: () => load() };
+  const recheck = useCallback(() => load(true), [load]);
+  const retry = useCallback(() => load(), [load]);
+  return { status, checking, recheck, retry };
 }
 
 export function Settings({ status }: { status: ReturnType<typeof useStatus> }) {

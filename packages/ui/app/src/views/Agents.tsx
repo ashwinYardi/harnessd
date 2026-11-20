@@ -89,10 +89,10 @@ function AgentRows({ agent, now }: { agent: AgentView; now: Date }) {
           <td className="px-4 py-2.5 text-right align-top tabular-nums">
             {duration(now.getTime() - Date.parse(run.startedAt))}
           </td>
-          <td className="hidden px-4 py-2.5 align-top text-xs md:table-cell">
+          <td className="hidden px-4 py-2.5 align-top text-xs lg:table-cell">
             <Budget now={now} run={run} />
           </td>
-          <td className="hidden px-4 py-2.5 text-right align-top tabular-nums md:table-cell">
+          <td className="hidden px-4 py-2.5 text-right align-top tabular-nums lg:table-cell">
             {tokens(run.tokens)}
           </td>
         </tr>
@@ -153,8 +153,8 @@ export function Agents({
                   <col className="w-28 md:w-44" />
                   <col />
                   <col className="w-20 md:w-24" />
-                  <col className="hidden md:table-column md:w-56" />
-                  <col className="hidden md:table-column md:w-20" />
+                  <col className="hidden lg:table-column lg:w-56" />
+                  <col className="hidden lg:table-column lg:w-20" />
                 </colgroup>
                 <thead className="bg-muted/72 text-muted-foreground text-xs">
                   <tr>
@@ -167,10 +167,16 @@ export function Agents({
                     <th className="px-4 py-2 text-right font-medium" scope="col">
                       Elapsed
                     </th>
-                    <th className="px-4 py-2 text-left font-medium" scope="col">
+                    <th
+                      className="hidden px-4 py-2 text-left font-medium lg:table-cell"
+                      scope="col"
+                    >
                       Budget used
                     </th>
-                    <th className="px-4 py-2 text-right font-medium" scope="col">
+                    <th
+                      className="hidden px-4 py-2 text-right font-medium lg:table-cell"
+                      scope="col"
+                    >
                       Tokens
                     </th>
                   </tr>
