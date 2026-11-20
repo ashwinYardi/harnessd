@@ -60,7 +60,7 @@ test("unknown keys are rejected with their path", () => {
   );
   rejects(
     { colour: "red" },
-    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, daemon, harnesses, agents, mcp, skills`,
+    `${FILE}: colour: unknown key, expected one of limits, linear, slack, merge, qa, daemon, harnesses, secrets, agents, mcp, skills`,
   );
   rejects(
     { limits: { budget_minutes: { L: 300 } } },
@@ -225,4 +225,50 @@ test("parseConfigFile reads [harnesses.<id>] bin, and only for known harnesses",
     `${FILE}: harnesses.codex.bin: expected an absolute path`,
   );
   assert.deepEqual(DEFAULT_SETTINGS.harnesses, {});
+});
+
+test("parseConfigFile reads [secrets.<service>] references, never a value (MET-33)", () => {
+  assert.deepEqual(
+    parseConfigFile(
+      {
+        secrets: {
+          linear: { api_key: "op://Private/Linear/credential" },
+          slack: { webhook_url: "env:MY_SLACK_HOOK" },
+        },
+      },
+      FILE,
+    ).secrets,
+    {
+      linear: { api_key: "op://Private/Linear/credential" },
+      slack: { webhook_url: "env:MY_SLACK_HOOK" },
+    },
+  );
+  assert.deepEqual(
+    parseConfigFile({ secrets: { linear: { api_key: "op://v/item/section/field" } } }, FILE)
+      .secrets,
+    { linear: { api_key: "op://v/item/section/field" } },
+  );
+  rejects(
+    { secrets: { github: { token: "env:GH" } } },
+    `${FILE}: secrets.github: unknown key, expected one of linear, slack`,
+  );
+  rejects(
+    { secrets: { linear: { token: "env:GH" } } },
+    `${FILE}: secrets.linear.token: unknown key, expected one of api_key`,
+  );
+  // A value in config.toml is refused, and the error never repeats it.
+  for (const value of ["lin_api_supersecret123", "op://only-vault", "env:1BAD", "env:A B"]) {
+    assert.throws(
+      () => parseConfigFile({ secrets: { linear: { api_key: value } } }, FILE),
+      (e: unknown) =>
+        e instanceof ConfigError &&
+        !e.message.includes(value) &&
+        e.message ===
+          `${FILE}: secrets.linear.api_key: expected a reference such as "op://vault/item/field" or "env:NAME"; save a value in Settings, Connections`,
+    );
+  }
+  assert.throws(
+    () => parseConfigFile({ secrets: { linear: { api_key: 42 } } }, FILE),
+    (e: unknown) => e instanceof ConfigError && /expected a reference/.test(e.message),
+  );
 });

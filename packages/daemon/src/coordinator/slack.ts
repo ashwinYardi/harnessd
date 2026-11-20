@@ -16,7 +16,11 @@ export type SlackFetch = (
 ) => Promise<{ ok: boolean; status: number }>;
 
 export interface SlackNotifierOptions {
-  webhookUrl: string;
+  /**
+   * The webhook, or a lookup run before each message (MET-33), so a webhook saved in
+   * Settings is used with no restart. No url, or one that is not https, drops the message.
+   */
+  webhookUrl: string | (() => Promise<string | undefined>);
   /** Default globalThis.fetch. */
   fetch?: SlackFetch;
   /** Default setTimeout, unref'd. */
@@ -43,7 +47,8 @@ const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms).unref());
 
 export function createSlackNotifier(options: SlackNotifierOptions): SlackNotifier {
-  const url = options.webhookUrl;
+  const lookup = options.webhookUrl;
+  const webhook = typeof lookup === "string" ? async () => lookup : lookup;
   const send: SlackFetch = options.fetch ?? ((u, init) => globalThis.fetch(u, init));
   const sleep = options.sleep ?? defaultSleep;
   const log = options.log ?? (() => {});
@@ -55,11 +60,13 @@ export function createSlackNotifier(options: SlackNotifierOptions): SlackNotifie
   const queue: string[] = [];
   let draining: Promise<void> | undefined;
 
-  /** Error text without the webhook url. */
-  const scrub = (text: string): string => text.split(url).join("<webhook>");
-
   /** One try: undefined when posted, else why it failed and whether a retry may help. */
-  async function tryPost(text: string): Promise<{ why: string; retry: boolean } | undefined> {
+  async function tryPost(
+    url: string,
+    text: string,
+  ): Promise<{ why: string; retry: boolean } | undefined> {
+    /** Error text without the webhook url. */
+    const scrub = (detail: string): string => detail.split(url).join("<webhook>");
     try {
       const res = await send(url, {
         method: "POST",
@@ -76,8 +83,17 @@ export function createSlackNotifier(options: SlackNotifierOptions): SlackNotifie
   }
 
   async function deliver(text: string): Promise<void> {
+    let url: string | undefined;
+    try {
+      url = (await webhook())?.trim();
+    } catch (error) {
+      // A lookup error names the source, never a value (SecretError).
+      log(`slack: dropped a message, the webhook could not be read (${(error as Error).message})`);
+      return;
+    }
+    if (!url?.startsWith("https://")) return;
     for (let attempt = 0; ; attempt++) {
-      const failure = await tryPost(text);
+      const failure = await tryPost(url, text);
       if (failure === undefined) return;
       if (!failure.retry || attempt >= retries) {
         log(

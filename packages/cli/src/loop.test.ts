@@ -331,3 +331,76 @@ test("run without LINEAR_API_KEY serves setup and names the variable, never a va
   assert.deepEqual(loop, { state: "setup", blocking: ["linear.key"] });
   assert.match(s.err.join("\n"), /LINEAR_API_KEY is not set/);
 });
+
+test("first launch: a key saved in Settings starts the loop with no restart, and no value leaks", async () => {
+  const key = "lin_api_FIRSTLAUNCH0123456789";
+  const hook = "https://hooks.slack.com/services/T1/B1/FIRSTHOOK77";
+  const s = await setup({}, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  const seen: string[] = [];
+  const answers: Record<string, unknown> = {};
+  const code = await runLoop([], {
+    ...s.io,
+    stopSignal: async () => {
+      const url = (await readDaemonInfo(s.home))?.url ?? "";
+      const read = async (path: string, init?: RequestInit) => {
+        const res = await fetch(url + path, init);
+        const text = await res.text();
+        seen.push(text);
+        return { status: res.status, body: JSON.parse(text) as unknown };
+      };
+      const post = (path: string, body: unknown) =>
+        read(path, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      // The event stream is open while the secrets are saved.
+      const events = await fetch(`${url}/api/events`);
+      const reader = events.body?.getReader();
+      answers.before = (await read("/api/loop")).body;
+      answers.refused = (await post("/api/start", {})).status;
+      answers.saved = (await post("/api/secrets/linear.api_key", { value: key })).body;
+      answers.hook = (await post("/api/secrets/slack.webhook_url", { value: hook })).body;
+      answers.bad = (await post("/api/secrets/slack.webhook_url", { value: `${hook} x` })).body;
+      answers.list = (await read("/api/secrets")).body;
+      answers.start = (await post("/api/start", {})).body;
+      await read("/api/logs");
+      await read("/api/status");
+      if (reader) {
+        const deadline = Date.now() + 1500;
+        const decoder = new TextDecoder();
+        while (Date.now() < deadline) {
+          const chunk = await Promise.race([
+            reader.read(),
+            new Promise<{ done: true }>((r) => setTimeout(() => r({ done: true }), 300)),
+          ]);
+          if (chunk.done) break;
+          seen.push(decoder.decode((chunk as { value: Uint8Array }).value));
+        }
+        await reader.cancel();
+      }
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(answers.before, { state: "setup", blocking: ["linear.key"] });
+  assert.equal(answers.refused, 409);
+  assert.deepEqual((answers.saved as { secret: unknown }).secret, {
+    id: "linear.api_key",
+    set: true,
+    source: "saved",
+  });
+  assert.equal((answers.bad as { error: string }).error, "invalid_body");
+  assert.deepEqual(answers.list, {
+    secrets: [
+      { id: "linear.api_key", set: true, source: "saved" },
+      { id: "slack.webhook_url", set: true, source: "saved" },
+    ],
+  });
+  assert.deepEqual(answers.start, { state: "running", blocking: [] });
+  assert.match(s.out.join("\n"), /settings: saved linear\.api_key \(saved\)/);
+  const everything = [...seen, ...s.out, ...s.err].join("\n");
+  assert.doesNotMatch(everything, /FIRSTLAUNCH|FIRSTHOOK/);
+  assert.match(seen.join("\n"), /event: log/);
+});
