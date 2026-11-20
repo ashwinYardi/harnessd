@@ -3,18 +3,20 @@
 // their secret in a write-only field (MET-33). No secret is ever shown.
 import { RotateCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ServiceLogo } from "../../components/service-logo.tsx";
 import { Button } from "../../components/ui/button.tsx";
 import {
   Card,
+  CardContent,
   CardDescription,
   CardHeader,
-  CardPanel,
   CardTitle,
 } from "../../components/ui/card.tsx";
 import { Skeleton } from "../../components/ui/skeleton.tsx";
 import { Spinner } from "../../components/ui/spinner.tsx";
 import type { Status } from "../../hooks/useStatus.ts";
 import { type SecretId, type SecretState, secretFor } from "../../lib/secrets.ts";
+import { connectionService } from "../../lib/services.ts";
 import { connectionCards } from "../../lib/setup.ts";
 import { readSecrets } from "../../setupApi.ts";
 import { ErrorState } from "../common.tsx";
@@ -83,11 +85,13 @@ export function Connections({ status }: { status: Status }) {
         .sort((a, b) => byOrder(a.id, b.id))
         .map((card) => {
           const spec = secretFor(card.id);
+          const logo = connectionService(card.id);
           return (
             <Card key={card.id}>
               <CardHeader className="pb-1">
                 <div className="min-w-0 flex-1">
                   <CardTitle className="flex items-center gap-2">
+                    {logo && <ServiceLogo service={logo} />}
                     {card.title}
                     <StateBadge state={card.state}>{LABEL[card.state]}</StateBadge>
                   </CardTitle>
@@ -106,7 +110,7 @@ export function Connections({ status }: { status: Status }) {
                   </Button>
                 )}
               </CardHeader>
-              <CardPanel>
+              <CardContent>
                 {card.checks.length === 0 ? (
                   <p className="py-2 text-muted-foreground text-xs">
                     No check ran for this connection.
@@ -139,7 +143,7 @@ export function Connections({ status }: { status: Status }) {
                     title={card.title}
                   />
                 )}
-              </CardPanel>
+              </CardContent>
             </Card>
           );
         })}

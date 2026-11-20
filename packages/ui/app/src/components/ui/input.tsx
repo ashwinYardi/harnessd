@@ -1,6 +1,7 @@
-// Ported from T3 Code, apps/web/src/components/ui/input.tsx (https://github.com/pingdotgg/t3code).
-// Copyright (c) 2026 T3 Tools Inc. MIT License; see packages/ui/THIRD_PARTY_NOTICES.md.
-// Changes: a native input only; sizes sm and default; mono font option kept.
+// From shadcn/ui, base-nova registry (MIT; see packages/ui/THIRD_PARTY_NOTICES.md).
+// harnessd changes: sm and default sizes, a mono font option for paths, a 2 px focus ring,
+// and the placeholder token, which keeps 4.5:1 in both themes.
+import { Input as InputPrimitive } from "@base-ui/react/input";
 import type * as React from "react";
 import { cn } from "../../lib/cn.ts";
 
@@ -11,24 +12,17 @@ type InputProps = Omit<React.ComponentProps<"input">, "size"> & {
 
 function Input({ className, size = "default", font = "default", ...props }: InputProps) {
   return (
-    <span
+    <InputPrimitive
       className={cn(
-        "relative inline-flex w-full rounded-lg border border-input bg-background not-dark:bg-clip-padding text-sm text-foreground shadow-xs/5 ring-ring/24 transition-shadow before:pointer-events-none before:absolute before:inset-0 before:rounded-[calc(var(--radius-lg)-1px)] not-has-disabled:not-has-focus-visible:not-has-aria-invalid:before:shadow-[0_1px_--theme(--color-black/4%)] has-focus-visible:border-ring has-focus-visible:ring-[3px] has-focus-visible:ring-inset has-aria-invalid:border-destructive/36 has-focus-visible:has-aria-invalid:border-destructive/64 has-focus-visible:has-aria-invalid:ring-destructive/16 has-disabled:opacity-64 has-[:disabled,:focus-visible,[aria-invalid]]:shadow-none dark:bg-input/32",
+        "h-8 w-full min-w-0 rounded-lg border border-input bg-background px-2.5 text-sm text-foreground shadow-xs/5 outline-none transition-[border-color,box-shadow] duration-150 placeholder:text-placeholder focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/24 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-64 aria-invalid:border-destructive/64 aria-invalid:focus-visible:ring-destructive/16 dark:bg-input/32",
+        size === "sm" && "h-7 px-2",
         font === "mono" && "font-mono tabular-nums",
         className,
       )}
       data-size={size}
-      data-slot="input-control"
-    >
-      <input
-        className={cn(
-          "h-7.5 w-full min-w-0 rounded-[inherit] bg-transparent px-[calc(--spacing(3)-1px)] leading-7.5 outline-none placeholder:text-placeholder",
-          size === "sm" && "h-6.5 px-[calc(--spacing(2.5)-1px)] leading-6.5",
-        )}
-        data-slot="input"
-        {...props}
-      />
-    </span>
+      data-slot="input"
+      {...props}
+    />
   );
 }
 

@@ -1,6 +1,7 @@
-// Ported from T3 Code, apps/web/src/components/ui/scroll-area.tsx (https://github.com/pingdotgg/t3code).
-// Copyright (c) 2026 T3 Tools Inc. MIT License; see packages/ui/THIRD_PARTY_NOTICES.md.
-// Changes: no scroll fade, gutter or chaining options; the viewport takes a ref and props.
+// From shadcn/ui, base-nova registry (MIT; see packages/ui/THIRD_PARTY_NOTICES.md).
+// harnessd changes: both scrollbars, thin thumbs in the scrollbar tokens that show while the
+// pointer is over the area or it scrolls, a 2 px inset focus ring, and viewportProps, so a
+// view can hold a ref to the viewport (held updates and the log follow it).
 import { ScrollArea as ScrollAreaPrimitive } from "@base-ui/react/scroll-area";
 import type * as React from "react";
 import { cn } from "../../lib/cn.ts";
@@ -16,12 +17,13 @@ function ScrollArea({
   return (
     <ScrollAreaPrimitive.Root
       className={cn("relative size-full min-h-0 overflow-hidden rounded-[inherit]", className)}
+      data-slot="scroll-area"
       {...props}
     >
       <ScrollAreaPrimitive.Viewport
         {...viewportProps}
         className={cn(
-          "h-full max-h-[inherit] overscroll-contain rounded-[inherit] outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+          "size-full max-h-[inherit] overscroll-contain rounded-[inherit] outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
           viewportProps?.className,
         )}
         data-slot="scroll-area-viewport"
@@ -43,7 +45,7 @@ function ScrollBar({
   return (
     <ScrollAreaPrimitive.Scrollbar
       className={cn(
-        "flex opacity-0 transition-opacity delay-300 data-[orientation=horizontal]:mx-1 data-[orientation=horizontal]:mb-px data-[orientation=horizontal]:h-1.5 data-[orientation=vertical]:my-1 data-[orientation=vertical]:mr-px data-[orientation=vertical]:w-1.5 data-[orientation=horizontal]:flex-col data-hovering:opacity-100 data-scrolling:opacity-100 data-hovering:delay-0 data-scrolling:delay-0 data-hovering:duration-100 data-scrolling:duration-100",
+        "flex touch-none select-none p-px opacity-0 transition-opacity delay-300 data-hovering:opacity-100 data-scrolling:opacity-100 data-hovering:delay-0 data-scrolling:delay-0 data-hovering:duration-100 data-scrolling:duration-100 data-[orientation=horizontal]:h-2 data-[orientation=horizontal]:flex-col data-[orientation=vertical]:w-2",
         className,
       )}
       data-slot="scroll-area-scrollbar"

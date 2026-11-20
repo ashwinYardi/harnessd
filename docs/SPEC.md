@@ -10,7 +10,7 @@ A coordinator plus three persistent agents (Backend, Frontend, QA) take Ready is
 2. **Harness CLIs only.** No vendor SDKs. Adapters call each CLI in headless/JSON mode, with a terminal pane as the fallback.
 3. **One parent config.** Harness-native files are generated from it and never hand-edited.
 4. **Linear is the source of truth** for work in v0.1. Well-formed issues are a hard requirement. From v0.2, any task tool or local markdown tasks work (D-018).
-5. **Anti-slop UI.** The UI is dense, quiet and professional, after t3.code and cloudroom.dev.
+5. **Anti-slop UI.** The UI is dense, quiet, keyboard-first and professional. It shows real service logos and no decoration.
 
 ## Components
 | Component | v0.1 |

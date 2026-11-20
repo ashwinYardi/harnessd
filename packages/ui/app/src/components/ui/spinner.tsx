@@ -1,6 +1,6 @@
-// Ported from T3 Code, apps/web/src/components/ui/spinner.tsx (https://github.com/pingdotgg/t3code).
-// Copyright (c) 2026 T3 Tools Inc. MIT License; see packages/ui/THIRD_PARTY_NOTICES.md.
-// Changes: no i18n hook and no visibility observer; the label is plain text.
+// From shadcn/ui, base-nova registry (MIT; see packages/ui/THIRD_PARTY_NOTICES.md).
+// harnessd changes: aria-hidden, because each caller says in text what is loading; the spin
+// runs only when motion is allowed.
 import { LoaderCircleIcon } from "lucide-react";
 import type * as React from "react";
 import { cn } from "../../lib/cn.ts";
@@ -9,7 +9,7 @@ function Spinner({ className, ...props }: React.ComponentProps<typeof LoaderCirc
   return (
     <LoaderCircleIcon
       aria-hidden="true"
-      className={cn("motion-safe:animate-spin", className)}
+      className={cn("size-4 motion-safe:animate-spin", className)}
       data-slot="spinner"
       {...props}
     />

@@ -1,14 +1,16 @@
-// Settings → Harnesses (MET-28): one card per harness CLI, after T3 Code's Settings →
-// Providers. The card shows what the status engine found and runs the fixed setup commands.
+// Settings → Harnesses (MET-28): one card per harness CLI, with its maker's logo. The card
+// shows what the status engine found and runs the fixed setup commands.
 import { CopyIcon, DownloadIcon, LogInIcon, RefreshCwIcon, RotateCwIcon } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Load } from "../../api.ts";
+import { ServiceLogo } from "../../components/service-logo.tsx";
 import { Button } from "../../components/ui/button.tsx";
-import { Card, CardFooter, CardHeader, CardPanel, CardTitle } from "../../components/ui/card.tsx";
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "../../components/ui/card.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { Skeleton } from "../../components/ui/skeleton.tsx";
 import { Spinner } from "../../components/ui/spinner.tsx";
 import { toast } from "../../components/ui/toast.tsx";
+import { harnessService } from "../../lib/services.ts";
 import { harnessSummary } from "../../lib/setup.ts";
 import {
   type HarnessAction,
@@ -176,11 +178,13 @@ function HarnessCardView({
       : s.warning
         ? "update"
         : undefined;
+  const logo = harnessService(card.id);
   return (
     <Card>
       <CardHeader className="items-center">
         <div className="min-w-0 flex-1">
           <CardTitle className="flex items-center gap-2">
+            {logo && <ServiceLogo service={logo} />}
             {card.name}
             <StateBadge state={tone}>{status}</StateBadge>
           </CardTitle>
@@ -195,7 +199,7 @@ function HarnessCardView({
           Recheck
         </Button>
       </CardHeader>
-      <CardPanel className="grid gap-3">
+      <CardContent className="grid gap-3">
         <dl className="grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1.5 text-sm">
           <dt className="text-muted-foreground text-xs leading-5">Found</dt>
           <dd className="wrap-anywhere">{s.found ? "Yes" : (s.reason ?? "No")}</dd>
@@ -227,7 +231,7 @@ function HarnessCardView({
           </p>
         )}
         <BinaryPath card={card} onSaved={onRecheck} />
-      </CardPanel>
+      </CardContent>
       <CardFooter className="flex-wrap">
         {(["install", "update", "signin"] as const).map((action) => {
           // Each button shows only when it can help: Sign in only while signed out.

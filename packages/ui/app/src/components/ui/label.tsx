@@ -1,5 +1,5 @@
-// Ported from T3 Code, apps/web/src/components/ui/label.tsx (https://github.com/pingdotgg/t3code).
-// Copyright (c) 2026 T3 Tools Inc. MIT License; see packages/ui/THIRD_PARTY_NOTICES.md.
+// From shadcn/ui, base-nova registry (MIT; see packages/ui/THIRD_PARTY_NOTICES.md).
+// harnessd changes: none beyond the shared disabled opacity.
 import type * as React from "react";
 import { cn } from "../../lib/cn.ts";
 
@@ -8,7 +8,7 @@ function Label({ className, ...props }: React.ComponentProps<"label">) {
     // biome-ignore lint/a11y/noLabelWithoutControl: callers pass htmlFor or nest the control
     <label
       className={cn(
-        "inline-flex items-center gap-2 font-medium text-sm text-foreground",
+        "flex select-none items-center gap-2 font-medium text-sm leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-64",
         className,
       )}
       data-slot="label"

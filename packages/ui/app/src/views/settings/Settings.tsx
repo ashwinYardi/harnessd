@@ -1,4 +1,4 @@
-// Settings (MET-28): Harnesses, Connections and Team, after T3 Code's Settings layout.
+// Settings (MET-28): Harnesses, Connections and Team, under one sub-nav.
 // While the loop is in setup, a banner says what blocks it, or offers Start.
 import { CircleAlertIcon, PlayIcon } from "lucide-react";
 import { Button } from "../../components/ui/button.tsx";

@@ -6,7 +6,7 @@ import type { Connection } from "../api.ts";
 import { Badge } from "../components/ui/badge.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Spinner } from "../components/ui/spinner.tsx";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip.tsx";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { cn } from "../lib/cn.ts";
 import { clockTime, sinceText } from "../lib/format.ts";
 import type { PauseView } from "../lib/pause.ts";
@@ -78,7 +78,7 @@ export function AppHeader({
             <span aria-hidden="true" className={cn("size-1.5 rounded-full", c.dot)} />
             <span className="hidden sm:inline">{c.text}</span>
           </TooltipTrigger>
-          <TooltipPopup side="bottom">{c.hint}</TooltipPopup>
+          <TooltipContent side="bottom">{c.hint}</TooltipContent>
         </Tooltip>
         <p className="min-w-0 truncate" role="status" aria-live="polite">
           {paused && (

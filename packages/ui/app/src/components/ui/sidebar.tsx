@@ -1,9 +1,10 @@
-// Ported from T3 Code, apps/web/src/components/ui/sidebar.tsx (https://github.com/pingdotgg/t3code).
-// Copyright (c) 2026 T3 Tools Inc. MIT License; see packages/ui/THIRD_PARTY_NOTICES.md.
-// Changes: a fixed-width rail with no resize, no collapse store and no mobile sheet. Below the
-// md breakpoint the rail shows icons only.
+// From shadcn/ui, base-nova registry (MIT; see packages/ui/THIRD_PARTY_NOTICES.md).
+// harnessd changes: the static parts only. A fixed 224 px rail with no provider, collapse
+// state, resize or mobile sheet; below the md breakpoint it shows icons only (48 px). The
+// active row is aria-current="page". Rows have a 44 px hit area on touch.
 import { mergeProps } from "@base-ui/react/merge-props";
 import { useRender } from "@base-ui/react/use-render";
+import { cva } from "class-variance-authority";
 import type * as React from "react";
 import { cn } from "../../lib/cn.ts";
 
@@ -64,7 +65,7 @@ function SidebarGroupLabel({ className, ...props }: React.ComponentProps<"div">)
   return (
     <div
       className={cn(
-        "hidden h-6 items-center px-2.5 font-medium text-sidebar-muted-foreground text-xs md:flex",
+        "hidden h-6 shrink-0 items-center px-2.5 font-medium text-sidebar-muted-foreground text-xs md:flex",
         className,
       )}
       data-slot="sidebar-group-label"
@@ -93,8 +94,9 @@ function SidebarMenuItem({ className, ...props }: React.ComponentProps<"li">) {
   );
 }
 
-const MENU_BUTTON =
-  "relative flex h-8 w-full cursor-pointer items-center justify-center gap-2 overflow-hidden rounded-[var(--control-radius)] px-2 text-left font-medium text-sidebar-muted-foreground text-sm outline-hidden ring-ring transition-colors duration-100 hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-inset active:bg-sidebar-row-active md:justify-start md:px-2.5 aria-[current=page]:bg-sidebar-row-active aria-[current=page]:text-sidebar-foreground aria-[current=page]:shadow-xs/5 dark:aria-[current=page]:shadow-none [&>svg]:size-4 [&>svg]:shrink-0 pointer-coarse:after:absolute pointer-coarse:after:inset-x-0 pointer-coarse:after:top-1/2 pointer-coarse:after:h-11 pointer-coarse:after:-translate-y-1/2";
+const sidebarMenuButtonVariants = cva(
+  "relative flex h-8 w-full cursor-pointer items-center justify-center gap-2 overflow-hidden rounded-[var(--control-radius)] px-2 text-left font-medium text-sidebar-muted-foreground text-sm outline-hidden transition-colors duration-100 hover:bg-sidebar-row-hover hover:text-sidebar-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset active:bg-sidebar-row-active aria-[current=page]:bg-sidebar-row-active aria-[current=page]:text-sidebar-foreground aria-[current=page]:shadow-xs/5 md:justify-start md:px-2.5 dark:aria-[current=page]:shadow-none pointer-coarse:after:absolute pointer-coarse:after:inset-x-0 pointer-coarse:after:top-1/2 pointer-coarse:after:h-11 pointer-coarse:after:-translate-y-1/2 [&>svg]:size-4 [&>svg]:shrink-0",
+);
 
 function SidebarMenuButton({
   className,
@@ -103,7 +105,7 @@ function SidebarMenuButton({
   ...props
 }: useRender.ComponentProps<"a"> & { isActive?: boolean }) {
   const defaultProps = {
-    className: cn(MENU_BUTTON, className),
+    className: cn(sidebarMenuButtonVariants(), className),
     "data-slot": "sidebar-menu-button",
     "aria-current": isActive ? ("page" as const) : undefined,
   };

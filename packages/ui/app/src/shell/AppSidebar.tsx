@@ -1,5 +1,6 @@
 // The left rail: the views, with the counts that need attention, and the palette hint.
 import { SearchIcon } from "lucide-react";
+import { BrandLockup, BrandMark } from "../components/brand-mark.tsx";
 import { Badge } from "../components/ui/badge.tsx";
 import { Kbd, KbdGroup } from "../components/ui/kbd.tsx";
 import {
@@ -13,7 +14,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "../components/ui/sidebar.tsx";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../components/ui/tooltip.tsx";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { hrefFor, type View } from "../lib/route.ts";
 import { NAV } from "./nav.ts";
 
@@ -64,15 +65,10 @@ export function AppSidebar({
     <Sidebar aria-label="Views">
       <SidebarHeader className="h-13 justify-center border-sidebar-border border-b px-2 md:px-4">
         <span className="hidden items-center justify-between md:flex">
-          <span className="font-semibold text-sm tracking-tight">harnessd</span>
+          <BrandLockup />
           {paused && <Badge variant="warning">Paused</Badge>}
         </span>
-        <span
-          aria-hidden="true"
-          className="mx-auto inline-flex size-6 items-center justify-center rounded-md bg-foreground font-semibold text-background text-xs md:hidden"
-        >
-          h
-        </span>
+        <BrandMark className="mx-auto size-5 md:hidden" />
         <span className="sr-only md:hidden">harnessd</span>
       </SidebarHeader>
       <SidebarContent>
@@ -100,9 +96,9 @@ export function AppSidebar({
                       <span className="sr-only md:hidden">{title}</span>
                       {badge[v] && <SidebarMenuBadge>{badge[v]}</SidebarMenuBadge>}
                     </TooltipTrigger>
-                    <TooltipPopup side="right" className="md:hidden">
+                    <TooltipContent side="right" className="md:hidden">
                       {title}
-                    </TooltipPopup>
+                    </TooltipContent>
                   </Tooltip>
                 </SidebarMenuItem>
               ))}
@@ -130,7 +126,7 @@ export function AppSidebar({
               </KbdGroup>
             </SidebarMenuBadge>
           </TooltipTrigger>
-          <TooltipPopup side="right">Commands ({modKey}+K)</TooltipPopup>
+          <TooltipContent side="right">Commands ({modKey}+K)</TooltipContent>
         </Tooltip>
       </SidebarFooter>
     </Sidebar>
