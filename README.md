@@ -21,27 +21,24 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/readme/board-dark.png">
-    <img src="assets/readme/board-light.png" alt="The harnessd board: issues in Needs you, Backlog, Ready, In Progress, In Review and Done, with the pause control at the top right." width="880">
+    <img src="assets/readme/board-light.png" alt="The harnessd board with demo data: issues in Needs you, Backlog, Ready, In Progress, In Review and Done, with the pause control at the top right." width="880">
   </picture>
+  <br><sub>The board, with demo data.</sub>
 </p>
 
 > [!NOTE]
 > harnessd is pre-release (v0.1 beta). It runs on macOS first. `@harnessd/cli` is not on npm yet, so for now [build it from source](#install).
 
 ## What you get
-- **A team, not a chatbot.** A coordinator plus Backend, Frontend and QA agents that work through your Linear board without you.
+- **A team, not a chatbot.** A coordinator plus Backend, Frontend and QA agents work through your Linear board without you.
 - **Grilled issues.** Before any code, the coordinator checks each issue against your spec, decisions and glossary, and answers its own questions.
-- **Clean isolation.** Every task runs in its own git worktree and branch. Agents never share a checkout.
-- **Real QA.** A QA agent checks each PR against the issue's "Done when" list, and your test command runs at the PR head.
-- **A merge gate.** PRs merge only when QA approves, CI is green and no protected path is touched.
-- **A kill switch.** `harnessd pause` stops every agent within 10 seconds. Work is kept, and `harnessd resume` picks it up.
+- **Clean isolation.** Every task runs in its own git worktree and branch.
+- **Real QA, then a gate.** QA checks each PR against the issue's "Done when" list. Only approved, green PRs merge. See [Safety](#safety).
 - **One config.** `~/.harnessd` and `<repo>/.harnessd` generate each harness's native files with `harnessd sync`.
-- **A live board.** A local web UI shows issues, agents, budgets and logs, and gives you the pause button.
-- **Setup in a few clicks.** Settings installs and signs in each harness CLI, checks every connection and edits the team.
-- **Slack, quietly.** One line per merge or block, and one summary a day.
+- **A live board.** A local web UI shows issues, agents, budgets and logs, holds the pause button, and sets up harnesses, connections and the team in a few clicks.
 - **Your subscriptions.** harnessd drives each harness through its CLI. You keep your own plan and sign-in. No vendor SDK and no model API key.
-- **Shared memory.** Markdown vaults that Claude Code and Codex read through a built-in MCP server.
-- **A skill pack.** `harnessd init` installs proven skills for TDD, code review, design and more.
+- **Memory and skills.** Markdown vaults reach Claude Code and Codex over a built-in MCP server. `init` installs a skill pack for TDD, code review, design and more.
+- **Slack, quietly.** One line per merge or block, and one summary a day.
 
 ## How it works
 One Ready issue, end to end:
@@ -78,21 +75,21 @@ Settings, rules, skills, agents and MCP servers merge in order: defaults, global
 | Harness | v0.1 | What works |
 |---|---|---|
 | Claude Code | **Shipped** | Runs every agent by default. `init` installs it, `doctor` checks it, `sync` writes its files. |
-| Codex | **Detected** | `init` installs it, `doctor` checks the CLI and sign-in, `sync` writes its files. Running agents on it is planned. |
+| Codex | **Detected** | `init` installs it. Settings shows its CLI and sign-in, and `doctor` checks it once an agent uses it. `sync` writes its files. Running agents on it is planned. |
 | Antigravity, OpenCode, Cursor, Grok | Planned | Accepted as names in config. No adapter yet. |
 
 ## Install
-You need macOS, Node 24 or newer, pnpm 10, the `gh` CLI signed in to GitHub, and a Linear API key. On Linux everything but the background service works.
+You need macOS (or Linux, without the background service), Node 24 or newer, the `gh` CLI signed in to GitHub, and a Linear API key.
 
-Until `@harnessd/cli` is on npm, build from source:
+Until `@harnessd/cli` is on npm, build it from source with pnpm 10, and put a `harnessd` command on your PATH:
 
 ```bash
 git clone https://github.com/ashwinYardi/harnessd.git && cd harnessd
 corepack enable && pnpm install && pnpm build
-alias harnessd="node $PWD/packages/cli/dist/bin.js"
+mkdir -p ~/.local/bin
+printf '#!/bin/sh\nexec node "%s/packages/cli/dist/bin.js" "$@"\n' "$PWD" > ~/.local/bin/harnessd
+chmod +x ~/.local/bin/harnessd   # ~/.local/bin must be on your PATH
 ```
-
-From source, run `harnessd init --no-service` and keep `harnessd run` in a terminal. The background service needs the published package.
 
 Once the package is on npm, one line will do it. It installs Node 24 if needed, then runs `harnessd init`:
 

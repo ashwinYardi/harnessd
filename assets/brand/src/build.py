@@ -2,11 +2,11 @@
 
 Usage, from the repo root:
     pip install fonttools uharfbuzz
-    python3 assets/brand/src/build.py [--font-dir /usr/share/fonts/opentype/inter]
+    python3 assets/brand/src/build.py --font-dir <folder with the Inter .otf files>
     node assets/brand/src/render.mjs     # PNGs, needs Playwright with Chromium
 
 Every letter is converted to an SVG path, so no file depends on an installed font.
-Font: Inter 4.0 (Inter Display SemiBold and Inter Regular), SIL Open Font License 1.1.
+Font: Inter 4.0 (Inter Display SemiBold and Inter Display Medium), SIL Open Font License 1.1.
 """
 
 import argparse
@@ -25,47 +25,19 @@ OUT = Path(__file__).resolve().parent.parent
 # Colors. See assets/brand/README.md for the contrast table.
 INK = "#16171A"
 PAPER = "#F7F6F2"
-ACCENT = "#0D7F70"  # on light backgrounds
+ACCENT = "#0B7666"  # on light backgrounds
 ACCENT_DARK = "#3CC6B0"  # on dark backgrounds
 MUTED = "#5A5D63"  # tagline on PAPER
 
 # The H mark on a 48-unit grid (a 64-unit grid with its 8-unit margin removed).
-# Two upright bars are the harnesses. The crossbar is the coordinator. The ring is
-# the one point where every harness meets.
+# Two upright bars are the harnesses. One continuous crossbar is the coordinator.
+# The hole cut through the centre of the crossbar leaves a ring: the one point where
+# every harness meets.
 MARK_SIZE = 48
-BAR_W = 12
-CROSS_H = 8
-RING_OUT = 9
-RING_IN = 4
-
-
-def ring_d(cx, cy, ro, ri):
-    def circle(r):
-        return f"M{fmt(cx - r)} {fmt(cy)}a{fmt(r)} {fmt(r)} 0 1 0 {fmt(2 * r)} 0a{fmt(r)} {fmt(r)} 0 1 0 {fmt(-2 * r)} 0z"
-
-    return circle(ro) + circle(ri)
-
-
-def mark_d(x=0.0, y=0.0, s=1.0, ring_out=RING_OUT, ring_in=RING_IN):
-    """Paths for the mark at offset (x, y) and scale s. The ring overlaps the crossbar.
-
-    At 16 px, ring_out=8 and ring_in=4 put every edge on a whole pixel.
-    """
-
-    def r(rx, ry, w, h):
-        rx, ry, w, h = x + rx * s, y + ry * s, w * s, h * s
-        return f"M{fmt(rx)} {fmt(ry)}h{fmt(w)}v{fmt(h)}h{fmt(-w)}z"
-
-    c = MARK_SIZE / 2
-    stub_l = c - ring_out + 1 - BAR_W  # the crossbar runs 1 unit into the ring
-    parts = [
-        r(0, 0, BAR_W, MARK_SIZE),
-        r(MARK_SIZE - BAR_W, 0, BAR_W, MARK_SIZE),
-        r(BAR_W, c - CROSS_H / 2, stub_l, CROSS_H),
-        r(c + ring_out - 1, c - CROSS_H / 2, stub_l, CROSS_H),
-    ]
-    rings = ring_d(x + c * s, y + c * s, ring_out * s, ring_in * s)
-    return "".join(parts), rings
+MARK = (10, 14, 5, "round")  # bar width, crossbar height, hole radius, hole shape
+# The 16 and 32 px tiles use heavier strokes, so that at 12 and 24 px every edge
+# sits on a whole pixel. The hole is a 2 px square there: a 2 px circle turns grey.
+MARK_SMALL = (12, 16, 4, "square")
 
 
 def fmt(v):
@@ -73,9 +45,27 @@ def fmt(v):
     return str(int(v)) if v == int(v) else str(v)
 
 
-def mark_paths(fill, x=0.0, y=0.0, s=1.0, **ring):
-    bars, rings = mark_d(x, y, s, **ring)
-    return f'<path fill="{fill}" d="{bars}"/><path fill="{fill}" fill-rule="evenodd" d="{rings}"/>'
+def mark_d(x=0.0, y=0.0, scale=1.0, geometry=MARK):
+    """One even-odd path for the mark, at offset (x, y) and the given scale."""
+    bar_w, cross_h, hole_r, hole_shape = geometry
+
+    c = MARK_SIZE / 2
+    cx, cy, r = x + c * scale, y + c * scale, hole_r * scale
+    if hole_shape == "square":
+        hole = f"M{fmt(cx - r)} {fmt(cy - r)}h{fmt(2 * r)}v{fmt(2 * r)}h{fmt(-2 * r)}z"
+    else:
+        hole = f"M{fmt(cx - r)} {fmt(cy)}a{fmt(r)} {fmt(r)} 0 1 0 {fmt(2 * r)} 0a{fmt(r)} {fmt(r)} 0 1 0 {fmt(-2 * r)} 0z"
+    # One outline for the bars and the crossbar, so the hole is the only even-odd cut.
+    w, b, h = MARK_SIZE, bar_w, cross_h
+    top, bot = c - h / 2, c + h / 2
+    pts = [(0, 0), (b, 0), (b, top), (w - b, top), (w - b, 0), (w, 0), (w, w), (w - b, w),
+           (w - b, bot), (b, bot), (b, w), (0, w)]
+    outline = "M" + "L".join(f"{fmt(x + px * scale)} {fmt(y + py * scale)}" for px, py in pts) + "z"
+    return outline + hole
+
+
+def mark_paths(fill, x=0.0, y=0.0, scale=1.0, geometry=MARK):
+    return f'<path fill="{fill}" fill-rule="evenodd" d="{mark_d(x, y, scale, geometry)}"/>'
 
 
 class Text:
@@ -139,9 +129,18 @@ def contrast(a, b):
     return round((la + 0.05) / (lb + 0.05), 2)
 
 
+def tile(size, radius, mark_w, geometry=MARK):
+    """The mark in Paper, centred on an Ink tile."""
+    offset = (size - mark_w) / 2
+    corner = f' rx="{radius}"' if radius else ""
+    return f'<rect width="{size}" height="{size}"{corner} fill="{INK}"/>' + mark_paths(
+        PAPER, offset, offset, mark_w / MARK_SIZE, geometry
+    )
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--font-dir", default="/usr/share/fonts/opentype/inter")
+    ap.add_argument("--font-dir", required=True, help="folder with the Inter 4.0 .otf files")
     font_dir = ap.parse_args().font_dir
     wm_font = os.path.join(font_dir, "InterDisplay-SemiBold.otf")
     tag_font = os.path.join(font_dir, "InterDisplay-Medium.otf")
@@ -150,83 +149,66 @@ def main():
     # and give the final "d" a hair more room so the accent reads as its own letter.
     word = Text(wm_font, "harnessd", track=-40, adjust={3: 6, 7: 14})
     xmin, ymin, xmax, ymax = word.bounds
-    pad = 0
     wm_h = 64.0  # the wordmark's height, ascender to baseline, in output units
-    s = wm_h / (ymax - ymin)
-    wm_w = (xmax - xmin) * s
+    wm_scale = wm_h / (ymax - ymin)
+    wm_w = (xmax - xmin) * wm_scale
+    light, dark = (INK, ACCENT), (PAPER, ACCENT_DARK)
     files = {}
 
-    def wordmark(fill, accent):
-        return glyph_group(word, fill, accent, -xmin * s + pad, -ymin * s, round(s, 6))
+    def wordmark(theme, dx=0.0):
+        return glyph_group(word, *theme, dx - xmin * wm_scale, -ymin * wm_scale, round(wm_scale, 6))
 
-    files["wordmark.svg"] = svg(wm_w, wm_h, wordmark(INK, ACCENT), "harnessd")
-    files["wordmark-dark.svg"] = svg(wm_w, wm_h, wordmark(PAPER, ACCENT_DARK), "harnessd")
+    files["wordmark.svg"] = svg(wm_w, wm_h, wordmark(light), "harnessd")
+    files["wordmark-dark.svg"] = svg(wm_w, wm_h, wordmark(dark), "harnessd")
 
     # Mark alone, tight to its 48-unit grid.
     files["mark.svg"] = svg(MARK_SIZE, MARK_SIZE, mark_paths(INK), "harnessd")
     files["mark-dark.svg"] = svg(MARK_SIZE, MARK_SIZE, mark_paths(PAPER), "harnessd")
 
-    # Lockup: the mark is as tall as the wordmark, and the gap is half the mark.
-    m = wm_h / MARK_SIZE
-    gap = wm_h * 0.42
-    lw = wm_h + gap + wm_w
+    # Lockup: the mark is 0.9 of the wordmark's height, centred on it, so its heavier
+    # strokes do not outweigh the letters. The gap is 0.4 of the wordmark's height.
+    mark_h = wm_h * 0.9
+    gap = wm_h * 0.4
+    lockup_w = mark_h + gap + wm_w
 
-    def lockup(fill, accent):
-        return mark_paths(fill, 0, 0, m) + glyph_group(
-            word, fill, accent, wm_h + gap - xmin * s, -ymin * s, round(s, 6)
-        )
+    def lockup(theme):
+        mark = mark_paths(theme[0], 0, (wm_h - mark_h) / 2, mark_h / MARK_SIZE)
+        return mark + wordmark(theme, mark_h + gap)
 
-    files["lockup.svg"] = svg(lw, wm_h, lockup(INK, ACCENT), "harnessd")
-    files["lockup-dark.svg"] = svg(lw, wm_h, lockup(PAPER, ACCENT_DARK), "harnessd")
+    files["lockup.svg"] = svg(lockup_w, wm_h, lockup(light), "harnessd")
+    files["lockup-dark.svg"] = svg(lockup_w, wm_h, lockup(dark), "harnessd")
 
-    # App icon: a 512 tile, radius 112 (about 22 percent), mark 256 wide.
-    t = 512
-    ms = 256 / MARK_SIZE
-    o = (t - 256) / 2
-    files["app-icon.svg"] = svg(
-        t,
-        t,
-        f'<rect width="{t}" height="{t}" rx="112" fill="{INK}"/>' + mark_paths(PAPER, o, o, ms),
-        "harnessd",
-    )
-    # Square tile with no radius, for the 180 px touch icon (the OS rounds it).
-    files["src/touch-icon.svg"] = svg(
-        t, t, f'<rect width="{t}" height="{t}" fill="{INK}"/>' + mark_paths(PAPER, o, o, ms), "harnessd"
-    )
-    # Small tile for the 16 and 32 px PNGs: the mark fills 12 of 16 pixels, snapped to whole pixels.
-    files["src/favicon-tile.svg"] = svg(
-        16,
-        16,
-        f'<rect width="16" height="16" rx="3" fill="{INK}"/>' + mark_paths(PAPER, 2, 2, 12 / 48, ring_out=8, ring_in=4),
-        "harnessd",
-    )
+    # App icon: a 512 tile, radius 112 (about 22 percent), mark 240 wide.
+    files["app-icon.svg"] = svg(512, 512, tile(512, 112, 240), "harnessd")
+    # Square tile for the 180 px touch icon: the OS rounds the corners itself.
+    files["src/touch-icon.svg"] = svg(512, 512, tile(512, 0, 240), "harnessd")
+    # Small tile for the 16 and 32 px PNGs: the small mark fills 12 of 16 pixels.
+    files["src/favicon-tile.svg"] = svg(16, 16, tile(16, 3, 12, MARK_SMALL), "harnessd")
 
     # favicon.svg: the bare mark, ink on light tabs and paper on dark ones.
-    bars, rings = mark_d(8, 8, 1)
     files["favicon.svg"] = (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="harnessd">'
         "<title>harnessd</title>"
         f"<style>path{{fill:{INK}}}@media (prefers-color-scheme:dark){{path{{fill:{PAPER}}}}}</style>"
-        f'<path d="{bars}"/><path fill-rule="evenodd" d="{rings}"/></svg>\n'
+        f'<path fill-rule="evenodd" d="{mark_d(8, 8)}"/></svg>\n'
     )
 
     # Social preview, 1280x640: the lockup and the tagline, all as paths.
-    W, H = 1280, 640
-    ls = 1.75  # lockup scale: 112 px tall
-    lx = (W - lw * ls) / 2
-    ly = 236
+    width, height = 1280, 640
+    lockup_scale = 1.75  # 112 px tall
     tag = Text(tag_font, "One harness to rule them all.", track=-10)
-    txmin, tymin, txmax, tymax = tag.bounds
-    ts = 40 / tag.upm * 1.0  # 40 px type
-    tw = (txmax - txmin) * ts
+    txmin, _, txmax, _ = tag.bounds
+    tag_scale = 40 / tag.upm  # 40 px type
+    tag_w = (txmax - txmin) * tag_scale
     tag_body = "".join(f'<path d="{d}"/>' for d in tag.glyphs)
     body = (
-        f'<rect width="{W}" height="{H}" fill="{PAPER}"/>'
-        f'<g transform="translate({fmt(lx)} {ly}) scale({ls})">{lockup(INK, ACCENT)}</g>'
-        f'<g fill="{MUTED}" transform="translate({fmt((W - tw) / 2 - txmin * ts)} 432) scale({ts})">'
-        f"{tag_body}</g>"
+        f'<rect width="{width}" height="{height}" fill="{PAPER}"/>'
+        f'<g transform="translate({fmt((width - lockup_w * lockup_scale) / 2)} 236) '
+        f'scale({lockup_scale})">{lockup(light)}</g>'
+        f'<g fill="{MUTED}" transform="translate({fmt((width - tag_w) / 2 - txmin * tag_scale)} 432) '
+        f'scale({tag_scale})">{tag_body}</g>'
     )
-    files["src/social-preview.svg"] = svg(W, H, body, "harnessd: One harness to rule them all.")
+    files["src/social-preview.svg"] = svg(width, height, body, "harnessd: One harness to rule them all.")
 
     for name, text in files.items():
         (OUT / name).write_text(text)
@@ -235,6 +217,7 @@ def main():
         "ink on paper": (INK, PAPER),
         "ink on white": (INK, "#FFFFFF"),
         "paper on ink": (PAPER, INK),
+        "accent on #0D1117 (do not use)": (ACCENT, "#0D1117"),
         "accent on paper": (ACCENT, PAPER),
         "accent on white": (ACCENT, "#FFFFFF"),
         "accent-dark on ink": (ACCENT_DARK, INK),
