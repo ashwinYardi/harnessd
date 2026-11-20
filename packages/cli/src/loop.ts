@@ -247,6 +247,8 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
     store: createFileLoopStore(repoDir),
     repoDir,
     skillsDir: join(globalDir, "skills"),
+    // Each part and QA run gets the synced harness files and the vaults (MET-55).
+    globalDir,
     team,
     intervalMs: parsed.intervalMs,
     paused: async () => (await pauseStore.read()).paused,

@@ -88,3 +88,16 @@ test("a part sent back by QA gets the failing items and is told to update its op
   }
   assert.ok(!prompt.includes("gh pr create"));
 });
+
+test("with memory, the part prompt names the vaults and the generated files before the ship steps", () => {
+  const prompt = buildPartPrompt({
+    agent,
+    issue,
+    branch: "met-41",
+    memory: { workspaceVault: "/repo/.harnessd/vault", globalVault: "/home/.harnessd/vault" },
+  });
+  const memory = prompt.indexOf("## Memory\n");
+  assert.ok(memory > 0);
+  assert.ok(memory < prompt.indexOf("## When you are done"));
+  assert.doesNotMatch(buildPartPrompt({ agent, issue, branch: "met-41" }), /## Memory/);
+});

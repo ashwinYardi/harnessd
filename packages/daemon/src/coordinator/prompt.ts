@@ -183,3 +183,30 @@ export function buildGrillPrompt({ issue, context, instructions }: GrillPromptIn
   }
   return `${parts.join("\n\n")}\n`;
 }
+
+/** The two memory vaults an agent run can read and write (D-005). */
+export interface AgentMemory {
+  /** `<main repo>/.harnessd/vault`. */
+  workspaceVault: string;
+  /** `$HARNESSD_HOME/vault`, by default `~/.harnessd/vault`. */
+  globalVault: string;
+}
+
+/**
+ * The part and QA prompts' "Memory" section (MET-55): the memory tools, the vaults, and
+ * the harness files the loop synced into the worktree before the run.
+ */
+export function memorySection({ workspaceVault, globalVault }: AgentMemory): string {
+  const dir = (path: string) => (path.endsWith("/") ? path : `${path}/`);
+  return [
+    "## Memory",
+    "The harnessd-memory MCP server serves the memory vaults. Use its tools: search_notes, read_note and write_note.",
+    `- Workspace vault: ${dir(workspaceVault)}`,
+    `- Global vault: ${dir(globalVault)} ($HARNESSD_HOME/vault/)`,
+    "Search the vaults before you settle a question the spec and the decisions do not answer.",
+    "",
+    "harnessd synced the harness files into this worktree before the run: AGENTS.md, CLAUDE.md, .claude/, .agents/, .mcp.json and .codex/. " +
+      "They are not part of your change unless the issue asks, and git status does not show them. " +
+      "To commit one, run `git update-index --no-skip-worktree <path>` for a tracked file, then `git add -f <path>`.",
+  ].join("\n");
+}

@@ -21,6 +21,7 @@ import type { TaskWorktrees } from "../worktrees/index.ts";
 import { agentPromptHeader } from "./dispatch.ts";
 import { extractJson, runForReply } from "./grill.ts";
 import type { Notifier } from "./notifier.ts";
+import { type AgentMemory, memorySection } from "./prompt.ts";
 import { readPartMarker } from "./split.ts";
 import type { LoopState } from "./state.ts";
 
@@ -274,11 +275,13 @@ export interface QaPromptInput {
   files: PullRequestFile[] | undefined;
   checklist: string[];
   tests: TestRun;
+  /** The vaults, when the loop synced the harness files into the checkout (MET-55). */
+  memory?: AgentMemory;
 }
 
 /** The QA agent's prompt for one PR. */
 export function buildQaPrompt(input: QaPromptInput): string {
-  const { agent, qa, parent, part, pr, files, checklist, tests } = input;
+  const { agent, qa, parent, part, pr, files, checklist, tests, memory } = input;
   const out = agentPromptHeader(agent, qa);
 
   let fileList: string;
@@ -309,6 +312,9 @@ export function buildQaPrompt(input: QaPromptInput): string {
       "- An item outside this part's brief passes when this PR does not break it and another part covers it; say so in the evidence.",
       "- `testsPassed` is false when any test or check you ran fails.",
     ].join("\n"),
+  );
+  if (memory) out.push(memorySection(memory));
+  out.push(
     `## Verdict\nYour final message is strict JSON only, no prose and no code fence, with exactly ${checklist.length} ` +
       `item(s), one per "Done when" item in the order above, \`text\` copied from the list:\n${QA_VERDICT_SHAPE}`,
   );
@@ -441,6 +447,13 @@ export interface QaRunDeps {
   /** Told the worktree in use ("" once removed), so a crash can clean it up. */
   onWorktree?: (path: string) => void;
   /**
+   * Runs after the tests and before the QA agent, in the checkout: the loop syncs the
+   * harness files there (MET-55). Returns env for the agent run. A throw is an error review.
+   */
+  prepare?: (worktree: string, runId: string) => Promise<Record<string, string>>;
+  /** The vaults, named in the QA prompt. */
+  memory?: AgentMemory;
+  /**
    * Aborted by a pause: the tests and the QA agent are stopped, no review is posted and
    * the worktree in use is kept for the loop to record. The result is then `cancelled`.
    */
@@ -550,8 +563,17 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       } else if (left <= 0) {
         verdict = { ok: false, error: "the QA budget ran out before the agent ran" };
       } else {
+        const id = `${qa.key}-qa-${input.round}-pr${pr.number}`;
+        let env: Record<string, string> | undefined;
+        if (deps.prepare) {
+          try {
+            env = await deps.prepare(path, id);
+          } catch (error) {
+            throw new Error(`harnessd sync into the worktree failed: ${message(error)}`);
+          }
+        }
         const task: Task = {
-          id: `${qa.key}-qa-${input.round}-pr${pr.number}`,
+          id,
           title: `QA ${part.key}: PR #${pr.number}`,
           prompt: buildQaPrompt({
             agent: deps.agent,
@@ -562,10 +584,12 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
             files,
             checklist,
             tests,
+            ...(deps.memory ? { memory: deps.memory } : {}),
           }),
           budgetMs: left,
         };
         if (deps.agent.model !== undefined) task.model = deps.agent.model;
+        if (env !== undefined) task.env = env;
         const reply = await runForReply(deps.adapter, task, path);
         verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
       }

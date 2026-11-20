@@ -1,13 +1,31 @@
 #!/usr/bin/env node
 // Stand-in for `claude -p ... --output-format stream-json --verbose` in adapter tests.
 // FAKE_CLAUDE_MODE: ok (default) | error | malformed | hang | hang-stubborn
-// FAKE_CLAUDE_RECORD: file to write {argv, cwd, grandchildPid?} into.
-import { spawn } from "node:child_process";
-import { writeFileSync } from "node:fs";
+// FAKE_CLAUDE_RECORD: file to write {argv, cwd, grandchildPid?, probe?, inspect?} into.
+// FAKE_CLAUDE_PROBE: copied into the record as `probe`, to see the child's environment.
+// FAKE_CLAUDE_INSPECT=1: also records what the run sees in its cwd: the skill folders in
+// .claude/skills, .mcp.json and `git status --porcelain`.
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const mode = process.env.FAKE_CLAUDE_MODE ?? "ok";
 const recordPath = process.env.FAKE_CLAUDE_RECORD;
 const record = { argv: process.argv.slice(2), cwd: process.cwd() };
+if (process.env.FAKE_CLAUDE_PROBE !== undefined) record.probe = process.env.FAKE_CLAUDE_PROBE;
+if (process.env.FAKE_CLAUDE_INSPECT === "1") {
+  const cwd = process.cwd();
+  const skills = join(cwd, ".claude", "skills");
+  const mcp = join(cwd, ".mcp.json");
+  record.inspect = {
+    skills: existsSync(skills) ? readdirSync(skills).sort() : [],
+    mcp: existsSync(mcp) ? JSON.parse(readFileSync(mcp, "utf8")) : null,
+    gitStatus: execFileSync("git", ["status", "--porcelain", "--untracked-files=all"], {
+      cwd,
+      encoding: "utf8",
+    }),
+  };
+}
 const session = "fake-session-1";
 
 function save() {

@@ -245,3 +245,83 @@ test("an agent file with the note only below a body rule is not sync's own", asy
   assert.deepEqual(skipped, [".claude/agents/ui-reviewer.md"]);
   assert.equal(await readFile(join(agents, "ui-reviewer.md"), "utf8"), text);
 });
+
+// --- a workspace layer apart from the output folder (MET-55) -----------------
+
+/** A main repo with the `full` workspace layer, and an empty worktree beside it. */
+async function splitSetup() {
+  const options = await setup("full");
+  const worktree = join(options.home, "worktree");
+  await mkdir(worktree, { recursive: true });
+  return { ...options, worktree, workspaceDir: join(options.repoDir, ".harnessd") };
+}
+
+test("workspaceDir reads the layer from one folder and writes into another", async () => {
+  const s = await splitSetup();
+  const { changed, paths } = await syncRepo({
+    repoDir: s.worktree,
+    workspaceDir: s.workspaceDir,
+    globalDir: s.globalDir,
+    home: s.home,
+  });
+  // The same files as a plain sync of the main repo, except the memory server's workspace.
+  const plain = await syncRepo({ repoDir: s.repoDir, globalDir: s.globalDir, home: s.home });
+  assert.deepEqual(changed, plain.changed);
+  assert.deepEqual(paths, plain.paths);
+  const wt = await snapshot(s.worktree);
+  const main = await snapshot(s.repoDir);
+  assert.deepEqual([...wt.keys()], [...main.keys()]);
+  for (const [path, entry] of main) {
+    if (path === ".mcp.json" || path === ".codex/config.toml") continue;
+    assert.deepEqual(wt.get(path), entry, path);
+  }
+  assert.ok(!(await exists(join(s.worktree, ".harnessd"))), "the worktree needs no .harnessd/");
+});
+
+test("into a worktree, the memory server reads the main repo's vault", async () => {
+  const s = await splitSetup();
+  await syncRepo({ repoDir: s.worktree, workspaceDir: s.workspaceDir, globalDir: s.globalDir });
+  const mcp = JSON.parse(await readFile(join(s.worktree, ".mcp.json"), "utf8"));
+  assert.deepEqual(mcp.mcpServers["harnessd-memory"], {
+    command: "harnessd",
+    args: ["mcp", "memory", "--workspace", s.repoDir],
+  });
+  const codex = await readFile(join(s.worktree, ".codex", "config.toml"), "utf8");
+  assert.ok(
+    codex.includes(`args = ["mcp", "memory", "--workspace", ${JSON.stringify(s.repoDir)}]`),
+  );
+  // A plain sync keeps the bare command: the server finds the repo from its cwd.
+  await syncRepo({ repoDir: s.repoDir, globalDir: s.globalDir });
+  const plain = JSON.parse(await readFile(join(s.repoDir, ".mcp.json"), "utf8"));
+  assert.deepEqual(plain.mcpServers["harnessd-memory"].args, ["mcp", "memory"]);
+});
+
+test("a user's own [mcp.harnessd-memory] still wins in a worktree", async () => {
+  const s = await splitSetup();
+  await writeFile(
+    join(s.workspaceDir, "config.toml"),
+    '[mcp.harnessd-memory]\ncommand = "my-memory"\n',
+  );
+  await syncRepo({ repoDir: s.worktree, workspaceDir: s.workspaceDir, globalDir: s.globalDir });
+  const mcp = JSON.parse(await readFile(join(s.worktree, ".mcp.json"), "utf8"));
+  assert.deepEqual(mcp.mcpServers["harnessd-memory"], { command: "my-memory" });
+});
+
+test("the .harnessd/ guard checks workspaceDir", async () => {
+  const s = await splitSetup();
+  await assert.rejects(
+    syncRepo({ repoDir: s.worktree, workspaceDir: join(s.home, "nope"), globalDir: s.globalDir }),
+    /no \.harnessd\/ folder/,
+  );
+  assert.deepEqual(await readdir(s.worktree), []);
+});
+
+test("paths lists every file sync owns, written or already up to date", async () => {
+  const s = await splitSetup();
+  const opts = { repoDir: s.worktree, workspaceDir: s.workspaceDir, globalDir: s.globalDir };
+  const first = await syncRepo(opts);
+  const second = await syncRepo(opts);
+  assert.deepEqual(second.changed, []);
+  assert.deepEqual(second.paths, first.paths);
+  assert.deepEqual([...first.changed].sort(), [...first.paths].sort());
+});

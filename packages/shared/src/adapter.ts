@@ -10,6 +10,8 @@ export interface Task {
   budgetMs: number;
   /** Harness model name or alias. Omitted means the harness default. */
   model?: string;
+  /** Extra environment for this run, over the adapter's own (e.g. git config for the worktree). */
+  env?: Record<string, string>;
 }
 
 export interface TokenUsage {

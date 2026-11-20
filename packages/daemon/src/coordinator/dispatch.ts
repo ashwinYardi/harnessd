@@ -8,6 +8,7 @@ import type {
   ResolvedAgentConfig,
   Size,
 } from "@harnessd/shared";
+import { type AgentMemory, memorySection } from "./prompt.ts";
 import type { QaFeedback } from "./state.ts";
 
 /**
@@ -36,6 +37,8 @@ export interface PartPromptInput {
   branch: string;
   /** What QA asked to fix, when the part was sent back (docs/LOOP.md "QA"). */
   review?: QaFeedback;
+  /** The vaults, when the loop synced the harness files into the worktree (MET-55). */
+  memory?: AgentMemory;
 }
 
 export function agentPromptHeader(agent: ResolvedAgentConfig, issue: LinkedIssue): string[] {
@@ -66,7 +69,7 @@ function shipSteps(issue: LinkedIssue, branch: string, what: string, review?: Qa
 }
 
 /** The prompt of a backend or frontend run. */
-export function buildPartPrompt({ agent, issue, branch, review }: PartPromptInput): string {
+export function buildPartPrompt({ agent, issue, branch, review, memory }: PartPromptInput): string {
   const parts = agentPromptHeader(agent, issue);
   if (review) {
     const where = [
@@ -78,6 +81,7 @@ export function buildPartPrompt({ agent, issue, branch, review }: PartPromptInpu
         review.failing.map((f) => `- ${f}`).join("\n"),
     );
   }
+  if (memory) parts.push(memorySection(memory));
   parts.push(
     shipSteps(issue, branch, 'every "Done when" item in your brief is met, with tests,', review),
   );
