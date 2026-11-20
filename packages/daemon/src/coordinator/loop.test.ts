@@ -20,7 +20,13 @@ import {
 import { createClaudeCodeAdapter } from "../adapters/claude-code.ts";
 import { mergeLayers } from "../config/merge.ts";
 import { createFilePauseStore, createPauseController } from "../control/pause.ts";
-import type { GitHub, PullRequest, ReviewInput } from "../github/client.ts";
+import type {
+  GitHub,
+  MergeInput,
+  PullRequest,
+  PullRequestStatus,
+  ReviewInput,
+} from "../github/client.ts";
 import type { CreateSubIssueInput, ListReadyOptions } from "../linear/client.ts";
 import { parseLinkedIssue, type RawIssue } from "../linear/parse.ts";
 import { createGitWorktrees, type TaskWorktrees, type Worktree } from "../worktrees/index.ts";
@@ -276,6 +282,11 @@ function fakeWorktrees() {
 function fakeGitHub() {
   const prs: Record<string, PullRequest> = {};
   const reviews: Array<ReviewInput & { number: number }> = [];
+  /** What `gh pr view` reports per PR number; the default is open, green and unprotected. */
+  const statuses: Record<number, Partial<PullRequestStatus>> = {};
+  const merges: Array<{ number: number } & MergeInput> = [];
+  const labels: Array<{ number: number; label: string }> = [];
+  const views: number[] = [];
   const github: GitHub = {
     async findPrForIssue(key) {
       return prs[key];
@@ -286,6 +297,28 @@ function fakeGitHub() {
     async postReview(number, review) {
       reviews.push({ number, ...review });
       return `https://github.test/o/r/pull/${number}#review-${reviews.length}`;
+    },
+    async prStatus(number) {
+      views.push(number);
+      const files = statuses[number]?.files ?? [{ path: "src/x.ts", additions: 3, deletions: 1 }];
+      return {
+        number,
+        url: `https://github.test/o/r/pull/${number}`,
+        state: "OPEN",
+        headRefOid: `sha${number}`,
+        mergeable: "MERGEABLE",
+        checks: [{ name: "CI / test", state: "pass", detail: "SUCCESS" }],
+        files,
+        changedFiles: files.length,
+        ...statuses[number],
+      };
+    },
+    async mergePr(number, input) {
+      merges.push({ number, ...input });
+      statuses[number] = { ...statuses[number], state: "MERGED" };
+    },
+    async addLabel(number, label) {
+      labels.push({ number, label });
     },
   };
   const open = (key: string, number: number): PullRequest => {
@@ -301,7 +334,7 @@ function fakeGitHub() {
     prs[key] = pr;
     return pr;
   };
-  return { github, prs, reviews, open };
+  return { github, prs, reviews, statuses, merges, labels, views, open };
 }
 
 function memoryStore(initial: LoopState = emptyLoopState()): LoopStore & { state: LoopState } {
@@ -801,6 +834,268 @@ test("a failed QA sends the part back with the review; the second failure escala
   assert.deepEqual((await t.loop.tick()).dispatched, [], "no more loops");
   assert.equal(t.adapter.runs().length, runs);
   assert.equal(t.pings.length, 1);
+});
+
+// --- merge gate (MET-14) ----------------------------------------------------
+
+/** A parent with one backend part whose PR #7 QA has approved at sha7. */
+async function approved(t: ReturnType<typeof setup>) {
+  const fx = qaFixture(t);
+  t.gh.open(fx.backend.key, 7);
+  await t.loop.tick();
+  await settle();
+  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+  assert.equal(fx.qa.state, "In Review");
+  assert.deepEqual(
+    t.memory.state.merges.map((m) => [m.qaKey, m.prs.map((p) => [p.number, p.sha])]),
+    [[fx.qa.key, [[7, "sha7"]]]],
+    "the approval is recorded, pinned to the head QA reviewed",
+  );
+  return fx;
+}
+
+const humanPings = (t: ReturnType<typeof setup>) => t.pings.filter((p) => /needs a human/.test(p));
+
+test("green CI, QA approved, nothing protected: squash-merged at the approved head, then Done", async () => {
+  const t = setup();
+  const { parent, backend, qa } = await approved(t);
+  assert.deepEqual(t.gh.merges, [], "nothing merges in the QA tick itself");
+
+  const report = await t.loop.tick();
+  assert.deepEqual(report.merged, [backend.key]);
+  assert.deepEqual(t.gh.merges, [{ number: 7, method: "squash", matchHeadCommit: "sha7" }]);
+  assert.equal(backend.state, "Done");
+  assert.equal(qa.state, "Done");
+  assert.equal(parent.state, "Done");
+  assert.match(t.linear.comments.at(-1)?.body ?? "", /every part is merged \(\[PR #7\]/);
+  assert.deepEqual(t.pings, [`${backend.key} merged: PR #7 https://github.test/o/r/pull/7`]);
+  assert.deepEqual(t.memory.state.merges, []);
+  assert.deepEqual(t.gh.labels, []);
+
+  await t.loop.tick();
+  assert.equal(t.gh.merges.length, 1, "merged once");
+});
+
+test("pending CI or no checks yet waits for a later tick", async () => {
+  const t = setup();
+  const { parent, backend, qa } = await approved(t);
+  t.gh.statuses[7] = {
+    checks: [
+      { name: "CI / test", state: "pass", detail: "SUCCESS" },
+      { name: "CI / lint", state: "pending", detail: "IN_PROGRESS" },
+    ],
+  };
+  assert.deepEqual((await t.loop.tick()).merged, []);
+  t.gh.statuses[7] = { checks: [] };
+  assert.deepEqual((await t.loop.tick()).merged, []);
+  t.gh.statuses[7] = { mergeable: "UNKNOWN" };
+  assert.deepEqual((await t.loop.tick()).merged, []);
+  assert.deepEqual(t.gh.merges, []);
+  assert.equal(backend.state, "In Review");
+  assert.equal(qa.state, "In Review");
+  assert.equal(parent.state, "In Progress");
+  assert.ok(t.logs.some((l) => /PR #7 waits \(CI \/ lint pending\)/.test(l)));
+  assert.ok(t.logs.some((l) => /PR #7 waits \(no checks yet\)/.test(l)));
+
+  delete t.gh.statuses[7];
+  assert.deepEqual((await t.loop.tick()).merged, [backend.key]);
+  assert.equal(parent.state, "Done");
+});
+
+test("failed CI sends the part back once with the failing checks; the second failure escalates", async () => {
+  const t = setup();
+  const { parent, backend, qa } = await approved(t);
+  const failed = {
+    checks: [
+      {
+        name: "CI / test",
+        state: "fail" as const,
+        detail: "FAILURE",
+        url: "https://github.test/run/1",
+      },
+    ],
+  };
+  t.gh.statuses[7] = failed;
+
+  // Sent back, and the part's agent starts again in the same tick.
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  assert.deepEqual(t.gh.merges, []);
+  assert.ok(t.linear.moves.some((m) => m.key === backend.key && m.state === "Ready"));
+  assert.equal(qa.state, "Ready");
+  assert.equal(t.memory.state.gateFailures[parent.id], 1);
+  assert.deepEqual(t.memory.state.merges, []);
+  assert.match(
+    t.linear.comments.find((c) => c.key === backend.key)?.body ?? "",
+    /cannot merge \(round 1 of 2, D-014\).*\n\n- CI: `CI \/ test` failure \(https:\/\/github\.test\/run\/1\)/s,
+  );
+
+  // The part's agent gets the failing check and pushes to its open PR.
+  const fix = t.adapter.runs().at(-1);
+  assert.match(fix?.prompt ?? "", /## QA requested changes/);
+  assert.match(fix?.prompt ?? "", /CI: `CI \/ test` failure/);
+  assert.match(fix?.prompt ?? "", /Your PR is already open/);
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+
+  // QA approves again (a QA approval does not reset the gate count), CI fails again.
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+  assert.equal(qa.state, "In Review");
+  await t.loop.tick();
+  assert.equal(qa.state, "Needs input");
+  assert.equal(parent.state, "Needs input");
+  assert.equal(backend.state, "In Review", "not sent back a second time");
+  assert.deepEqual(t.memory.state.gateFailures, {});
+  assert.deepEqual(t.pings, [
+    `${parent.key} needs input (merge gate failed twice): PR #7 https://linear.test/${parent.key}`,
+  ]);
+  assert.deepEqual(t.gh.merges, []);
+  await t.loop.tick();
+  assert.equal(t.pings.length, 1);
+});
+
+test("a protected PR gets the needs-human label and one ping, ever; a human merge finishes it", async () => {
+  const t = setup();
+  const { parent, backend, qa } = await approved(t);
+  t.gh.statuses[7] = {
+    files: [
+      { path: "src/x.ts", additions: 1, deletions: 0 },
+      { path: "packages/daemon/src/auth/token.ts", additions: 2, deletions: 0 },
+    ],
+  };
+
+  await t.loop.tick();
+  assert.deepEqual(t.gh.merges, [], "never merged by harnessd");
+  assert.deepEqual(t.gh.labels, [{ number: 7, label: "needs-human" }]);
+  assert.equal(parent.state, "Needs input");
+  assert.equal(backend.state, "In Review");
+  assert.equal(qa.state, "In Review");
+  assert.match(
+    t.linear.comments.find((c) => c.key === parent.key)?.body ?? "",
+    /needs a human \(D-013\): touches protected paths.*\n\n- `packages\/daemon\/src\/auth\/token\.ts`/s,
+  );
+  assert.deepEqual(humanPings(t), [
+    `${backend.key} needs a human (touches protected paths): PR #7 https://github.test/o/r/pull/7`,
+  ]);
+  assert.ok(t.memory.state.humanPings["https://github.test/o/r/pull/7"]);
+
+  await t.loop.tick();
+  await t.loop.tick();
+  assert.equal(humanPings(t).length, 1, "one ping");
+  assert.equal(t.gh.labels.length, 1);
+  assert.equal(t.linear.comments.filter((c) => c.key === parent.key).length, 1);
+
+  // A human merges it on GitHub.
+  t.gh.statuses[7] = { ...t.gh.statuses[7], state: "MERGED" };
+  const report = await t.loop.tick();
+  assert.deepEqual(report.merged, [], "harnessd did not merge it");
+  assert.deepEqual(t.gh.merges, []);
+  assert.equal(backend.state, "Done");
+  assert.equal(qa.state, "Done");
+  assert.equal(parent.state, "Done");
+  assert.equal(humanPings(t).length, 1);
+});
+
+test("a ping already recorded in loop.json is not sent again after a restart", async () => {
+  const t = setup();
+  await approved(t);
+  t.gh.statuses[7] = {
+    files: [{ path: ".github/workflows/release.yml", additions: 1, deletions: 0 }],
+  };
+  await t.loop.tick();
+  assert.equal(humanPings(t).length, 1);
+
+  const restarted = setup({ linear: t.linear, store: t.memory });
+  restarted.gh.open(t.linear.byKey("MET-101").key, 7);
+  restarted.gh.statuses[7] = t.gh.statuses[7];
+  // Lose the PR's needs-human mark, as if the process stopped right after the ping.
+  for (const m of t.memory.state.merges) for (const p of m.prs) delete p.needsHuman;
+  await restarted.loop.tick();
+  assert.deepEqual(humanPings(restarted), [], "the ping went out once, before the restart");
+  assert.deepEqual(restarted.gh.merges, []);
+});
+
+test("no merge while paused, even when the pause lands between the CI check and the merge", async () => {
+  let paused = false;
+  let pauseAfterView = false;
+  const t = setup({ extra: { paused: () => paused || (pauseAfterView && t.gh.views.length > 0) } });
+  const { backend } = await approved(t);
+
+  paused = true;
+  assert.equal((await t.loop.tick()).paused, true);
+  assert.deepEqual(t.gh.views, [], "the gate does not even look while paused");
+
+  paused = false;
+  pauseAfterView = true;
+  const report = await t.loop.tick();
+  assert.equal(report.paused, true);
+  assert.deepEqual(t.gh.views, [7]);
+  assert.deepEqual(t.gh.merges, []);
+  assert.equal(backend.state, "In Review");
+  assert.equal(t.memory.state.merges.length, 1, "the approval waits for resume");
+
+  pauseAfterView = false;
+  assert.deepEqual((await t.loop.tick()).merged, [backend.key]);
+});
+
+test("a head that moved after QA approved is never merged: QA runs again on the new head", async () => {
+  const t = setup();
+  const { backend, qa } = await approved(t);
+  t.gh.statuses[7] = { headRefOid: "sha7-pushed-later" };
+  const pr = t.gh.prs[backend.key];
+  assert.ok(pr);
+  pr.headRefOid = "sha7-pushed-later";
+
+  const report = await t.loop.tick();
+  assert.deepEqual(t.gh.merges, []);
+  assert.deepEqual(report.dispatched, [qa.key], "QA is back in Ready and runs again at once");
+  assert.match(
+    t.linear.comments.find((c) => c.key === qa.key && /moved from/.test(c.body))?.body ?? "",
+    /moved from `sha7` to `sha7-pu` after QA approved it/,
+  );
+  assert.deepEqual(t.memory.state.qaFailures, {}, "no QA failure counted");
+  await settle();
+  assert.equal(t.wt.checkouts.at(-1)?.sha, "sha7-pushed-later");
+  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+
+  assert.deepEqual((await t.loop.tick()).merged, [backend.key]);
+  assert.deepEqual(t.gh.merges, [
+    { number: 7, method: "squash", matchHeadCommit: "sha7-pushed-later" },
+  ]);
+});
+
+test("a refused merge waits for a human; the merge method and label come from [merge]", async () => {
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { merge: { method: "rebase", label: "hold" } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+    },
+  ]);
+  const t = setup({ config });
+  const { parent, backend } = await approved(t);
+  t.gh.github.mergePr = async (number, input) => {
+    t.gh.merges.push({ number, ...input });
+    throw new Error("gh pr merge exited with code 1: base branch policy prohibits the merge");
+  };
+  await t.loop.tick();
+  assert.deepEqual(t.gh.merges, [{ number: 7, method: "rebase", matchHeadCommit: "sha7" }]);
+  assert.deepEqual(t.gh.labels, [{ number: 7, label: "hold" }]);
+  assert.equal(parent.state, "Needs input");
+  assert.equal(backend.state, "In Review");
+  assert.deepEqual(humanPings(t), [
+    `${backend.key} needs a human (GitHub refused the merge): PR #7 https://github.test/o/r/pull/7`,
+  ]);
+  await t.loop.tick();
+  assert.equal(t.gh.merges.length, 1, "not retried");
 });
 
 test("an escalated grill skips the issue: no plan, no sub-issues", async () => {

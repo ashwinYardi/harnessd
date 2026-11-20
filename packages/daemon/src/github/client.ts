@@ -2,6 +2,7 @@
 // Auth is whatever `gh` uses (GH_TOKEN, GITHUB_TOKEN or `gh auth login`); harnessd never
 // reads or stores a token. See docs/LOOP.md.
 import { spawn } from "node:child_process";
+import type { MergeMethod } from "@harnessd/shared";
 
 /** An open pull request, as `gh pr list --json` reports it. */
 export interface PullRequest {
@@ -32,6 +33,36 @@ export interface ReviewInput {
   commitId?: string;
 }
 
+/** One CI check on a PR's head: a check run or a commit status. */
+export interface PullRequestCheck {
+  name: string;
+  state: "pass" | "pending" | "fail";
+  /** GitHub's word for it: SUCCESS, IN_PROGRESS, FAILURE, … */
+  detail: string;
+  url?: string;
+}
+
+/** What the merge gate reads about a PR, from one `gh pr view --json` call. */
+export interface PullRequestStatus {
+  number: number;
+  url: string;
+  state: "OPEN" | "CLOSED" | "MERGED";
+  headRefOid: string;
+  /** MERGEABLE, CONFLICTING or UNKNOWN (GitHub is still computing it). */
+  mergeable: string;
+  /** The head commit's checks, one per name (the latest run wins). */
+  checks: PullRequestCheck[];
+  files: PullRequestFile[];
+  /** How many files the PR changes; `files` may list fewer on a very large PR. */
+  changedFiles: number;
+}
+
+export interface MergeInput {
+  method: MergeMethod;
+  /** GitHub refuses the merge if the head moved past this commit. */
+  matchHeadCommit: string;
+}
+
 /** The GitHub calls harnessd makes. `createGhCli` implements it; tests use a fake. */
 export interface GitHub {
   /** The newest open PR whose title carries the issue key ("MET-41"), if any. */
@@ -40,6 +71,12 @@ export interface GitHub {
   prFiles(number: number): Promise<PullRequestFile[]>;
   /** Posts one review and returns its URL. */
   postReview(number: number, review: ReviewInput): Promise<string>;
+  /** State, head, mergeability, CI checks and changed files, for the merge gate. */
+  prStatus(number: number): Promise<PullRequestStatus>;
+  /** Merges the PR at exactly `matchHeadCommit`. */
+  mergePr(number: number, input: MergeInput): Promise<void>;
+  /** Adds a label to the PR, creating the label in the repo when it does not exist yet. */
+  addLabel(number: number, label: string): Promise<void>;
 }
 
 export class GitHubError extends Error {
@@ -116,6 +153,101 @@ export function parsePullRequestFiles(text: string): PullRequestFile[] {
       deletions: field<number>(raw, "deletions", "number", what),
     };
   });
+}
+
+export const PR_STATUS_FIELDS =
+  "number,url,state,headRefOid,mergeable,statusCheckRollup,files,changedFiles";
+
+/** Check-run conclusions that count as passing; any other conclusion fails. */
+const PASSING_CONCLUSIONS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+function str(raw: Obj, key: string): string {
+  const value = raw[key];
+  return typeof value === "string" ? value : "";
+}
+
+/**
+ * One `statusCheckRollup` entry. A check run passes when it completed with SUCCESS,
+ * NEUTRAL or SKIPPED, and is pending until it completes. A commit status passes on
+ * SUCCESS and is pending on PENDING or EXPECTED. Anything else fails, except an entry of
+ * an unknown kind, which stays pending: it is not green, but nobody's fault either.
+ */
+function parseCheck(raw: Obj): PullRequestCheck & { key: string; at: string } {
+  // A re-run starts after the run it replaces; an unfinished run has no real completedAt.
+  const at = str(raw, "startedAt") || str(raw, "completedAt");
+  if (raw.__typename === "StatusContext" || ("context" in raw && !("status" in raw))) {
+    const detail = str(raw, "state") || "UNKNOWN";
+    const name = str(raw, "context") || "status";
+    const state =
+      detail === "SUCCESS"
+        ? "pass"
+        : detail === "PENDING" || detail === "EXPECTED"
+          ? "pending"
+          : "fail";
+    const check: PullRequestCheck & { key: string; at: string } = {
+      name,
+      state,
+      detail,
+      key: `status:${name}`,
+      at,
+    };
+    if (str(raw, "targetUrl")) check.url = str(raw, "targetUrl");
+    return check;
+  }
+  if (raw.__typename === "CheckRun" || "status" in raw) {
+    const status = str(raw, "status") || "UNKNOWN";
+    const conclusion = str(raw, "conclusion");
+    const workflow = str(raw, "workflowName");
+    const base = str(raw, "name") || "check";
+    const name = workflow ? `${workflow} / ${base}` : base;
+    const done = status === "COMPLETED";
+    const state = !done ? "pending" : PASSING_CONCLUSIONS.has(conclusion) ? "pass" : "fail";
+    const check: PullRequestCheck & { key: string; at: string } = {
+      name,
+      state,
+      detail: done ? conclusion || "UNKNOWN" : status,
+      key: `run:${name}`,
+      at,
+    };
+    if (str(raw, "detailsUrl")) check.url = str(raw, "detailsUrl");
+    return check;
+  }
+  return { name: "unknown check", state: "pending", detail: "UNKNOWN", key: "unknown", at };
+}
+
+/** Parses `gh pr view <n> --json <PR_STATUS_FIELDS>`. */
+export function parsePullRequestStatus(text: string): PullRequestStatus {
+  const value = parseJson(text, "pr view");
+  const what = "pr view";
+  if (!isObj(value)) throw new GitHubError(`gh ${what}: expected an object`);
+  const state = field<string>(value, "state", "string", what);
+  if (state !== "OPEN" && state !== "CLOSED" && state !== "MERGED") {
+    throw new GitHubError(`gh ${what}: state: unexpected ${JSON.stringify(state)}`);
+  }
+  const rollup = value.statusCheckRollup ?? [];
+  if (!Array.isArray(rollup))
+    throw new GitHubError(`gh ${what}: statusCheckRollup: expected an array`);
+  // A re-run leaves the earlier run in the rollup too: the latest one per name decides.
+  const latest = new Map<string, PullRequestCheck & { key: string; at: string }>();
+  for (const raw of rollup) {
+    if (!isObj(raw)) continue;
+    const check = parseCheck(raw);
+    const seen = latest.get(check.key);
+    if (seen === undefined || check.at >= seen.at) latest.set(check.key, check);
+  }
+  const checks = [...latest.values()].map(({ key: _key, at: _at, ...check }) => check);
+  const files = parsePullRequestFiles(JSON.stringify({ files: value.files ?? [] }));
+  const changed = value.changedFiles;
+  return {
+    number: field<number>(value, "number", "number", what),
+    url: field<string>(value, "url", "string", what),
+    state,
+    headRefOid: field<string>(value, "headRefOid", "string", what),
+    mergeable: typeof value.mergeable === "string" ? value.mergeable : "UNKNOWN",
+    checks,
+    files,
+    changedFiles: typeof changed === "number" ? changed : files.length,
+  };
 }
 
 /** True when the title names the key as a whole word: "MET-4" is not in "MET-41: x". */
@@ -213,6 +345,41 @@ export function createGhCli(options: GhCliOptions): GitHub {
         throw new GitHubError("gh api reviews: expected an object with html_url");
       }
       return value.html_url;
+    },
+
+    async prStatus(number) {
+      const { stdout } = await gh(["pr", "view", String(number), "--json", PR_STATUS_FIELDS]);
+      return parsePullRequestStatus(stdout);
+    },
+
+    async mergePr(number, input) {
+      await gh([
+        "pr",
+        "merge",
+        String(number),
+        `--${input.method}`,
+        "--match-head-commit",
+        input.matchHeadCommit,
+      ]);
+    },
+
+    async addLabel(number, label) {
+      const add = () => gh(["pr", "edit", String(number), "--add-label", label]);
+      try {
+        await add();
+      } catch {
+        // Most likely the label does not exist yet in this repo: create it, then retry.
+        await gh([
+          "label",
+          "create",
+          label,
+          "--description",
+          "harnessd: waits for a human before merge (D-013)",
+          "--color",
+          "B60205",
+        ]).catch(() => undefined);
+        await add();
+      }
     },
   };
 }

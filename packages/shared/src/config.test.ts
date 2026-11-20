@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ConfigError, parseAgentSettings, parseConfigFile } from "./index.ts";
+import { ConfigError, DEFAULT_SETTINGS, parseAgentSettings, parseConfigFile } from "./index.ts";
 
 const FILE = "~/.harnessd/config.toml";
 
@@ -16,7 +16,7 @@ test("parseConfigFile accepts a full config", () => {
     limits: { max_concurrent: 5, budget_minutes: { S: 20, M: 90 }, qa_max_failures: 1 },
     linear: { team_id: "MET", project: "harnessd" },
     slack: { channel: "#ops" },
-    merge: { protected_paths: ["infra/**"] },
+    merge: { protected_paths: ["infra/**"], label: "hold", method: "rebase" },
     qa: { setup_command: "", test_command: "make test" },
     daemon: { port: 4800 },
     agents: {
@@ -91,11 +91,38 @@ test("wrong types are rejected with their path", () => {
     { merge: { protected_paths: ["a", 3] } },
     `${FILE}: merge.protected_paths[1]: expected a string, got 3`,
   );
+  rejects({ merge: { label: "" } }, `${FILE}: merge.label: expected a non-empty string`);
+  rejects(
+    { merge: { method: "fast-forward" } },
+    `${FILE}: merge.method: expected one of squash, merge, rebase, got "fast-forward"`,
+  );
+  rejects(
+    { merge: { labels: ["x"] } },
+    `${FILE}: merge.labels: unknown key, expected one of protected_paths, label, method`,
+  );
   rejects(
     { agents: { qa: { role: "tester" } } },
     `${FILE}: agents.qa.role: expected one of coordinator, backend, frontend, qa, got "tester"`,
   );
   rejects({ agents: { qa: [] } }, `${FILE}: agents.qa: expected a table, got an array`);
+});
+
+test("the merge gate defaults cover every D-013 protected area", () => {
+  const { merge } = DEFAULT_SETTINGS;
+  assert.equal(merge.label, "needs-human");
+  assert.equal(merge.method, "squash");
+  for (const glob of [
+    "**/auth/**",
+    "**/payments/**",
+    "**/*secret*",
+    "**/.env",
+    ".github/workflows/**",
+    "docs/RELEASING.md",
+    ".harnessd/config.toml",
+    "**/CODEOWNERS",
+  ]) {
+    assert.ok(merge.protected_paths.includes(glob), glob);
+  }
 });
 
 test("an agent avatar must be a non-empty string", () => {

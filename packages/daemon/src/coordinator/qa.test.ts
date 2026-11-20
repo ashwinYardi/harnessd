@@ -146,6 +146,9 @@ function harness(options: Options = {}) {
       reviews.push({ number, ...review });
       return `https://github.test/o/r/pull/${number}#review-${reviews.length}`;
     },
+    prStatus: () => Promise.reject(new Error("QA never reads the merge status")),
+    mergePr: () => Promise.reject(new Error("QA never merges")),
+    addLabel: () => Promise.reject(new Error("QA never labels")),
   };
   const { adapter, tasks, cwds } = fakeAdapter(options.replies ?? []);
   const runCommand: CommandRunner = async (command, cwd): Promise<CommandResult> => {

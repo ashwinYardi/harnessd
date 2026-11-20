@@ -29,10 +29,10 @@ channel = "#harnessd"
 [daemon]
 port = 4747                 # the local API on 127.0.0.1 (docs/API.md); 0 picks a free port
 
-[merge]
-# Replaces the default list: auth, payments, secrets (.env, *.pem, *.key),
-# .github/workflows/** (release and CI) and .harnessd/config.toml (merge gate).
-protected_paths = ["**/auth/**"]
+[merge]                     # the merge gate (D-013, docs/LOOP.md "Merge")
+protected_paths = ["**/auth/**"]   # replaces the default list below
+label = "needs-human"       # put on a PR that waits for a human
+method = "squash"           # squash | merge | rebase
 
 [qa]
 # Run in a fresh worktree at the PR head before the QA agent starts (docs/LOOP.md "QA").
@@ -51,6 +51,18 @@ command = "npx"             # required
 args = ["-y", "docs-mcp"]   # optional
 env = { DOCS_MODE = "ro" }  # optional, string values
 ```
+`merge.protected_paths` globs are matched against each changed file's repo path, ignoring case. `**` spans directories, `*` and `?` stay within one, `{a,b}` is either, and a glob without a `/` matches the file name at any depth. A PR that touches one is never merged by harnessd. The default list:
+
+| Area | Globs |
+|---|---|
+| auth | `**/auth/**`, `**/auth.*` |
+| payments | `**/payments/**`, `**/billing/**` |
+| secrets | `**/secrets/**`, `**/*secret*`, `**/.env`, `**/.env.*`, `**/*.pem`, `**/*.key` |
+| release config, and the CI the gate trusts | `.github/workflows/**`, `docs/RELEASING.md`, `**/.releaserc*`, `**/release.config.*` |
+| merge-gate config | `.harnessd/config.toml` (holds `[merge]`), `**/CODEOWNERS`, `.github/settings.yml`, `.github/rulesets/**` |
+
+Setting `protected_paths` replaces the whole list, so copy the defaults you want to keep.
+
 Default agents: coordinator, backend, frontend and qa, all on `claude-code` (D-010). The agent's name is its table key or file name; without an `avatar` the UI shows the name's initial. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
 
 ## agents/<name>.md
