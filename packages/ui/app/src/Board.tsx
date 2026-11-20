@@ -138,7 +138,7 @@ export function Board({
         <span className="head-end">
           {pending > 0 && (
             <button type="button" className="btn btn-small" onClick={apply}>
-              Show {pending} {pending === 1 ? "update" : "updates"}
+              Show updates
             </button>
           )}
         </span>

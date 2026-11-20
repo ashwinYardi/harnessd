@@ -5,7 +5,7 @@ import { createLogBuffer } from "./logs.ts";
 const at = () => new Date("2026-11-20T10:00:00.000Z");
 
 test("a log buffer numbers lines, finds the issue key and marks warnings", () => {
-  const logs = createLogBuffer({ now: at });
+  const logs = createLogBuffer({ now: at, firstSeq: 1 });
   logs.push("MET-41: backend started (S, 30 min)");
   logs.push("MET-42: failed twice (timeout), Needs input");
   logs.push("Edit src/app.ts", { source: "backend", issueKey: "MET-41" });
@@ -38,7 +38,7 @@ test("a log buffer numbers lines, finds the issue key and marks warnings", () =>
 });
 
 test("a log buffer keeps the newest lines and tells subscribers", () => {
-  const logs = createLogBuffer({ now: at, capacity: 2 });
+  const logs = createLogBuffer({ now: at, capacity: 2, firstSeq: 1 });
   const seen: number[] = [];
   const off = logs.subscribe((line) => seen.push(line.seq));
   logs.push("one");
@@ -55,8 +55,16 @@ test("a log buffer keeps the newest lines and tells subscribers", () => {
 });
 
 test("log text is one line and capped", () => {
-  const logs = createLogBuffer({ now: at });
+  const logs = createLogBuffer({ now: at, firstSeq: 1 });
   const line = logs.push(`a\n  b ${"x".repeat(3000)}`);
   assert.ok(line.text.startsWith("a b x"));
   assert.equal(line.text.length, 2000);
+});
+
+test("by default a log starts its seq at its start time, so a restart never reuses one", () => {
+  const first = createLogBuffer({ now: () => new Date(1_000) });
+  const second = createLogBuffer({ now: () => new Date(2_000) });
+  assert.equal(first.push("a").seq, 1_000);
+  assert.equal(first.push("b").seq, 1_001);
+  assert.ok(second.push("c").seq > 1_001);
 });

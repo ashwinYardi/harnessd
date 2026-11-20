@@ -16,6 +16,8 @@ export interface RawIssue {
   priority?: number | null;
   url: string;
   createdAt: string;
+  /** Selected by the board query only. */
+  updatedAt?: string;
   state?: { name: string } | null;
   team?: { id: string; key: string } | null;
   labels?: { nodes: { name: string }[] } | null;

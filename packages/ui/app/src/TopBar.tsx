@@ -63,6 +63,12 @@ export function TopBar({ pause, setPause, connection, lastPollAt, needsYou, now 
   const [busy, setBusy] = useState<"pausing" | "resuming" | null>(null);
   const [notice, setNotice] = useState("");
   const state = pause.status === "ready" ? pause.data : undefined;
+  // A result stays readable for a while, then the band goes quiet again.
+  useEffect(() => {
+    if (!notice || busy !== null) return;
+    const t = setTimeout(() => setNotice(""), 12_000);
+    return () => clearTimeout(t);
+  }, [notice, busy]);
   const paused = busy === "pausing" || (busy === null && state?.paused === true);
 
   const disabled = pause.status !== "ready" || busy !== null;

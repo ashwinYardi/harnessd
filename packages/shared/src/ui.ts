@@ -67,7 +67,7 @@ export interface AgentsSnapshot {
 export type LogLevel = "info" | "warn";
 
 export interface LogLine {
-  /** Increases by one per line, from 1. */
+  /** Increases by one per line. A restarted daemon starts above the last one (its start time in ms). */
   seq: number;
   at: string;
   /** "loop", or the agent name for agent actions. */

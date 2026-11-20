@@ -1,6 +1,6 @@
 // The daemon's API (docs/API.md): reads on load, then live changes from /api/events.
 import type { AgentsSnapshot, BoardSnapshot, LogLine, LogSnapshot } from "@harnessd/shared";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { appendLines } from "./lib/log.ts";
 
 export interface PauseState {
@@ -44,7 +44,6 @@ export function useHarnessd() {
   const [logs, setLogs] = useState<Load<LogLine[]>>({ status: "loading" });
   const [pause, setPause] = useState<Load<PauseState>>({ status: "loading" });
   const [connection, setConnection] = useState<Connection>("connecting");
-  const dropped = useRef(false);
 
   const loadBoard = useCallback(() => {
     setBoard((b) => (b.status === "ready" ? b : { status: "loading" }));
@@ -97,12 +96,11 @@ export function useHarnessd() {
     );
     events.onopen = () => {
       setConnection("live");
-      // Lines sent while the stream was down are fetched again; repeats are dropped.
-      if (dropped.current) loadLogs();
-      dropped.current = false;
+      // Lines sent before the stream opened, or while it was down, are fetched again.
+      // Repeats are dropped by seq.
+      loadLogs();
     };
     events.onerror = () => {
-      dropped.current = true;
       setConnection("reconnecting");
     };
     return () => events.close();

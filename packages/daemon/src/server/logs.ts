@@ -27,6 +27,11 @@ export interface LogBuffer {
 
 export interface LogBufferOptions {
   capacity?: number;
+  /**
+   * The first line's seq. Default: the start time in ms, so a restarted daemon numbers
+   * its lines above the ones a page already holds.
+   */
+  firstSeq?: number;
   now?: () => Date;
 }
 
@@ -35,7 +40,7 @@ export function createLogBuffer(options: LogBufferOptions = {}): LogBuffer {
   const now = options.now ?? (() => new Date());
   const lines: LogLine[] = [];
   const listeners = new Set<(line: LogLine) => void>();
-  let seq = 0;
+  let seq = (options.firstSeq ?? now().getTime()) - 1;
 
   return {
     push(raw, origin = {}) {

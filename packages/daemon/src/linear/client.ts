@@ -209,7 +209,7 @@ export class LinearClient {
           labels: issue.labels,
           url: issue.url,
           blockedBy: issue.blockedBy,
-          updatedAt: (raw as RawIssue & { updatedAt?: string }).updatedAt ?? raw.createdAt,
+          updatedAt: raw.updatedAt ?? raw.createdAt,
         };
         if (issue.size !== undefined) item.size = issue.size;
         if (raw.parent?.identifier) item.parentKey = raw.parent.identifier;

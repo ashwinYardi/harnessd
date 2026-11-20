@@ -284,3 +284,32 @@ test("staticRoutes serves the built UI with types, caching and a strict CSP", as
 test("staticRoutes of a missing folder serves nothing", async () => {
   assert.deepEqual(await staticRoutes(join(tmpdir(), "harnessd-no-such-ui")), []);
 });
+
+test("a log line pushed while the first state is read still reaches the stream", async () => {
+  const logs = createLogBuffer();
+  const ui = createUiApi({
+    board: {
+      read: async (): Promise<BoardSnapshot> => {
+        await new Promise((r) => setTimeout(r, 150));
+        return { fetchedAt: null, issues: [] };
+      },
+    },
+    agents: (): AgentsSnapshot => agentsView(mergeLayers([]), idle),
+    logs,
+    pollMs: 20,
+  });
+  const daemon = await startDaemon({ routes: ui.routes });
+  try {
+    const res = await fetch(`${daemon.url}/api/events`);
+    setTimeout(() => logs.push("MET-41: backend started (S, 30 min)"), 30);
+    const events = await readEvents(res, (e) => e.some((x) => x.event === "log"));
+    assert.deepEqual(
+      events.map((e) => e.event),
+      ["agents", "board", "log"],
+      "the state first, then the early line",
+    );
+  } finally {
+    ui.close();
+    await daemon.close();
+  }
+});

@@ -5,6 +5,7 @@ import {
   type AgentView,
   type BoardIssue,
   type BoardSnapshot,
+  type LogLine,
   type MergedConfig,
   type RunView,
 } from "@harnessd/shared";
@@ -145,7 +146,6 @@ export function createUiApi(options: UiApiOptions): UiApi {
   const clients = new Set<SendEvent>();
   const last = new Map<Channel, string>();
   let timers: ReturnType<typeof setInterval>[] = [];
-  let offLogs: (() => void) | undefined;
 
   function publish(channel: Channel, data: unknown): void {
     const json = JSON.stringify(data);
@@ -155,13 +155,26 @@ export function createUiApi(options: UiApiOptions): UiApi {
   }
 
   const ignore = (): void => {};
-  async function pollFast(): Promise<void> {
-    if (options.pause) publish("pause", await options.pause.status());
-    publish("agents", options.agents());
+  // A poll that is still running is not started again, so an old value never wins.
+  const busy = new Set<string>();
+  async function once(name: string, poll: () => Promise<void>): Promise<void> {
+    if (busy.has(name)) return;
+    busy.add(name);
+    try {
+      await poll();
+    } finally {
+      busy.delete(name);
+    }
   }
-  async function pollBoard(): Promise<void> {
-    publish("board", await options.board.read());
-  }
+  const pollFast = () =>
+    once("fast", async () => {
+      if (options.pause) publish("pause", await options.pause.status());
+      publish("agents", options.agents());
+    });
+  const pollBoard = () =>
+    once("board", async () => {
+      publish("board", await options.board.read());
+    });
 
   function start(): void {
     timers = [
@@ -169,34 +182,52 @@ export function createUiApi(options: UiApiOptions): UiApi {
       setInterval(() => void pollBoard().catch(ignore), boardPollMs),
     ];
     for (const t of timers) t.unref();
-    offLogs = options.logs.subscribe((line) => {
-      for (const send of clients) send("log", line);
-    });
   }
 
   function stop(): void {
     for (const t of timers) clearInterval(t);
     timers = [];
-    offLogs?.();
-    offLogs = undefined;
     last.clear();
   }
 
   const events = (): EventStream =>
     new EventStream((send) => {
       let open = true;
+      // Each stream hears log lines from the moment it opens. Lines that come before its
+      // first state wait, so the state still goes out first and no line is lost.
+      let early: LogLine[] | undefined = [];
+      const offLog = options.logs.subscribe((line) => {
+        if (early) early.push(line);
+        else send("log", line);
+      });
       void (async () => {
-        const [pause, board] = await Promise.all([options.pause?.status(), options.board.read()]);
+        // A failed read leaves that event out; the polls send it once it works.
+        const [pause, board] = await Promise.allSettled([
+          options.pause?.status(),
+          options.board.read(),
+        ]);
         if (!open) return;
-        if (pause !== undefined) send("pause", pause);
-        send("agents", options.agents());
-        send("board", board);
+        const first: Array<[Channel, unknown]> = [["agents", options.agents()]];
+        if (pause.status === "fulfilled" && pause.value !== undefined) {
+          first.unshift(["pause", pause.value]);
+        }
+        if (board.status === "fulfilled") first.push(["board", board.value]);
+        for (const [channel, data] of first) {
+          send(channel, data);
+          // The polls only send changes: a newer value they already sent goes out now.
+          const newer = last.get(channel);
+          if (newer !== undefined && newer !== JSON.stringify(data))
+            send(channel, JSON.parse(newer));
+        }
+        for (const line of early ?? []) send("log", line);
+        early = undefined;
         // Joined after its first state, so a poll never overtakes it.
         if (clients.size === 0) start();
         clients.add(send);
       })().catch(ignore);
       return () => {
         open = false;
+        offLog();
         clients.delete(send);
         if (clients.size === 0) stop();
       };

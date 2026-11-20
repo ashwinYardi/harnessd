@@ -33,7 +33,10 @@ export const UI_CSP = [
 async function walk(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true });
   const files = await Promise.all(
-    entries.map((e) => (e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)])),
+    // Only plain files and folders: a link could point outside the build.
+    entries.map((e) =>
+      e.isDirectory() ? walk(join(dir, e.name)) : e.isFile() ? [join(dir, e.name)] : [],
+    ),
   );
   return files.flat();
 }

@@ -32,6 +32,14 @@ export function LogPane({ logs, retry }: { logs: Load<LogLine[]>; retry: () => v
     }
   }
 
+  // A pointer resting in the log also holds it, so following never scrolls text under it.
+  const [resting, setResting] = useState(false);
+  function hold(on: boolean) {
+    setResting(on);
+    if (!follow) return;
+    setFrozen(on ? lines : null);
+  }
+
   function jump() {
     setFrozen(null);
     setFollow(true);
@@ -72,6 +80,8 @@ export function LogPane({ logs, retry }: { logs: Load<LogLine[]>; retry: () => v
           className="region-body log-body"
           ref={body}
           onScroll={onScroll}
+          onPointerEnter={() => hold(true)}
+          onPointerLeave={() => hold(false)}
           // biome-ignore lint/a11y/noNoninteractiveTabindex: a scroll region must be reachable by keyboard
           tabIndex={0}
           role="log"
@@ -89,7 +99,7 @@ export function LogPane({ logs, retry }: { logs: Load<LogLine[]>; retry: () => v
           </ol>
         </div>
       )}
-      {!follow && (
+      {(!follow || (resting && unseen > 0)) && (
         <button type="button" className="btn btn-small jump" onClick={jump}>
           <ArrowDownIcon />
           {unseen > 0 ? `${unseen} new ${unseen === 1 ? "line" : "lines"}` : "Latest"}
