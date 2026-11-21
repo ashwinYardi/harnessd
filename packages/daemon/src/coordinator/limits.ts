@@ -73,7 +73,7 @@ export function harnessForRun(
   const fallback = agent.fallback_harness;
   if (fallback === undefined || fallback === agent.harness) return undefined;
   if (!hasAdapter(fallback) || held(fallback)) return undefined;
-  const { model: _model, fallback_harness: _h, fallback_model, ...rest } = agent;
+  const { model: _mainModel, fallback_harness: _fallbackHarness, fallback_model, ...rest } = agent;
   const onFallback: ResolvedAgentConfig = { ...rest, harness: fallback };
   if (fallback_model !== undefined) onFallback.model = fallback_model;
   return onFallback;
