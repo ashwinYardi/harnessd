@@ -26,6 +26,9 @@ export type SelfUpdateResult =
   | { status: "failed"; step: SelfUpdateStep; error: string };
 
 export interface SelfUpdater {
+  /** Commit embedded in the running build, independent of the install clone's HEAD. */
+  readonly runningCommit?: string;
+
   /**
    * The target, or undefined when the repo the loop works on is not this install, or the
    * install already runs the default branch head. Throws on an error.

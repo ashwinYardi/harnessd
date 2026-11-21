@@ -322,9 +322,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       state = await store.load();
       const u = state.selfUpdate;
       if (u?.state === "applying") {
-        // The previous process built this version and restarted into it.
-        log(`self-update: ${shortSha(u.from)} -> ${shortSha(u.to)}`);
-        u.state = "done";
+        if (options.selfUpdate?.updater.runningCommit === u.to) {
+          u.state = "done";
+          log(`self-update: ${shortSha(u.from)} -> ${shortSha(u.to)}`);
+        } else {
+          // The previous process may have stopped before it installed the target build.
+          u.state = "pending";
+        }
         u.at = clock.now().toISOString();
         await save();
       }
@@ -999,7 +1003,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       at: clock.now().toISOString(),
       state: "pending",
     };
-    const cause = trigger ?? u?.trigger;
+    const cause = trigger ?? (u?.to === target.to ? u.trigger : undefined);
     if (cause !== undefined) record.trigger = cause;
     s.selfUpdate = record;
     await save();
@@ -1127,13 +1131,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       // `harnessd resume` after a blocked or failed update: check again.
       const last = s.selfUpdate;
       if (last?.state === "blocked" || last?.state === "failed") {
-        checkWanted = last.trigger ? { trigger: last.trigger } : {};
+        checkWanted ??= {};
       }
     }
-    if (up !== undefined && checkWanted !== undefined && !restarting) {
+    const checkedBeforeMerge = up !== undefined && checkWanted !== undefined && !restarting;
+    if (checkedBeforeMerge) {
       const wanted = checkWanted;
       checkWanted = undefined;
-      await checkUpdate(s, up, wanted.trigger);
+      await checkUpdate(s, up, wanted?.trigger);
     }
     if (await holdForUpdate(s)) {
       await save();
@@ -1164,15 +1169,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         await save();
         return report;
       }
-      if (up !== undefined && checkWanted !== undefined) {
-        const wanted = checkWanted;
-        checkWanted = undefined;
-        await checkUpdate(s, up, wanted.trigger);
-        if (await holdForUpdate(s)) {
-          await save();
-          report.paused = pausedNow;
-          return report;
-        }
+    }
+    // Poll the default branch even when a merge happened outside the gate's queue.
+    if (up !== undefined && (checkWanted !== undefined || !checkedBeforeMerge)) {
+      const wanted = checkWanted;
+      checkWanted = undefined;
+      await checkUpdate(s, up, wanted?.trigger);
+      if (await holdForUpdate(s)) {
+        await save();
+        report.paused = pausedNow;
+        return report;
       }
     }
     await dispatchEligible(s, report);

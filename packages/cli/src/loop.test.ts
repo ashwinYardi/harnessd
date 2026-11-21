@@ -476,43 +476,58 @@ test('[agents.backend] harness = "codex" dispatches to the codex adapter with th
   assert.equal((await started?.result)?.status, "ok");
 });
 
-test("after a self-update restart the log shows from and to, and GET /api/loop returns selfUpdate", async () => {
-  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
-  await createFilePauseStore(s.home).pause();
-  const record = {
-    from: "aaaaaaa1111",
-    to: "bbbbbbb2222",
-    at: "2026-11-21T08:00:00.000Z",
-    state: "applying",
-  };
-  await mkdir(join(s.repo, ".harnessd", "state"), { recursive: true });
-  await writeFile(
-    join(s.repo, ".harnessd", "state", "loop.json"),
-    JSON.stringify({ version: 1, lastPollAt: null, inFlight: [], selfUpdate: record }),
-  );
-  let loop: { selfUpdate?: { state: string } } = {};
-  const code = await runLoop([], {
-    ...s.io,
-    stopSignal: async () => {
-      const url = (await readDaemonInfo(s.home))?.url ?? "";
-      await fetch(`${url}/api/start`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: "{}",
-      });
-      for (let i = 0; i < 100 && loop.selfUpdate?.state !== "done"; i++) {
-        loop = (await (await fetch(`${url}/api/loop`)).json()) as typeof loop;
-        if (loop.selfUpdate?.state !== "done") await new Promise((r) => setTimeout(r, 20));
-      }
-      return "SIGTERM";
-    },
+for (const updated of [true, false]) {
+  test(`GET /api/loop reports the self-update after restart with the ${updated ? "target" : "old"} build`, async () => {
+    const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+    await createFilePauseStore(s.home).pause();
+    const record = {
+      from: "aaaaaaa1111",
+      to: "bbbbbbb2222",
+      at: "2026-11-21T08:00:00.000Z",
+      state: "applying",
+    };
+    await mkdir(join(s.repo, ".harnessd", "state"), { recursive: true });
+    await writeFile(
+      join(s.repo, ".harnessd", "state", "loop.json"),
+      JSON.stringify({ version: 1, lastPollAt: null, inFlight: [], selfUpdate: record }),
+    );
+    let loop: { selfUpdate?: { state: string } } = {};
+    const expected = updated ? "done" : "pending";
+    const code = await runLoop([], {
+      ...s.io,
+      selfUpdater: {
+        runningCommit: updated ? record.to : record.from,
+        async checkForUpdate() {
+          assert.fail("the loop is paused");
+        },
+        async applyUpdate() {
+          assert.fail("the loop is paused");
+        },
+      },
+      stopSignal: async () => {
+        const url = (await readDaemonInfo(s.home))?.url ?? "";
+        await fetch(`${url}/api/start`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        for (let i = 0; i < 100 && loop.selfUpdate?.state !== expected; i++) {
+          loop = (await (await fetch(`${url}/api/loop`)).json()) as typeof loop;
+          if (loop.selfUpdate?.state !== expected) await new Promise((r) => setTimeout(r, 20));
+        }
+        return "SIGTERM";
+      },
+    });
+    assert.equal(code, 0);
+    assert.equal(
+      s.out.some((line) => line.includes("self-update: aaaaaaa -> bbbbbbb")),
+      updated,
+    );
+    assert.equal(loop.selfUpdate?.state, expected);
+    assert.deepEqual(
+      { ...loop.selfUpdate, at: undefined },
+      { from: record.from, to: record.to, state: expected, at: undefined },
+    );
+    assert.deepEqual((loop as { state?: string }).state, "running");
   });
-  assert.equal(code, 0);
-  assert.match(s.out.join("\n"), /self-update: aaaaaaa -> bbbbbbb/);
-  assert.equal(loop.selfUpdate?.state, "done");
-  assert.deepEqual(
-    { ...loop.selfUpdate, at: undefined },
-    { from: record.from, to: record.to, state: "done", at: undefined },
-  );
-  assert.deepEqual((loop as { state?: string }).state, "running");
-});
+}

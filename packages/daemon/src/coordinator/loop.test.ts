@@ -1821,7 +1821,7 @@ const FROM = "aaaaaaa1111";
 const TO = "bbbbbbb2222";
 
 /** A fake updater: `target` is what the next check finds, `result` what an apply returns. */
-function fakeUpdater(result: SelfUpdateResult = { status: "applied" }) {
+function fakeUpdater(result: SelfUpdateResult = { status: "applied" }, runningCommit = FROM) {
   const u = {
     target: undefined as SelfUpdateTarget | undefined,
     result,
@@ -1832,6 +1832,7 @@ function fakeUpdater(result: SelfUpdateResult = { status: "applied" }) {
   };
   const selfUpdate: LoopSelfUpdate = {
     updater: {
+      runningCommit,
       async checkForUpdate() {
         u.checks++;
         return u.target;
@@ -1884,7 +1885,7 @@ test("a merge with an update pending dispatches nothing until inFlight empties, 
   const merged = await t.loop.tick();
   assert.equal(merged.merged.length, 1);
   assert.deepEqual(merged.dispatched, []);
-  assert.equal(f.u.checks, 2, "the merge triggered a check");
+  assert.equal(f.u.checks, 3, "the merge tick checked the default branch");
   assert.equal(t.memory.state.selfUpdate?.state, "pending");
   assert.deepEqual(t.memory.state.selfUpdate?.trigger, {
     id: parent.id,
@@ -1913,6 +1914,33 @@ test("a merge with an update pending dispatches nothing until inFlight empties, 
   // Until the restart lands, this process dispatches nothing.
   assert.deepEqual((await t.loop.tick()).dispatched, []);
   assert.equal(f.u.applied.length, 1);
+});
+
+test("a default branch update outside the merge queue waits for the run to finish", async () => {
+  const f = fakeUpdater();
+  const t = setup({ extra: f.extra });
+  const part = t.linear.add({
+    title: "Work",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+
+  f.u.target = { from: FROM, to: TO };
+  const later = t.linear.add({
+    title: "Later",
+    description: `${partMarker("frontend")}\n**Size**: S`,
+  });
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  assert.equal(t.memory.state.selfUpdate?.state, "pending");
+  assert.equal(t.memory.state.selfUpdate?.trigger, undefined);
+  assert.equal(later.state, "Ready");
+  assert.deepEqual(f.u.applied, []);
+
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+  await t.loop.tick();
+  assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }]);
+  assert.equal(later.state, "Ready");
 });
 
 /** A QA approval of PR #9 already in loop.json, so a test can merge it at will. */
@@ -1981,7 +2009,7 @@ test("a run over its size budget while an update waits is stopped, kept and run 
     store: t.memory,
     linear: t.linear,
     adapter: t.adapter,
-    extra: { ...fakeUpdater().extra, clock },
+    extra: { ...fakeUpdater({ status: "applied" }, TO).extra, clock },
   });
   const report = await restarted.loop.tick();
   assert.ok(restarted.logs.includes("self-update: aaaaaaa -> bbbbbbb"));

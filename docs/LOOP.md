@@ -193,15 +193,15 @@ When harnessd merges into its own repo, it rebuilds and restarts itself (MET-63)
 
 ```
 merge (harnessd or a human) ─┐
-daemon start ────────────────┴─► check ─► pending ─► safe point ─► apply ─┬─► ok: restart, new process logs from -> to
+daemon start and loop ticks ──┴─► check ─► pending ─► safe point ─► apply ─┬─► ok: restart, new process logs from -> to
                                              │      (inFlight empty)       └─► blocked / failed: old build kept,
                                   no dispatch, grill, split or merge                paused, Needs input, one notice
 ```
 
-- **Check.** The loop asks the updater for a target after each tick where the merge gate saw a PR merged, by harnessd or by a human. A pause in the same pass keeps the check for the first tick after resume. The merged part's parent is the **trigger issue**. One check also runs at daemon start, with no trigger issue. The updater finds no target when the repo is not the install clone, or the install already runs the default branch head. A `pending` record with no target left is dropped.
+- **Check.** The loop asks the updater for a target after each tick where the merge gate saw a PR merged, by harnessd or by a human. A pause in the same pass keeps the check for the first tick after resume. The merged part's parent is the **trigger issue**. The loop also checks at daemon start and on active ticks before it dispatches more work, so it finds merges outside the merge queue. A check that finds a new target outside the merge queue has no trigger issue. The updater finds no target when the repo is not the install clone, or the install already runs the default branch head. A `pending` record with no target left is dropped.
 - **Pending.** A target is recorded as `selfUpdate` in `loop.json` with the state `pending`. While it is pending, a tick dispatches nothing and skips grills, splits and merges. Runs in flight, grill and plan runs included, finish normally.
 - **Safe point.** The first tick with `inFlight` empty. A run that has run longer than its size budget (D-014: S 30 min, M 2 h) while the update waits is stopped like a paused run: its worktree is kept, it is listed under `interrupted` with the reason `self-update`, it goes back to Ready, and it counts no attempt. If the move to Ready fails, the run stays in `inFlight` and the next tick tries the move again. The run starts again in the same worktree after the restart.
-- **Apply.** The state becomes `applying` and is saved. The updater fast-forwards the install clone, runs `pnpm install --frozen-lockfile` and `pnpm build` with the service's Node, and restarts through launchd. Until the restart, the old process dispatches nothing. The new process reads the `applying` record, logs `self-update: <from7> -> <to7>` and sets the state to `done`.
+- **Apply.** The state becomes `applying` and is saved. The updater fast-forwards the install clone, runs `pnpm install --frozen-lockfile` and `pnpm build` with the service's Node, and restarts through launchd. Until the restart, the old process dispatches nothing. The new process reads the `applying` record. If its build commit matches the target, it logs `self-update: <from7> -> <to7>` and sets the state to `done`. Otherwise, it changes the state to `pending` and checks for a target on the next unpaused tick.
 - **Blocked or failed.** A local change in the install clone blocks the update; harnessd never discards it. A failed pull, install or build keeps the old build; harnessd never restarts into a broken build. Either way:
   - paused.json gets the reason `self-update blocked: <reason>` or `self-update failed: <step>: <last error lines>`;
   - one notice goes to the notifier;
