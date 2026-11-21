@@ -37,6 +37,7 @@ export * from "./memory/server.ts";
 export * from "./memory/vault.ts";
 export * from "./secrets/routes.ts";
 export * from "./secrets/store.ts";
+export { createSelfUpdater, createUpdateApplier } from "./selfupdate/apply.ts";
 export * from "./selfupdate/detect.ts";
 export * from "./server/daemon.ts";
 export * from "./server/logs.ts";
