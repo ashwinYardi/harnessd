@@ -135,15 +135,18 @@ export function Team() {
     void load();
   }, [load]);
 
-  // The model list loads once, when a row first picks opencode. A failure leaves free text.
+  // The model list loads when a row first picks opencode. A failure leaves free text, and the
+  // next pick of opencode asks again.
   const modelsAsked = useRef(false);
   useEffect(() => {
     if (!usesOpencode || modelsAsked.current) return;
     modelsAsked.current = true;
     readOpencodeModels().then(
       (data) => setModels({ status: "ready", data }),
-      (e: unknown) =>
-        setModels({ status: "error", error: e instanceof Error ? e.message : String(e) }),
+      (e: unknown) => {
+        modelsAsked.current = false;
+        setModels({ status: "error", error: e instanceof Error ? e.message : String(e) });
+      },
     );
   }, [usesOpencode]);
 

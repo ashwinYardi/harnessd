@@ -48,6 +48,7 @@ test("providerRow: while the sign-in runs, it shows the https link and the code"
   const r = providerRow(provider(), job({ url: "https://auth.example.com/d", code: "ABCD-EFGH" }));
   assert.equal(r.busy, true);
   assert.equal(r.status, "Signing in");
+  assert.equal(r.tone, "warn");
   assert.equal(r.link?.href, "https://auth.example.com/d");
   assert.equal(r.code, "ABCD-EFGH");
   assert.equal(r.manual, undefined);
@@ -135,7 +136,7 @@ test("modelField suggests the listed ids for an opencode row", () => {
 test("modelField stays free text with one help line when the list is empty or fails", () => {
   const empty = modelField("opencode", { status: "ready", data: { models: [], reason: "x" } });
   assert.deepEqual(empty.suggestions, []);
-  assert.match(empty.help ?? "", /<provider>\/<model>/);
+  assert.match(empty.help ?? "", /provider\/model/);
   const failed = modelField("opencode", { status: "error", error: "down" });
   assert.deepEqual(failed.suggestions, []);
   assert.equal(failed.help, empty.help);

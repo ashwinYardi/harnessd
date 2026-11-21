@@ -34,7 +34,8 @@ export function providerRow(p: OpencodeProvider, job: Job | undefined): Provider
   const base: ProviderRow = {
     id: p.id,
     required: p.required,
-    tone: p.signedIn ? "ok" : p.required ? "fail" : "warn",
+    // A running sign-in is not a failure yet: it shows amber until it ends.
+    tone: p.signedIn ? "ok" : p.required && !busy ? "fail" : "warn",
     status: p.signedIn ? "Signed in" : busy ? "Signing in" : "Not signed in",
     busy,
     canSignIn: !p.signedIn,
@@ -66,8 +67,7 @@ export function providerList(load: Load<OpencodeProviders>): ProviderList {
   return { kind: "ready", providers: [...providers].sort(order), note: reason };
 }
 
-export const MODEL_HELP =
-  "No model list from OpenCode. Type <provider>/<model>, such as deepseek/deepseek-chat.";
+export const MODEL_HELP = "Type provider/model, such as deepseek/deepseek-chat.";
 
 /**
  * The model field of a Team row. Only an opencode row gets suggestions; free text always

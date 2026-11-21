@@ -22,6 +22,7 @@ import { Spinner } from "../../components/ui/spinner.tsx";
 import { toast } from "../../components/ui/toast.tsx";
 import { cn } from "../../lib/cn.ts";
 import { jobKey, providerList, providerRow } from "../../lib/opencode.ts";
+import { hrefFor } from "../../lib/route.ts";
 import { harnessService } from "../../lib/services.ts";
 import { harnessSummary } from "../../lib/setup.ts";
 import { copyText, jobStream, type LoginLink, signinPanel } from "../../lib/signin.ts";
@@ -76,11 +77,19 @@ function CopyButton({ text, label }: { text: string; label: string }) {
   );
 }
 
-/** A value to copy by hand: a device code or a command. */
-function CopyField({ text, label }: { text: string; label: string }) {
+/**
+ * A value to copy by hand: a device code or a command. A command wraps, so the owner can read
+ * all of what they will run, also at 390 px.
+ */
+function CopyField({ text, label, wrap = false }: { text: string; label: string; wrap?: boolean }) {
   return (
-    <div className="flex min-w-0 items-center gap-2">
-      <code className="block h-7 min-w-0 select-all truncate leading-[26px] rounded-[var(--control-radius)] border bg-background px-2.5 font-mono text-xs">
+    <div className={cn("flex min-w-0 gap-2", wrap ? "items-start" : "items-center")}>
+      <code
+        className={cn(
+          "block min-w-0 select-all rounded-[var(--control-radius)] border bg-background px-2.5 font-mono text-xs",
+          wrap ? "wrap-anywhere py-1 leading-[18px]" : "h-7 truncate leading-[26px]",
+        )}
+      >
         {text}
       </code>
       <CopyButton label={label} text={text} />
@@ -148,7 +157,7 @@ function SigninSteps({
             Run this in a terminal, then press Recheck.
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            <CopyField label="the command" text={manual} />
+            <CopyField label="the command" text={manual} wrap />
             <RecheckButton checking={checking} onRecheck={onRecheck} />
           </div>
         </>
@@ -182,10 +191,13 @@ function SigninPrompt({
   );
 }
 
-function JobOutput({ job }: { job: Job }) {
+/** `bare` drops the box, for output inside a provider row that already has its own border. */
+function JobOutput({ job, bare = false }: { job: Job; bare?: boolean }) {
   return (
-    <div className="rounded-lg border bg-muted/50">
-      <p className="flex items-center gap-2 border-b px-3 py-1.5 text-xs">
+    <div className={cn(!bare && "rounded-lg border bg-muted/50")}>
+      <p
+        className={cn("flex items-center gap-2 text-xs", bare ? "py-0.5" : "border-b px-3 py-1.5")}
+      >
         {job.state === "running" && <Spinner className="size-3.5" />}
         <span className="font-mono">{job.command}</span>
         <span className="ms-auto text-muted-foreground" role="status">
@@ -197,7 +209,12 @@ function JobOutput({ job }: { job: Job }) {
         </span>
       </p>
       {job.lines.length > 0 && (
-        <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap px-3 py-2 font-mono text-2xs leading-4 text-muted-foreground">
+        <pre
+          className={cn(
+            "max-h-40 overflow-y-auto whitespace-pre-wrap font-mono text-2xs leading-4 text-muted-foreground",
+            bare ? "py-0.5" : "px-3 py-2",
+          )}
+        >
           {job.lines.join("\n")}
         </pre>
       )}
@@ -285,6 +302,9 @@ function BinaryPath({ card, onSaved }: { card: HarnessCard; onSaved: () => void 
   );
 }
 
+/** Ends a daemon reason with one period, so the next sentence does not run into it. */
+const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`);
+
 /**
  * OpenCode's providers: one row per provider an opencode agent uses, plus each signed-in one.
  * Sign in runs the provider's own login as a daemon child (D-031). No field takes a key.
@@ -317,19 +337,26 @@ function OpencodeProviderList({
         </div>
       )}
       {list.kind === "error" && (
-        <div className="flex flex-wrap items-center gap-2 text-xs" role="alert">
-          <span className="text-destructive-foreground">
-            Could not read the providers. {list.text}
-          </span>
-          <RecheckButton checking={checking} onRecheck={onRecheck} />
-        </div>
-      )}
-      {list.kind === "empty" && (
-        <p className="text-pretty text-muted-foreground text-xs">
-          {list.note ?? "No provider yet."} Give an opencode agent a model such as{" "}
-          <code className="font-mono">deepseek/deepseek-chat</code> in Team.
+        <p className="text-destructive-foreground text-xs" role="alert">
+          Could not read the providers. {list.text} Press Recheck to try again.
         </p>
       )}
+      {list.kind === "empty" &&
+        (!found ? (
+          <p className="text-muted-foreground text-xs">Install OpenCode first.</p>
+        ) : (
+          <p className="text-pretty text-muted-foreground text-xs">
+            {sentence(list.note ?? "No provider yet")} Give an opencode agent a model such as{" "}
+            <code className="font-mono">deepseek/deepseek-chat</code> in{" "}
+            <a
+              className="rounded-sm text-foreground underline underline-offset-4 outline-ring focus-visible:outline-2"
+              href={hrefFor({ view: "settings", page: "team" })}
+            >
+              Team
+            </a>
+            .
+          </p>
+        ))}
       {list.kind === "ready" && (
         <>
           <ul className="divide-y rounded-lg border">
@@ -344,9 +371,7 @@ function OpencodeProviderList({
                       {row.required ? "Used by an agent" : "Not used"}
                     </span>
                     <span className="ms-auto flex items-center gap-2">
-                      <StateBadge state={row.tone === "fail" && row.busy ? "warn" : row.tone}>
-                        {row.status}
-                      </StateBadge>
+                      <StateBadge state={row.tone}>{row.status}</StateBadge>
                       {row.canSignIn && (
                         <Button
                           aria-label={`Sign in to ${row.id}`}
@@ -364,7 +389,7 @@ function OpencodeProviderList({
                   </div>
                   {job && !p.signedIn && (
                     <>
-                      <JobOutput job={job} />
+                      <JobOutput bare job={job} />
                       <SigninSteps
                         checking={checking}
                         code={row.code}
@@ -489,7 +514,7 @@ function HarnessCardView({
               Run the official installer in a terminal, then press Recheck.
             </p>
             <div className="flex flex-wrap items-center gap-2">
-              <CopyField label="the installer command" text={card.commands.install} />
+              <CopyField label="the installer command" text={card.commands.install} wrap />
               <RecheckButton checking={checking} onRecheck={onRecheck} />
             </div>
           </div>
@@ -497,46 +522,49 @@ function HarnessCardView({
         {children}
         <BinaryPath card={card} onSaved={onRecheck} />
       </CardContent>
-      <CardFooter className="flex-wrap">
-        {(["install", "update", "signin"] as const).map((action) => {
-          // Each button shows only when it can help: Sign in only while signed out.
-          const show =
-            action === "install"
-              ? !s.found && !perProvider
-              : action === "signin"
-                ? s.found && !s.signedIn && !perProvider
-                : s.found;
-          if (!show) return null;
-          const Icon =
-            action === "install" ? DownloadIcon : action === "update" ? RefreshCwIcon : LogInIcon;
-          return (
-            <Button
-              disabled={busy}
-              key={action}
-              onClick={() => onAction(action)}
-              size="sm"
-              variant={action === primary && !busy ? "default" : "outline"}
-            >
-              {busy && job?.action === action ? <Spinner /> : <Icon aria-hidden="true" />}
-              {ACTION_TEXT[action]}
-            </Button>
-          );
-        })}
-        {perProvider ? (
-          s.found && (
+      {/* OpenCode with no CLI has no action here: the installer block above is its action. */}
+      {!(perProvider && !s.found) && (
+        <CardFooter className="flex-wrap">
+          {(["install", "update", "signin"] as const).map((action) => {
+            // Each button shows only when it can help: Sign in only while signed out.
+            const show =
+              action === "install"
+                ? !s.found && !perProvider
+                : action === "signin"
+                  ? s.found && !s.signedIn && !perProvider
+                  : s.found;
+            if (!show) return null;
+            const Icon =
+              action === "install" ? DownloadIcon : action === "update" ? RefreshCwIcon : LogInIcon;
+            return (
+              <Button
+                disabled={busy}
+                key={action}
+                onClick={() => onAction(action)}
+                size="sm"
+                variant={action === primary && !busy ? "default" : "outline"}
+              >
+                {busy && job?.action === action ? <Spinner /> : <Icon aria-hidden="true" />}
+                {ACTION_TEXT[action]}
+              </Button>
+            );
+          })}
+          {perProvider ? (
+            s.found && (
+              <span className="ms-auto text-muted-foreground text-xs">
+                Update runs <code className="font-mono">{card.commands.update}</code>
+              </span>
+            )
+          ) : (
             <span className="ms-auto text-muted-foreground text-xs">
-              Update runs <code className="font-mono">{card.commands.update}</code>
+              {s.found ? "Sign in runs " : "Runs "}
+              <code className="font-mono">
+                {s.found ? card.commands.signin : card.commands.install}
+              </code>
             </span>
-          )
-        ) : (
-          <span className="ms-auto text-muted-foreground text-xs">
-            {s.found ? "Sign in runs " : "Runs "}
-            <code className="font-mono">
-              {s.found ? card.commands.signin : card.commands.install}
-            </code>
-          </span>
-        )}
-      </CardFooter>
+          )}
+        </CardFooter>
+      )}
       {job && (
         <div className="grid gap-2 px-4 pb-3">
           <JobOutput job={job} />
