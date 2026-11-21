@@ -64,3 +64,34 @@ test("OPENCODE_PROVIDER takes plain lowercase ids of at most 64 characters", () 
     assert.ok(!OPENCODE_PROVIDER.test(bad), JSON.stringify(bad));
   }
 });
+
+test("validateTeam wants <provider>/<model> with an optional #variant for an opencode row", () => {
+  const row = (model?: string) => ({
+    name: "backend",
+    role: "backend",
+    harness: "opencode",
+    ...(model === undefined ? {} : { model }),
+  });
+  for (const model of [
+    undefined,
+    "",
+    "opencode-go/deepseek-v4.1-flash",
+    "opencode-go/deepseek-v4.1-flash#high",
+    "opencode-go/glm-5.3-flash",
+    "openrouter/deepseek/deepseek-chat",
+  ]) {
+    assert.deepEqual(validateTeam([coordinator, row(model)]), {}, String(model));
+  }
+  for (const model of ["deepseek", "/model", "provider/", "a/b#", "a/b#hi gh", "a b/c"]) {
+    assert.deepEqual(
+      validateTeam([coordinator, row(model)]),
+      {
+        "1.model":
+          "Use <provider>/<model>, with an optional #variant, such as opencode-go/glm-5.3-flash#high.",
+      },
+      model,
+    );
+  }
+  // Other harnesses keep their own model names.
+  assert.deepEqual(validateTeam([coordinator, { ...ok, model: "opus" }]), {});
+});

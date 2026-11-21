@@ -1,0 +1,2 @@
+{"type":"step_start","timestamp":1795246091400,"sessionID":"ses_fake1","part":{"id":"prt_s1","sessionID":"ses_fake1","messageID":"msg_1","type":"step-start","snapshot":"0000000000000000000000000000000000000000"}}
+{"type":"error","timestamp":1795246091500,"sessionID":"ses_fake1","error":{"type":"provider.quota","message":"Monthly usage limit reached for your plan. It resets at 2026-11-22T01:15:00Z."}}

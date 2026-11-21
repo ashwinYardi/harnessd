@@ -76,7 +76,8 @@ Settings, rules, skills, agents and MCP servers merge in order: defaults, global
 |---|---|---|
 | Claude Code | **Shipped** | Runs every agent by default. `init` installs it, `doctor` checks it, `sync` writes its files. |
 | Codex | **Detected** | `init` installs it. Settings shows its CLI and sign-in, and `doctor` checks it once an agent uses it. `sync` writes its files. Running agents on it is planned. |
-| Antigravity, OpenCode, Cursor, Grok | Planned | Accepted as names in config. No adapter yet. |
+| OpenCode | **Supported** | Runs agents on DeepSeek, GLM and other open models with `harness = "opencode"` and `model = "<provider>/<model>[#variant]"` (D-036). Doctor checks and Settings sign-in are planned. |
+| Antigravity, Cursor, Grok | Planned | Accepted as names in config. No adapter yet. |
 
 ## Install
 You need macOS (or Linux, without the background service), Node 24 or newer, the `gh` CLI signed in to GitHub, and a Linear API key.
@@ -183,7 +184,7 @@ Every key, the merge rules and the agent files: [docs/CONFIG.md](docs/CONFIG.md)
 - **Junior and senior lanes.** Each task gets a cheap or strong model by size and risk, and moves up a lane after a QA failure.
 - **Any task tool.** GitHub Issues next, then others through one interface.
 - **Local markdown tasks.** No task tool needed: one file per task in `.harnessd/tasks/`.
-- **More harnesses.** Codex runs agents, then Antigravity, OpenCode, Cursor and Grok.
+- **More harnesses.** Codex and OpenCode run agents, then Antigravity, Cursor and Grok.
 - **A team canvas** with personas and avatars, and sandboxed or cloud runtimes.
 
 ## Docs

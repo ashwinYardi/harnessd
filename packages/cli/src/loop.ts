@@ -12,6 +12,7 @@ import {
   createGhCli,
   createGitWorktrees,
   createLogBuffer,
+  createOpenCodeAdapter,
   createPauseController,
   createSecretStore,
   createUiApi,
@@ -229,7 +230,8 @@ async function findBlocker(
 /**
  * The harness adapters the loop dispatches to, by `agents.<name>.harness`.
  * The path set in Settings → Harnesses wins over HARNESSD_<HARNESS>_BIN and PATH.
- * `--permission-mode` is a Claude Code flag; Codex runs use their own sandbox flags (D-032).
+ * `--permission-mode` is a Claude Code flag; Codex runs use their own sandbox flags (D-032),
+ * and OpenCode runs use --auto (D-036).
  */
 export function harnessAdapters(
   config: MergedConfig,
@@ -237,12 +239,14 @@ export function harnessAdapters(
 ): Partial<Record<HarnessId, HarnessAdapter>> {
   const claudeBin = config.harnesses["claude-code"]?.bin;
   const codexBin = config.harnesses.codex?.bin;
+  const openCodeBin = config.harnesses.opencode?.bin;
   return {
     "claude-code": createClaudeCodeAdapter({
       permissionMode,
       ...(claudeBin ? { bin: claudeBin } : {}),
     }),
     codex: createCodexAdapter(codexBin ? { bin: codexBin } : {}),
+    opencode: createOpenCodeAdapter(openCodeBin ? { bin: openCodeBin } : {}),
   };
 }
 
