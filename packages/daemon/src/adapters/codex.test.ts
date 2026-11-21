@@ -37,11 +37,10 @@ else process.exitCode = Number(env.FAKE_CODEX_EXIT ?? "0");
 );
 chmodSync(FAKE, 0o755);
 
-// The worktree is a git repo, so the run can reach the git common dir.
+// The worktree is a git repo, as in a real run.
 const repo = join(scratch, "repo");
 mkdirSync(repo);
 execFileSync("git", ["init", "-q"], { cwd: repo });
-const commonDir = join(repo, ".git");
 
 function task(overrides: Partial<Task> = {}): Task {
   return { id: "MET-75", title: "Codex", prompt: "Say hi", budgetMs: 10_000, ...overrides };
@@ -75,28 +74,24 @@ function readRecord(path: string): { argv: string[]; cwd: string } {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-const BASE = (dir: string) => [
+const BASE = [
   "exec",
   "--json",
   "--ignore-user-config",
   "--ignore-rules",
   "--dangerously-bypass-hook-trust",
   "--sandbox",
-  "workspace-write",
-  "--add-dir",
-  dir,
+  "danger-full-access",
   "-c",
   'approval_policy="never"',
-  "-c",
-  "sandbox_workspace_write.network_access=true",
 ];
 
-test("codexArgs runs exec --json in workspace-write with no approvals", () => {
-  assert.deepEqual(codexArgs(task(), {}, repo), [...BASE(commonDir), "--", "Say hi"]);
+test("codexArgs runs exec --json with full access and no approvals", () => {
+  assert.deepEqual(codexArgs(task(), {}, repo), [...BASE, "--", "Say hi"]);
 });
 
 test("codexArgs passes --model from the task, then the options, and omits it when unset", () => {
-  const tail = (argv: string[]) => argv.slice(BASE(commonDir).length);
+  const tail = (argv: string[]) => argv.slice(BASE.length);
   assert.deepEqual(tail(codexArgs(task({ model: "gpt-5.5" }), { model: "o3" }, repo)), [
     "--model",
     "gpt-5.5",
@@ -112,36 +107,16 @@ test("codexArgs passes --model from the task, then the options, and omits it whe
   assert.ok(!codexArgs(task(), {}, repo).includes("--model"));
 });
 
-test("codexArgs never widens the sandbox or persists trust", () => {
+test("codexArgs never persists trust or uses the bypass-all flag", () => {
   const argv = codexArgs(task({ model: "m" }), {}, repo);
-  for (const flag of ["--trust", "--dangerously-bypass-approvals-and-sandbox"]) {
+  for (const flag of ["--trust", "--dangerously-bypass-approvals-and-sandbox", "--add-dir"]) {
     assert.ok(!argv.includes(flag), flag);
   }
-  assert.ok(!argv.some((a) => a.includes("danger-full-access")));
 });
 
 test("codexArgs keeps a prompt that starts with a dash after --", () => {
   const argv = codexArgs(task({ prompt: "--help me" }), {}, repo);
   assert.deepEqual(argv.slice(-2), ["--", "--help me"]);
-});
-
-test("codexArgs from a linked worktree adds the main repo's git dir", () => {
-  execFileSync(
-    "git",
-    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"],
-    {
-      cwd: repo,
-    },
-  );
-  const linked = join(scratch, "linked");
-  execFileSync("git", ["worktree", "add", "-q", "-b", "linked", linked], { cwd: repo });
-  const argv = codexArgs(task(), {}, linked);
-  assert.equal(argv[argv.indexOf("--add-dir") + 1], commonDir);
-});
-
-test("codexArgs leaves out --add-dir outside a git repo", () => {
-  const plain = mkdtempSync(join(scratch, "plain-"));
-  assert.ok(!codexArgs(task(), {}, plain).includes("--add-dir"));
 });
 
 test("codexArgs passes the synced .codex/config.toml MCP servers as -c overrides", () => {

@@ -1,7 +1,6 @@
 // The Codex CLI adapter: `codex exec --json` in the worktree (D-002, D-032).
-import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   type AdapterEvent,
   emptyTokenUsage,
@@ -32,9 +31,9 @@ export interface CodexOptions {
 }
 
 /**
- * Builds the argv for `codex exec --json` (D-032). `cwd` is the worktree: it gives the git
- * common dir for --add-dir, and the synced `.codex/config.toml` whose MCP servers go in as -c
- * overrides, because codex ignores project config in an untrusted directory.
+ * Builds the argv for `codex exec --json` (D-032). `cwd` is the worktree: it holds the synced
+ * `.codex/config.toml`, whose MCP servers go in as -c overrides, because codex ignores project
+ * config in an untrusted directory.
  */
 export function codexArgs(task: Task, options: CodexOptions = {}, cwd?: string): string[] {
   const args = [
@@ -45,13 +44,14 @@ export function codexArgs(task: Task, options: CodexOptions = {}, cwd?: string):
     "--ignore-rules",
     // The synced .codex/hooks.json comes from the skill pack, so the run need not trust it.
     "--dangerously-bypass-hook-trust",
+    // D-032 (amended): no OS sandbox, as for Claude runs. The seatbelt sandbox hides the
+    // keychain (so gh has no login) and keeps .git read-only (so git commit fails).
     "--sandbox",
-    "workspace-write",
+    "danger-full-access",
+    // Nobody is there to answer a prompt.
+    "-c",
+    'approval_policy="never"',
   ];
-  const common = cwd === undefined ? undefined : gitCommonDir(cwd);
-  // A linked worktree commits into the main repo's git dir, outside the sandbox root.
-  if (common !== undefined) args.push("--add-dir", common);
-  args.push("-c", 'approval_policy="never"', "-c", "sandbox_workspace_write.network_access=true");
   if (cwd !== undefined) args.push(...mcpOverrides(cwd));
   const model = task.model ?? options.model;
   if (model) args.push("--model", model);
@@ -73,19 +73,6 @@ export function createCodexAdapter(options: CodexOptions = {}): HarnessAdapter {
         ...(options.env !== undefined ? { env: options.env } : {}),
       }),
   };
-}
-
-function gitCommonDir(cwd: string): string | undefined {
-  try {
-    const out = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    return out === "" ? undefined : resolve(cwd, out);
-  } catch {
-    return undefined;
-  }
 }
 
 /** One `-c mcp_servers.<name>={...}` per server in the worktree's `.codex/config.toml`. */

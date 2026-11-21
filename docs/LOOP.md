@@ -96,7 +96,7 @@ A worktree is cut from `origin/main`, so it holds only what the repo commits. ha
   - user MCP servers.
 
   So a key goes in through `claude login` or an environment variable.
-- **Codex runs.** An agent with `harness = "codex"` runs `codex exec --json` with `--ignore-user-config --ignore-rules`, in the `workspace-write` sandbox with no approval prompts (docs/decisions/D-032-codex-adapter.md). It sees these files from the same sync:
+- **Codex runs.** An agent with `harness = "codex"` runs `codex exec --json` with `--ignore-user-config --ignore-rules`, with full access and no approval prompts, as Claude runs (docs/decisions/D-032-codex-adapter.md). It sees these files from the same sync:
   - `AGENTS.md`: the instructions and the merged rules;
   - `.agents/skills/`: the skill pack;
   - `.codex/config.toml`: the MCP servers, with `harnessd-memory`;
