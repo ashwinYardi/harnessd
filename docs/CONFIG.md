@@ -105,7 +105,7 @@ A value and a reference are never both set: saving one removes the other.
 - A value in `[secrets]` that is not a reference is an error. The error never repeats the value.
 - `webhook_url` under `[slack]` is still an unknown-key error.
 
-**Fallback harness.** `fallback_harness` (a harness id) and `fallback_model` (a string) are optional. Default: no fallback (D-034).
+**Fallback harness.** `fallback_harness` (a harness id) and `fallback_model` (a string) are optional. Default: no fallback (D-035).
 - While a usage limit holds the agent's `harness` (docs/LOOP.md "Usage limits"), its runs use the fallback harness and model.
 - The loop uses the fallback only when it has an adapter and no hold of its own. Otherwise the run waits in Ready.
 - Without `fallback_model`, the fallback harness uses its own default model.
