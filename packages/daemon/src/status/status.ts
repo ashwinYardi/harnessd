@@ -58,6 +58,12 @@ export interface KnownBadVersion {
 /** Harness releases harnessd is known not to work with. None is known yet. */
 export const KNOWN_BAD_VERSIONS: readonly KnownBadVersion[] = [];
 
+/**
+ * The oldest Codex CLI harnessd is tested with. It has `exec --json`, `--ignore-user-config`,
+ * `--ignore-rules` and `--dangerously-bypass-hook-trust`. Below it, harness.codex.version warns.
+ */
+export const CODEX_MIN_VERSION = "0.171.0";
+
 export const STATUS_TIMEOUT_MS = 5_000;
 
 /** The Linear states the loop moves issues through. */
@@ -296,6 +302,8 @@ interface HarnessSpec {
   status: string[];
   signedIn: (stdout: string, code: number) => { state: "ok" | "fail" | "warn"; detail: string };
   login: string;
+  /** The oldest tested version. Below it, or when unreadable, the version check warns. */
+  minVersion?: string;
 }
 
 const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
@@ -328,6 +336,7 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
         ? { state: "ok", detail: "signed in" }
         : { state: "fail", detail: "not signed in" },
     login: "Run: codex login",
+    minVersion: CODEX_MIN_VERSION,
   },
 };
 
@@ -391,15 +400,32 @@ function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
               signed.detail,
               signed.state === "warn" ? `Update it: npm i -g ${spec.pkg}@latest` : spec.login,
             );
-      return [cli, auth, versionCheck(ctx, harness, `${p}.version`, version, spec.pkg)];
+      return [cli, auth, versionCheck(ctx, harness, `${p}.version`, version, spec)];
     },
   };
 }
 
-function versionCheck(ctx: Ctx, harness: HarnessId, id: string, line: string, pkg: string): Check {
+function versionCheck(
+  ctx: Ctx,
+  harness: HarnessId,
+  id: string,
+  line: string,
+  spec: HarnessSpec,
+): Check {
+  const pkg = spec.pkg;
+  const min = spec.minVersion;
+  const update = `Run npm install -g ${pkg}@latest.`;
   const v = parseSemver(line);
-  if (v === undefined) return bad(id, "warn", "version unknown", `Reinstall it: npm i -g ${pkg}`);
+  if (v === undefined) {
+    return min === undefined
+      ? bad(id, "warn", "version unknown", `Reinstall it: npm i -g ${pkg}`)
+      : bad(id, "warn", `version unknown; the minimum is ${min}`, update);
+  }
   const text = v.join(".");
+  const floor = min === undefined ? undefined : parseSemver(min);
+  if (floor !== undefined && compareSemver(v, floor) < 0) {
+    return bad(id, "warn", `${text} is below the minimum ${min}`, update);
+  }
   for (const known of ctx.o.knownBadVersions ?? KNOWN_BAD_VERSIONS) {
     if (known.harness !== harness) continue;
     const below = known.below === undefined ? undefined : parseSemver(known.below);

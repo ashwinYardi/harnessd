@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+import { loadConfig } from "../config/load.ts";
+import { resolveAgentConfig } from "../config/merge.ts";
 import { startDaemon } from "../server/daemon.ts";
 import type { Check } from "../status/status.ts";
 import { type SetupOptions, setupRoutes } from "./routes.ts";
@@ -298,6 +300,35 @@ harness = "claude-code"
 model = "opus"
 `,
     );
+  } finally {
+    await s.close();
+  }
+});
+
+test("a saved backend row with harness codex passes the config validator and runs sync", async () => {
+  const s = await serve();
+  try {
+    const team = [
+      { name: "coordinator", role: "coordinator", harness: "claude-code" },
+      { name: "backend", role: "backend", harness: "codex" },
+      { name: "frontend", role: "frontend", harness: "claude-code" },
+      { name: "qa", role: "qa", harness: "claude-code" },
+      { name: "docs", role: "frontend", harness: "claude-code" },
+    ];
+    const res = await s.post("/api/team", { agents: team });
+    assert.equal(res.status, 200);
+    assert.deepEqual(s.syncs, [s.repoDir]);
+    const file = await readFile(join(s.repoDir, ".harnessd", "config.toml"), "utf8");
+    assert.match(file, /\[agents\.backend\]\nrole = "backend"\nharness = "codex"\n/);
+    const merged = await loadConfig({
+      globalDir: s.globalDir,
+      workspaceDir: join(s.repoDir, ".harnessd"),
+    });
+    assert.equal(resolveAgentConfig(merged, "backend").harness, "codex");
+    const listed = (await s.get("/api/team")) as {
+      agents: Array<{ name: string; harness: string }>;
+    };
+    assert.equal(listed.agents.find((a) => a.name === "backend")?.harness, "codex");
   } finally {
     await s.close();
   }
