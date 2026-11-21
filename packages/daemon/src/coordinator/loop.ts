@@ -370,9 +370,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     if (s === undefined) return;
     const prev = s.limits[harness];
     if (result.status === "limited") {
-      const next = afterLimited(prev, result.resetAt, clock.now());
+      const now = clock.now();
+      const next = afterLimited(prev, result.resetAt, now);
       s.limits[harness] = next;
-      if (!isHeld(prev, clock.now()) || prev?.until !== next.until) {
+      // Once per hold; again only when a new reset time moves its end.
+      if (!isHeld(prev, now) || prev?.until !== next.until) {
         const fromReset =
           result.resetAt !== undefined && Date.parse(result.resetAt) === Date.parse(next.until);
         log(limitHoldLine(harness, next.until, !fromReset));

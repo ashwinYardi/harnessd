@@ -13,7 +13,7 @@ const HARNESS_NAMES: Record<HarnessId, string> = {
 
 /** The display name of a harness, such as "Claude Code". */
 export function harnessName(id: HarnessId): string {
-  return HARNESS_NAMES[id] ?? id;
+  return HARNESS_NAMES[id];
 }
 
 /** HH:MM in the local time of the process that formats it. */
