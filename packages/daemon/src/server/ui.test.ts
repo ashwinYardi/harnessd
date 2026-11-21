@@ -30,7 +30,7 @@ const issue = (key: string, state: string, extra: Partial<BoardIssue> = {}): Boa
   ...extra,
 });
 
-const idle: LoopSnapshot = { lastPollAt: null, runs: [], blocked: [] };
+const idle: LoopSnapshot = { lastPollAt: null, runs: [], blocked: [], limits: [] };
 
 const running: LoopSnapshot = {
   lastPollAt: "2026-11-20T10:00:00.000Z",
@@ -56,6 +56,7 @@ const running: LoopSnapshot = {
       reason: "touches protected paths",
     },
   ],
+  limits: [],
 };
 
 function fakePause() {
@@ -108,6 +109,41 @@ test("agentsView lists every agent in role order with its runs", () => {
   });
   assert.equal(view.lastPollAt, "2026-11-20T10:00:00.000Z");
   assert.equal(view.maxConcurrent, 3);
+});
+
+test("agentsView carries the harness holds in force (MET-82)", () => {
+  assert.deepEqual(agentsView(mergeLayers([]), idle).limits, []);
+  const limits = [
+    { harness: "claude-code" as const, until: "2026-11-20T12:00:00.000Z", backoff: false },
+  ];
+  assert.deepEqual(agentsView(mergeLayers([]), { ...idle, limits }).limits, limits);
+});
+
+test("a hold that starts goes out as an agents event on the open stream (MET-82)", async () => {
+  let snapshot = idle;
+  const { daemon, ui } = await api(() => snapshot);
+  const held = {
+    harness: "claude-code" as const,
+    until: "2026-11-20T12:00:00.000Z",
+    backoff: true,
+  };
+  try {
+    const res = await fetch(`${daemon.url}/api/events`);
+    const seen = readEvents(res, (events) =>
+      events.some((e) => e.event === "agents" && (e.data as AgentsSnapshot).limits?.length === 1),
+    );
+    setTimeout(() => {
+      snapshot = { ...idle, limits: [held] };
+    }, 30);
+    const agents = (await seen)
+      .filter((e) => e.event === "agents")
+      .map((e) => e.data as AgentsSnapshot);
+    assert.deepEqual(agents[0]?.limits, [], "no hold at first");
+    assert.deepEqual(agents.at(-1)?.limits, [held]);
+  } finally {
+    ui.close();
+    await daemon.close();
+  }
 });
 
 test("the board source caches Linear, and keeps the last good read on an error", async () => {

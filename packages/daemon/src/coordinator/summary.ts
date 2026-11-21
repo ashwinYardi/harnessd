@@ -1,10 +1,13 @@
 // The daily summary (D-015, D-021): one Slack message a day at `slack.summary_time` in
-// `slack.time_zone`. It lists the merges and blocks noticed since the last summary and
-// the work in progress now. State lives in `<repo>/.harnessd/state/summary.json`, so a
-// summary missed while the daemon was off goes out once at the next start.
+// `slack.time_zone`. It lists the merges and blocks noticed since the last summary, the
+// time each harness was held by a usage limit, and the work in progress now. State lives
+// in `<repo>/.harnessd/state/summary.json`, so a summary missed while the daemon was off
+// goes out once at the next start.
 import { readFile, rename } from "node:fs/promises";
 import { join } from "node:path";
+import { type HarnessId, harnessName, isHarnessId } from "@harnessd/shared";
 import { writeJsonAtomic } from "../control/files.ts";
+import type { HoldEvent } from "./limits.ts";
 import {
   type Notice,
   type NoticeIssue,
@@ -20,6 +23,11 @@ export interface SummaryState {
   lastSentAt?: string;
   /** Notices since `lastSentAt`. */
   notices: { at: string; notice: Notice }[];
+  /**
+   * Harness holds that started or ended since `lastSentAt` (MET-82). A hold still open
+   * at a summary is carried over as a start at the summary time.
+   */
+  holdEvents?: HoldEvent[];
 }
 
 export interface SummaryStore {
@@ -46,6 +54,8 @@ export interface DailySummary {
   wrap(inner: Notifier): Notifier;
   /** Sends the summary when a summary time has passed since the last one. True if sent. */
   check(): Promise<boolean>;
+  /** Records a hold's start or end, for the limited time. Never throws. */
+  hold(event: HoldEvent): Promise<void>;
 }
 
 function zonedParts(date: Date, timeZone: string): Record<string, number> {
@@ -101,12 +111,54 @@ function localLabel(iso: string, timeZone: string): string {
   return `${p.day} ${MONTHS[(p.month ?? 1) - 1]} ${pad(p.hour)}:${pad(p.minute)}`;
 }
 
+/**
+ * Time held per harness between `since` and `until`, in ms, and the harnesses still held
+ * at `until`. Events are taken in the order they were recorded, not by time: an end that
+ * comes after a carried-over start closes it, even when the hold expired a little earlier.
+ */
+export function limitedTime(
+  events: readonly HoldEvent[],
+  since: string,
+  until: string,
+): { held: Map<HarnessId, number>; open: HarnessId[] } {
+  const from = Date.parse(since);
+  const to = Date.parse(until);
+  const open = new Map<HarnessId, number>();
+  const held = new Map<HarnessId, number>();
+  const add = (h: HarnessId, start: number, end: number) =>
+    held.set(h, (held.get(h) ?? 0) + Math.max(0, Math.min(end, to) - Math.max(start, from)));
+  for (const e of events) {
+    const at = Date.parse(e.at);
+    if (e.kind === "start") {
+      if (!open.has(e.harness)) open.set(e.harness, at);
+      continue;
+    }
+    // An end with no start here: count from the hold's own start. add() clips it to `since`.
+    const start = open.get(e.harness) ?? (e.since === undefined ? from : Date.parse(e.since));
+    add(e.harness, Number.isNaN(start) ? from : start, at);
+    open.delete(e.harness);
+  }
+  for (const [h, start] of open) add(h, start, to);
+  for (const [h, ms] of held) if (ms <= 0) held.delete(h);
+  return { held, open: [...open.keys()].sort() };
+}
+
+/** "2h 10m", "45m" or "3h". A hold under a minute shows as "1m". */
+export function formatDuration(ms: number): string {
+  const minutes = Math.max(1, Math.round(ms / 60_000));
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  if (h === 0) return `${m}m`;
+  return m === 0 ? `${h}h` : `${h}h ${m}m`;
+}
+
 /** The summary as Slack mrkdwn. */
 export function formatSummary(
   since: string | undefined,
   timeZone: string,
   notices: Notice[],
   inProgress: NoticeIssue[],
+  limited: ReadonlyMap<HarnessId, number> = new Map(),
 ): string {
   const head = `*harnessd daily summary*${since ? ` since ${localLabel(since, timeZone)}` : ""} (${slackEscape(timeZone)})`;
   const section = (title: string, items: Notice[]): string[] =>
@@ -127,6 +179,9 @@ export function formatSummary(
       "Blocked",
       notices.filter((n) => n.kind !== "merged"),
     ),
+    ...[...limited]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([h, ms]) => `${harnessName(h)} limited ${formatDuration(ms)}`),
     running,
   ].join("\n");
 }
@@ -170,6 +225,12 @@ export function createDailySummary(options: DailySummaryOptions): DailySummary {
     await save(s);
   }
 
+  async function recordHold(event: HoldEvent): Promise<void> {
+    const s = await current();
+    s.holdEvents = [...(s.holdEvents ?? []), event];
+    await save(s);
+  }
+
   async function check(): Promise<boolean> {
     const s = await current();
     const at = now();
@@ -180,15 +241,19 @@ export function createDailySummary(options: DailySummaryOptions): DailySummary {
     }
     const slot = lastSummarySlot(at, timeZone, time);
     if (slot.getTime() <= Date.parse(s.lastSentAt)) return false;
+    const sentAt = at.toISOString();
+    const limited = limitedTime(s.holdEvents ?? [], s.lastSentAt, sentAt);
     const text = formatSummary(
       s.lastSentAt,
       timeZone,
       s.notices.map((n) => n.notice),
       options.inProgress(),
+      limited.held,
     );
     // Recorded before it is sent: a crash loses one summary rather than repeating it.
-    s.lastSentAt = at.toISOString();
+    s.lastSentAt = sentAt;
     s.notices = [];
+    s.holdEvents = limited.open.map((harness) => ({ harness, kind: "start", at: sentAt }));
     await save(s);
     post(text);
     return true;
@@ -206,11 +271,29 @@ export function createDailySummary(options: DailySummaryOptions): DailySummary {
       };
     },
     check: () => serial(check),
+    hold: (event) =>
+      serial(() => recordHold(event)).catch((error) =>
+        log(`summary: could not record a hold: ${(error as Error).message}`),
+      ),
   };
 }
 
 export function summaryStatePath(repoDir: string): string {
   return join(repoDir, ".harnessd", "state", "summary.json");
+}
+
+function isHoldEvent(value: unknown): value is HoldEvent {
+  const v = value as Partial<HoldEvent> | null;
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    typeof v.harness === "string" &&
+    isHarnessId(v.harness) &&
+    (v.kind === "start" || v.kind === "end") &&
+    typeof v.at === "string" &&
+    !Number.isNaN(Date.parse(v.at)) &&
+    (v.since === undefined || (typeof v.since === "string" && !Number.isNaN(Date.parse(v.since))))
+  );
 }
 
 function isNotice(value: unknown): value is { at: string; notice: Notice } {
@@ -247,6 +330,7 @@ export function createFileSummaryStore(repoDir: string): SummaryStore {
           notices: Array.isArray(raw.notices) ? raw.notices.filter(isNotice) : [],
         };
         if (typeof raw.lastSentAt === "string") out.lastSentAt = raw.lastSentAt;
+        if (Array.isArray(raw.holdEvents)) out.holdEvents = raw.holdEvents.filter(isHoldEvent);
         return out;
       } catch {
         await rename(file, `${file}.corrupt-${Date.now()}`);

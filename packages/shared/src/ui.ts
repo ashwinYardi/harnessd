@@ -1,6 +1,7 @@
 // Read models the daemon serves to the UI (MET-18). See docs/API.md "UI routes".
 import type { AgentRole } from "./config.ts";
 import type { HarnessId } from "./index.ts";
+import type { HarnessLimit } from "./limits.ts";
 import type { Priority, Size } from "./linear.ts";
 
 /** One issue on the board. Linear is the source; the loop adds what it knows. */
@@ -62,6 +63,8 @@ export interface AgentsSnapshot {
   /** ISO time of the loop's last poll of Linear; null before the first. */
   lastPollAt: string | null;
   maxConcurrent: number;
+  /** Harness holds in force now (MET-82). An older daemon sends none. */
+  limits?: HarnessLimit[];
 }
 
 export type LogLevel = "info" | "warn";
@@ -96,4 +99,15 @@ export interface SelfUpdateView {
   state: SelfUpdateState;
   /** Why it is blocked or failed. */
   error?: string;
+}
+
+/** GET /api/loop and POST /api/start (D-026, MET-82). */
+export interface LoopView {
+  state: "setup" | "running";
+  /** Check ids that block the start; empty once the loop runs. */
+  blocking: string[];
+  /** Harness holds in force, when the loop runs. An expired hold is left out. */
+  limits?: HarnessLimit[];
+  /** The last self-update, once there was one (GET /api/loop only, MET-63). */
+  selfUpdate?: SelfUpdateView;
 }
