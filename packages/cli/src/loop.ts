@@ -33,6 +33,7 @@ import {
   SecretError,
   type SecretStore,
   type SelfUpdateRunner,
+  type SelfUpdater,
   type SetupRunner,
   type SlackFetch,
   secretRoutes,
@@ -113,6 +114,11 @@ export interface LoopIO {
   checks?: RunChecks;
   /** Runs the fixed setup commands (install, update, sign in). Default: the real machine. */
   setupRunner?: SetupRunner;
+  /**
+   * Rebuilds and restarts harnessd after a merge into its own repo (MET-63). Used unless
+   * `[daemon] self_update = false`. Default: none, so the loop never updates itself.
+   */
+  selfUpdater?: SelfUpdater;
   /** URL of the CLI entry point. */
   cliUrl?: string;
   /** Runs the startup self-update checks. Default: the real machine. */
@@ -276,6 +282,14 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
     team,
     intervalMs: parsed.intervalMs,
     paused: async () => (await pauseStore.read()).paused,
+    ...(io.selfUpdater && config.daemon.self_update
+      ? {
+          selfUpdate: {
+            updater: io.selfUpdater,
+            pause: (reason: string) => pauseStore.pause(reason),
+          },
+        }
+      : {}),
     notifier: visibility.notifier,
     log,
     // The UI's live log shows each tool call (MET-18); stdout stays one line per step.
@@ -394,11 +408,13 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       method: "GET",
       path: "/api/loop",
       // Only reads: in setup it runs the checks again, so a saved key or a setup action
-      // shows at once (D-026). It never starts the loop.
-      handler: async () =>
-        active
-          ? { state: "running", blocking: [] }
-          : { state: "setup", blocking: (await currentBlocking()).blocking },
+      // shows at once (D-026). It never starts the loop. `selfUpdate` is the last
+      // self-update, once there was one (docs/API.md).
+      handler: async () => {
+        if (!active) return { state: "setup", blocking: (await currentBlocking()).blocking };
+        const { selfUpdate } = active.loop.snapshot();
+        return { state: "running", blocking: [], ...(selfUpdate ? { selfUpdate } : {}) };
+      },
     },
     {
       method: "POST",

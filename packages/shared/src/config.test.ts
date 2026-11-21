@@ -85,6 +85,10 @@ test("wrong types are rejected with their path", () => {
     { daemon: { port: "80" } },
     `${FILE}: daemon.port: expected a port from 0 to 65535, got "80"`,
   );
+  rejects(
+    { daemon: { self_update: "no" } },
+    `${FILE}: daemon.self_update: expected true or false, got "no"`,
+  );
   rejects({ slack: "#x" }, `${FILE}: slack: expected a table, got "#x"`);
   rejects({ qa: { test_command: "" } }, `${FILE}: qa.test_command: expected a non-empty string`);
   rejects({ qa: { setup_command: 1 } }, `${FILE}: qa.setup_command: expected a string, got 1`);

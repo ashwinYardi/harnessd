@@ -29,12 +29,15 @@ import type {
 } from "../github/client.ts";
 import type { CreateSubIssueInput, ListReadyOptions } from "../linear/client.ts";
 import { parseLinkedIssue, type RawIssue } from "../linear/parse.ts";
+import type { SelfUpdateResult, SelfUpdateTarget } from "../selfupdate/index.ts";
 import { createGitWorktrees, type TaskWorktrees, type Worktree } from "../worktrees/index.ts";
 import {
   type CoordinatorLoopOptions,
   createCoordinatorLoop,
   type LoopLinear,
+  type LoopSelfUpdate,
   RESUMED_RUN_NOTE,
+  systemClock,
 } from "./loop.ts";
 import { formatNotice } from "./notifier.ts";
 import { partMarker, readPartMarker } from "./split.ts";
@@ -1810,4 +1813,422 @@ test("a sync failure fails the run before the agent starts: one retry, then Need
   );
   assert.equal(part.state, "Needs input");
   assert.match(t.linear.comments.at(-1)?.body ?? "", /failed twice \(error: harnessd sync/);
+});
+
+// --- self-update (MET-63) -----------------------------------------------------
+
+const FROM = "aaaaaaa1111";
+const TO = "bbbbbbb2222";
+
+/** A fake updater: `target` is what the next check finds, `result` what an apply returns. */
+function fakeUpdater(result: SelfUpdateResult = { status: "applied" }, runningCommit = FROM) {
+  const u = {
+    target: undefined as SelfUpdateTarget | undefined,
+    result,
+    checks: 0,
+    applied: [] as SelfUpdateTarget[],
+    pauses: [] as string[],
+    paused: false,
+  };
+  const selfUpdate: LoopSelfUpdate = {
+    updater: {
+      runningCommit,
+      async checkForUpdate() {
+        u.checks++;
+        return u.target;
+      },
+      async applyUpdate(target) {
+        u.applied.push(target);
+        return u.result;
+      },
+    },
+    async pause(reason) {
+      u.paused = true;
+      u.pauses.push(reason);
+    },
+  };
+  return { u, extra: { selfUpdate, paused: () => u.paused } };
+}
+
+/** A clock the test moves; intervals are real. */
+function testClock(start = Date.UTC(2026, 10, 21, 9)) {
+  const clock = { at: start, ...systemClock, now: () => new Date(clock.at) };
+  return clock;
+}
+
+const selfPings = (t: ReturnType<typeof setup>) => t.pings.filter((p) => /self-update/.test(p));
+
+test("a merge with an update pending dispatches nothing until inFlight empties, then updates", async () => {
+  const f = fakeUpdater();
+  const t = setup({ extra: f.extra });
+  const { parent } = await approved(t);
+  assert.equal(f.u.checks, 1, "one check at start, no update then");
+  assert.deepEqual(f.u.applied, []);
+
+  // Another part runs while CI is still pending on PR #7.
+  const other = t.linear.add({
+    title: "Other",
+    description: `${partMarker("backend-2")}\n**Size**: S`,
+  });
+  t.gh.statuses[7] = { checks: [{ name: "CI / test", state: "pending", detail: "IN_PROGRESS" }] };
+  assert.deepEqual((await t.loop.tick()).dispatched, [other.key]);
+
+  // PR #7 merges; the default branch now has a newer harnessd.
+  delete t.gh.statuses[7];
+  f.u.target = { from: FROM, to: TO };
+  const third = t.linear.add({
+    title: "Third",
+    description: `${partMarker("backend-3")}\n**Size**: S`,
+  });
+  const ready = t.linear.add({ title: "New work", description: BODY("S") });
+  const tasks = t.adapter.tasks.length;
+  const merged = await t.loop.tick();
+  assert.equal(merged.merged.length, 1);
+  assert.deepEqual(merged.dispatched, []);
+  assert.equal(f.u.checks, 3, "the merge tick checked the default branch");
+  assert.equal(t.memory.state.selfUpdate?.state, "pending");
+  assert.deepEqual(t.memory.state.selfUpdate?.trigger, {
+    id: parent.id,
+    key: parent.key,
+    url: `https://linear.test/${parent.key}`,
+  });
+  assert.deepEqual(f.u.applied, [], "a run is still in flight");
+
+  // Still waiting: nothing is dispatched, grilled or split.
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  assert.equal(t.adapter.tasks.length, tasks, "no grill, plan or part run");
+  assert.equal(third.state, "Ready");
+  assert.equal(ready.state, "Ready");
+  assert.deepEqual(f.u.applied, []);
+
+  // The run finishes normally; the next tick is the safe point.
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+  assert.equal(other.state, "In Review");
+  const safe = await t.loop.tick();
+  assert.deepEqual(safe.dispatched, []);
+  assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }]);
+  assert.equal(t.memory.state.selfUpdate?.state, "applying");
+  assert.ok(t.logs.some((l) => l === "self-update: aaaaaaa -> bbbbbbb: built, restarting"));
+
+  // Until the restart lands, this process dispatches nothing.
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  assert.equal(f.u.applied.length, 1);
+});
+
+test("a default branch update outside the merge queue waits for the run to finish", async () => {
+  const f = fakeUpdater();
+  const t = setup({ extra: f.extra });
+  const part = t.linear.add({
+    title: "Work",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+
+  f.u.target = { from: FROM, to: TO };
+  const later = t.linear.add({
+    title: "Later",
+    description: `${partMarker("frontend")}\n**Size**: S`,
+  });
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  assert.equal(t.memory.state.selfUpdate?.state, "pending");
+  assert.equal(t.memory.state.selfUpdate?.trigger, undefined);
+  assert.equal(later.state, "Ready");
+  assert.deepEqual(f.u.applied, []);
+
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+  await t.loop.tick();
+  assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }]);
+  assert.equal(later.state, "Ready");
+});
+
+/** A QA approval of PR #9 already in loop.json, so a test can merge it at will. */
+function seededMerge(t: ReturnType<typeof setup>) {
+  const fx = qaFixture(t);
+  fx.qa.state = "In Review";
+  t.memory.state.merges.push({
+    qaId: fx.qa.id,
+    qaKey: fx.qa.key,
+    parentId: fx.parent.id,
+    parentKey: fx.parent.key,
+    parentUrl: `https://linear.test/${fx.parent.key}`,
+    approvedAt: "2026-11-21T08:00:00.000Z",
+    prs: [
+      {
+        partId: fx.backend.id,
+        partKey: fx.backend.key,
+        number: 9,
+        url: "https://github.test/o/r/pull/9",
+        sha: "sha9",
+      },
+    ],
+  });
+  t.gh.statuses[9] = { checks: [{ name: "CI / test", state: "pending", detail: "IN_PROGRESS" }] };
+  return fx;
+}
+
+test("a run over its size budget while an update waits is stopped, kept and run again after the restart", async () => {
+  const clock = testClock();
+  const f = fakeUpdater();
+  const t = setup({ extra: { ...f.extra, clock } });
+  const fx = seededMerge(t);
+  const slow = t.linear.add({
+    title: "Slow",
+    description: `${partMarker("backend-2")}\n**Size**: S`,
+  });
+  assert.deepEqual((await t.loop.tick()).dispatched, [slow.key]);
+
+  // A human merges PR #9 on GitHub; the default branch has a newer harnessd.
+  f.u.target = { from: FROM, to: TO };
+  t.gh.statuses[9] = { state: "MERGED" };
+  clock.at += 10 * 60_000;
+  await t.loop.tick();
+  assert.equal(fx.backend.state, "Done");
+  assert.equal(t.memory.state.selfUpdate?.state, "pending");
+  assert.equal(t.memory.state.selfUpdate?.trigger?.key, fx.parent.key);
+  assert.deepEqual(f.u.applied, [], "S budget is 30 min; 10 min in, it waits");
+  assert.equal(slow.state, "In Progress");
+
+  clock.at += 25 * 60_000;
+  await t.loop.tick();
+  assert.equal(slow.state, "Ready", "stopped and re-queued");
+  assert.deepEqual(
+    t.memory.state.interrupted.map((r) => [r.issueKey, r.reason, r.worktree]),
+    [[slow.key, "self-update", `/wt/${slow.key}`]],
+  );
+  assert.match(
+    t.linear.comments.at(-1)?.body ?? "",
+    /Stopped over its budget while a self-update waited.*worktree kept/,
+  );
+  assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }], "then the safe point");
+  assert.deepEqual(t.memory.state.attempts, {}, "no attempt counted");
+
+  // The restart: a new process reads the record, logs it and picks the run back up.
+  const restarted = setup({
+    store: t.memory,
+    linear: t.linear,
+    adapter: t.adapter,
+    extra: { ...fakeUpdater({ status: "applied" }, TO).extra, clock },
+  });
+  const report = await restarted.loop.tick();
+  assert.ok(restarted.logs.includes("self-update: aaaaaaa -> bbbbbbb"));
+  assert.equal(t.memory.state.selfUpdate?.state, "done");
+  assert.deepEqual(report.dispatched, [slow.key]);
+  assert.match(t.adapter.runs().at(-1)?.prompt ?? "", /## Resumed/);
+  assert.deepEqual(restarted.loop.snapshot().selfUpdate, {
+    from: FROM,
+    to: TO,
+    at: clock.now().toISOString(),
+    state: "done",
+  });
+});
+
+test("an update waits when a stopped part cannot move back to Ready", async () => {
+  const clock = testClock();
+  const f = fakeUpdater();
+  const t = setup({ extra: { ...f.extra, clock } });
+  const slow = t.linear.add({
+    title: "Slow",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  seededMerge(t);
+  assert.deepEqual((await t.loop.tick()).dispatched, [slow.key]);
+  f.u.target = { from: FROM, to: TO };
+  t.gh.statuses[9] = { state: "MERGED" };
+  const moveTo = t.linear.moveTo.bind(t.linear);
+  t.linear.moveTo = async (id, state) => {
+    if (id === slow.id && state === "Ready") throw new Error("Linear unavailable");
+    await moveTo(id, state);
+  };
+
+  clock.at += 31 * 60_000;
+  await t.loop.tick();
+  assert.equal(slow.state, "In Progress");
+  assert.deepEqual(f.u.applied, []);
+  assert.deepEqual(
+    t.memory.state.inFlight.map((run) => run.issueKey),
+    [slow.key],
+  );
+
+  t.linear.moveTo = moveTo;
+  const next = await t.loop.tick();
+  assert.deepEqual(next.requeued, [slow.key]);
+  assert.deepEqual(next.dispatched, []);
+  assert.equal(slow.state, "Ready");
+  assert.deepEqual(
+    t.memory.state.interrupted.map((run) => run.issueKey),
+    [slow.key],
+  );
+  assert.deepEqual(t.memory.state.inFlight, []);
+  assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }]);
+});
+
+test("a failed build keeps the old build, pauses, comments and moves the trigger to Needs input, once", async () => {
+  const f = fakeUpdater({
+    status: "failed",
+    step: "build",
+    error: "> tsc\n\nline 1\nline 2\nline 3\nline 4\nsrc/x.ts(1,1): error TS2322: bad\n",
+  });
+  const t = setup({ extra: f.extra });
+  const fx = seededMerge(t);
+  await t.loop.tick();
+  f.u.target = { from: FROM, to: TO };
+  t.gh.statuses[9] = { state: "MERGED" };
+  await t.loop.tick();
+
+  const detail = "build: line 1\nline 2\nline 3\nline 4\nsrc/x.ts(1,1): error TS2322: bad";
+  assert.deepEqual(f.u.pauses, [`self-update failed: ${detail}`]);
+  assert.equal(t.memory.state.selfUpdate?.state, "failed");
+  assert.equal(t.memory.state.selfUpdate?.error, detail);
+  assert.ok(t.memory.state.selfUpdateNotices[TO]);
+  assert.equal(fx.parent.state, "Needs input");
+  const comment = t.linear.comments.filter((c) => c.key === fx.parent.key).at(-1)?.body ?? "";
+  assert.match(comment, /update from `aaaaaaa` to `bbbbbbb` failed at build/);
+  assert.match(comment, /error TS2322: bad/);
+  assert.match(comment, /harnessd resume/);
+  assert.deepEqual(selfPings(t), [
+    `${fx.parent.key} needs input (self-update failed): aaaaaaa -> bbbbbbb: ${detail.replace(/\n/g, " ")} https://linear.test/${fx.parent.key}`,
+  ]);
+  const ready = t.linear.add({ title: "Later", description: `${partMarker("x")}\n**Size**: S` });
+  assert.equal((await t.loop.tick()).paused, true);
+  assert.equal(ready.state, "Ready", "paused: nothing dispatched");
+
+  // `harnessd resume`: the next tick checks again; the same target fails again, quietly.
+  const comments = t.linear.comments.length;
+  f.u.paused = false;
+  await t.loop.tick();
+  assert.equal(f.u.checks, 3);
+  assert.equal(f.u.applied.length, 2);
+  assert.equal(f.u.pauses.length, 2, "paused again");
+  assert.equal(selfPings(t).length, 1, "no second notice for the same target");
+  assert.equal(t.linear.comments.length, comments);
+  assert.equal(ready.state, "Ready");
+});
+
+test("a failure at daemon start pauses and sends one notice, with no Linear call", async () => {
+  const f = fakeUpdater({ status: "failed", step: "install", error: "ERR_PNPM_OUTDATED_LOCKFILE" });
+  f.u.target = { from: FROM, to: TO };
+  const t = setup({ extra: f.extra });
+  const report = await t.loop.tick();
+  assert.equal(report.paused, true);
+  assert.deepEqual(f.u.pauses, ["self-update failed: install: ERR_PNPM_OUTDATED_LOCKFILE"]);
+  assert.deepEqual(t.linear.comments, []);
+  assert.deepEqual(t.linear.moves, []);
+  assert.deepEqual(selfPings(t), [
+    "harnessd needs input (self-update failed): aaaaaaa -> bbbbbbb: install: ERR_PNPM_OUTDATED_LOCKFILE",
+  ]);
+});
+
+test("a dirty install clone blocks the update: paused with the reason, nothing discarded", async () => {
+  const f = fakeUpdater({ status: "blocked", reason: "the install clone has local changes" });
+  f.u.target = { from: FROM, to: TO };
+  const t = setup({ extra: f.extra });
+  await t.loop.tick();
+  assert.deepEqual(f.u.pauses, ["self-update blocked: the install clone has local changes"]);
+  assert.equal(t.memory.state.selfUpdate?.state, "blocked");
+  assert.equal(t.memory.state.selfUpdate?.error, "the install clone has local changes");
+  assert.deepEqual(selfPings(t), [
+    "harnessd needs input (self-update blocked): aaaaaaa -> bbbbbbb: the install clone has local changes",
+  ]);
+  assert.deepEqual(t.loop.snapshot().selfUpdate?.state, "blocked");
+});
+
+test("with no selfUpdate option a pending record in loop.json holds nothing", async () => {
+  const store = memoryStore({
+    ...emptyLoopState(),
+    selfUpdate: { from: FROM, to: TO, at: "2026-11-21T08:00:00.000Z", state: "pending" },
+  });
+  const t = setup({ store });
+  const part = t.linear.add({
+    title: "Work",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+});
+
+test("a pending record with no update left is dropped at start, not applied", async () => {
+  const f = fakeUpdater();
+  const store = memoryStore({
+    ...emptyLoopState(),
+    selfUpdate: { from: FROM, to: TO, at: "2026-11-21T08:00:00.000Z", state: "pending" },
+  });
+  const t = setup({ store, extra: f.extra });
+  const part = t.linear.add({
+    title: "Work",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+  assert.deepEqual(f.u.applied, []);
+  assert.equal(store.state.selfUpdate, undefined);
+});
+
+test("a failed pause write stops dispatch and raises Needs input until explicit resume", async () => {
+  const f = fakeUpdater({ status: "failed", step: "build", error: "boom" });
+  const t = setup({
+    extra: {
+      ...f.extra,
+      selfUpdate: {
+        ...f.extra.selfUpdate,
+        async pause() {
+          throw new Error("disk full");
+        },
+      },
+    },
+  });
+  const fx = seededMerge(t);
+  await t.loop.tick();
+  f.u.target = { from: FROM, to: TO };
+  t.gh.statuses[9] = { state: "MERGED" };
+  assert.equal((await t.loop.tick()).paused, true);
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(selfPings(t).length, 1);
+
+  const ready = t.linear.add({
+    title: "Later",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const paused = await t.loop.tick();
+  assert.equal(paused.paused, true);
+  assert.deepEqual(paused.dispatched, []);
+  assert.equal(ready.state, "Ready");
+  assert.equal(f.u.applied.length, 1);
+
+  f.u.target = undefined;
+  t.loop.resume();
+  assert.deepEqual((await t.loop.tick()).dispatched, [ready.key]);
+  assert.equal(f.u.checks, 3);
+});
+
+test("a merge in a pass the pause flag stops is checked after resume, with its trigger", async () => {
+  const f = fakeUpdater({ status: "blocked", reason: "the install clone has local changes" });
+  const t = setup({ extra: f.extra });
+  const fx = seededMerge(t);
+  // A second approval, read after PR #9 in the same pass.
+  const second = seededMerge(t);
+  const entry = t.memory.state.merges.at(-1);
+  if (entry?.prs[0]) {
+    entry.prs[0].number = 10;
+    entry.prs[0].url = "https://github.test/o/r/pull/10";
+    entry.prs[0].sha = "sha10";
+  }
+  t.gh.statuses[10] = t.gh.statuses[9] ?? {};
+  await t.loop.tick();
+  assert.equal(second.backend.state, "In Review");
+  f.u.target = { from: FROM, to: TO };
+  t.gh.statuses[9] = { state: "MERGED" };
+  // The flag lands after PR #9 is recorded as merged, before PR #10 is read.
+  const extra = t.gh.github.prStatus;
+  t.gh.github.prStatus = async (n) => {
+    const status = await extra(n);
+    f.u.paused = true;
+    return status;
+  };
+  await t.loop.tick();
+  assert.equal(fx.backend.state, "Done");
+  assert.deepEqual(f.u.applied, []);
+  f.u.paused = false;
+  await t.loop.tick();
+  assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }]);
+  assert.equal(fx.parent.state, "Needs input");
 });

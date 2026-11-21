@@ -70,4 +70,8 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Failure reason**: the `reason` of a run that ended in `error` because the human must act outside the run: `usage_limit` (the harness quota is spent) or `auth` (the harness is not signed in). Other errors have no failure reason. _Avoid_: error type, error code.
 
-**Self-update**: the daemon moves its own install to the new default-branch commit, builds it and restarts through launchd at a safe point.
+**Self-update**: harnessd pulls, rebuilds and restarts its own install after a merge to its own repo's default branch (MET-63, docs/LOOP.md "Self-update"). _Avoid_: auto-upgrade, `harnessd update` (that updates a harness CLI).
+
+**Safe point**: the first tick with no run in flight while a self-update waits. Only then is the update applied. _Avoid_: idle point.
+
+**Trigger issue**: the parent issue whose merge started a self-update check. A blocked or failed update comments on it and moves it to Needs input. The check at daemon start has none.

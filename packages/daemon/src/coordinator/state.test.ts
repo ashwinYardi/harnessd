@@ -75,6 +75,15 @@ const state: LoopState = {
   ],
   gateFailures: { "parent-1": 1 },
   humanPings: { "https://github.test/pull/7": "2026-11-19T10:03:00.000Z" },
+  selfUpdateNotices: { def456: "2026-11-19T10:04:00.000Z" },
+  selfUpdate: {
+    from: "abc1234",
+    to: "def456",
+    at: "2026-11-19T10:04:00.000Z",
+    state: "failed",
+    error: "build: tsc exited 2",
+    trigger: { id: "parent-1", key: "MET-40", url: "https://linear.test/MET-40" },
+  },
 };
 
 test("a missing file loads as the empty state", async () => {
@@ -96,6 +105,8 @@ test("save writes loop.json atomically with a .gitignore, and load reads it back
   assert.deepEqual(loaded.merges, state.merges);
   assert.deepEqual(loaded.gateFailures, state.gateFailures);
   assert.deepEqual(loaded.humanPings, state.humanPings);
+  assert.deepEqual(loaded.selfUpdateNotices, state.selfUpdateNotices);
+  assert.deepEqual(loaded.selfUpdate, state.selfUpdate);
   const files = (await readdir(join(dir, ".harnessd", "state"))).sort();
   assert.deepEqual(files, [".gitignore", "loop.json"], "no tmp files left behind");
   assert.equal(await readFile(join(dir, ".harnessd", "state", ".gitignore"), "utf8"), "*\n");
@@ -142,6 +153,7 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
     merges: state.merges,
     gateFailures: { p: 2 },
     humanPings: { u: "t" },
+    selfUpdateNotices: {},
   });
   assert.deepEqual(
     parseLoopState('{"inFlight":[]}'),
@@ -150,4 +162,28 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
   );
   assert.deepEqual(parseLoopState('{"inFlight":[]}').interrupted, [], "MET-12 files still load");
   assert.throws(() => parseLoopState("[]"), /no inFlight array/);
+});
+
+test("parseLoopState drops a malformed self-update record and keeps a valid one", () => {
+  const base = { inFlight: [] };
+  assert.equal(
+    parseLoopState(JSON.stringify({ ...base, selfUpdate: { from: "a" } })).selfUpdate,
+    undefined,
+  );
+  assert.equal(
+    parseLoopState(
+      JSON.stringify({ ...base, selfUpdate: { from: "a", to: "b", at: "t", state: "odd" } }),
+    ).selfUpdate,
+    undefined,
+  );
+  assert.deepEqual(
+    parseLoopState(
+      JSON.stringify({
+        ...base,
+        selfUpdate: { from: "a", to: "b", at: "t", state: "applying", trigger: 3 },
+      }),
+    ).selfUpdate,
+    { from: "a", to: "b", at: "t", state: "applying" },
+  );
+  assert.deepEqual(parseLoopState(JSON.stringify(base)).selfUpdateNotices, {});
 });

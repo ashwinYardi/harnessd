@@ -26,6 +26,7 @@ test("no layers gives the defaults", () => {
   });
   assert.equal(merged.slack.channel, "#harnessd");
   assert.equal(merged.daemon.port, 4747);
+  assert.equal(merged.daemon.self_update, true);
   assert.deepEqual(merged.merge.protected_paths, DEFAULT_SETTINGS.merge.protected_paths);
   assert.deepEqual(Object.keys(merged.agents), ["coordinator", "backend", "frontend", "qa"]);
   for (const agent of Object.values(merged.agents)) assert.equal(agent.harness, "claude-code");

@@ -1,14 +1,10 @@
 // The last self-update (MET-63): the daemon rebuilt and restarted itself from its own repo.
 // GET /api/loop carries it as `selfUpdate`; the Settings loop banner shows one line for it.
 
-export interface SelfUpdate {
-  from: string;
-  to: string;
-  /** ISO time of the update. */
-  at: string;
-  state: "pending" | "done" | "failed" | "blocked";
-  error?: string;
-}
+import type { SelfUpdateView } from "@harnessd/shared";
+
+/** The shared read model (packages/shared/src/ui.ts). */
+export type SelfUpdate = SelfUpdateView;
 
 export interface SelfUpdateLine {
   /** Undefined when the paused loop already names the reason (failed or blocked). */
@@ -35,6 +31,7 @@ export function selfUpdateLine(update: SelfUpdate | undefined): SelfUpdateLine |
   const from = short(update.from);
   const to = short(update.to);
   if (update.state === "done") return { label: "Updated", from, to, time: hm(update.at) };
-  if (update.state === "pending") return { label: "Update pending", from, to, time: undefined };
+  if (update.state === "pending" || update.state === "applying")
+    return { label: "Update pending", from, to, time: undefined };
   return { label: undefined, from, to, time: undefined };
 }

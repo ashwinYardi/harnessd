@@ -39,6 +39,7 @@ export * from "./secrets/routes.ts";
 export * from "./secrets/store.ts";
 export { createSelfUpdater, createUpdateApplier } from "./selfupdate/apply.ts";
 export * from "./selfupdate/detect.ts";
+export * from "./selfupdate/index.ts";
 export * from "./server/daemon.ts";
 export * from "./server/logs.ts";
 export * from "./server/router.ts";

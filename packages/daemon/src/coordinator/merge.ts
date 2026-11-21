@@ -159,6 +159,8 @@ export interface MergeReport {
   sentBack: string[];
   /** Parent keys moved to Done. */
   done: string[];
+  /** The parent of each PR merged this pass, by harnessd or a human, once per parent. */
+  landed: Array<{ id: string; key: string; url: string }>;
   /** True when a pause stopped the pass. */
   paused: boolean;
 }
@@ -187,7 +189,14 @@ function noticePr(pr: { number: number; url: string }): NoticePr {
 export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<MergeReport> {
   const now = deps.now ?? (() => new Date());
   const log = deps.log ?? (() => {});
-  const report: MergeReport = { merged: [], needsHuman: [], sentBack: [], done: [], paused: false };
+  const report: MergeReport = {
+    merged: [],
+    needsHuman: [],
+    sentBack: [],
+    done: [],
+    landed: [],
+    paused: false,
+  };
   const safely = async (what: string, fn: () => Promise<unknown>): Promise<boolean> => {
     try {
       await fn();
@@ -275,6 +284,9 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
     pr.mergedAt = now().toISOString();
     await deps.save();
     if (by === "harnessd") report.merged.push(pr.partKey);
+    if (!report.landed.some((p) => p.id === entry.parentId)) {
+      report.landed.push({ id: entry.parentId, key: entry.parentKey, url: entry.parentUrl });
+    }
     log(`${pr.partKey}: PR #${pr.number} merged by ${by}, Done`);
     const how =
       by === "harnessd"

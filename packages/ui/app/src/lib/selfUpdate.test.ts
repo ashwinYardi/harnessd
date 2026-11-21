@@ -21,13 +21,15 @@ test("selfUpdateLine names a done update with both commits and the local time", 
   });
 });
 
-test("selfUpdateLine names a pending update without a time", () => {
-  assert.deepEqual(selfUpdateLine(at("pending")), {
-    label: "Update pending",
-    from: "1a2b3c4",
-    to: "5d6e7f8",
-    time: undefined,
-  });
+test("selfUpdateLine names a pending or applying update without a time", () => {
+  for (const state of ["pending", "applying"] as const) {
+    assert.deepEqual(selfUpdateLine(at(state)), {
+      label: "Update pending",
+      from: "1a2b3c4",
+      to: "5d6e7f8",
+      time: undefined,
+    });
+  }
 });
 
 test("selfUpdateLine shows only the commits for a failed or blocked update", () => {

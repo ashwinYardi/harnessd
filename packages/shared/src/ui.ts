@@ -81,3 +81,19 @@ export interface LogLine {
 export interface LogSnapshot {
   lines: LogLine[];
 }
+
+/** Where a self-update stands (MET-63, docs/LOOP.md "Self-update"). */
+export type SelfUpdateState = "pending" | "applying" | "done" | "blocked" | "failed";
+
+/** The last self-update, as loop.json keeps it and GET /api/loop returns it. */
+export interface SelfUpdateView {
+  /** The commit the old build came from. */
+  from: string;
+  /** The default branch head it updates to. */
+  to: string;
+  /** ISO time of the last change of state. */
+  at: string;
+  state: SelfUpdateState;
+  /** Why it is blocked or failed. */
+  error?: string;
+}
