@@ -27,3 +27,26 @@ export function isAtBottom(el: {
 }): boolean {
   return el.scrollHeight - el.scrollTop - el.clientHeight <= 8;
 }
+
+/**
+ * The log tail: it follows the end, or it keeps the lines it had when the reader scrolled up.
+ * Only a scroll freezes it; the pointer and focus do not.
+ */
+export type Tail = { frozen: null } | { frozen: readonly LogLine[] };
+
+/** The tail follows the end. Jump to latest returns to this state. */
+export const FOLLOW: Tail = { frozen: null };
+
+/** The tail after a scroll: at the end it follows; above the end it keeps its lines. */
+export function scrollTail(tail: Tail, atBottom: boolean, lines: readonly LogLine[]): Tail {
+  if (atBottom) return tail.frozen ? FOLLOW : tail;
+  return tail.frozen ? tail : { frozen: lines };
+}
+
+/** What the pane renders, and whether it follows the end. */
+export function tailView(
+  tail: Tail,
+  lines: readonly LogLine[],
+): { follow: boolean; lines: readonly LogLine[] } {
+  return tail.frozen ? { follow: false, lines: tail.frozen } : { follow: true, lines };
+}

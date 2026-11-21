@@ -42,13 +42,3 @@ export function EmptyState({ children }: { children: React.ReactNode }) {
     </p>
   );
 }
-
-/** The "Show N updates" button of a region that holds live changes. */
-export function HeldUpdates({ pending, onApply }: { pending: number; onApply: () => void }) {
-  if (pending === 0) return null;
-  return (
-    <Button size="xs" variant="secondary" onClick={onApply} className="ms-auto">
-      Show {pending} {pending === 1 ? "update" : "updates"}
-    </Button>
-  );
-}
