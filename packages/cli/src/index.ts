@@ -4,10 +4,10 @@ import { defaultGlobalDir, findRepoRoot, serveMemory, syncRepo, vaultDirs } from
 import { ConfigError, VERSION } from "@harnessd/shared";
 import { type RunChecks, runDoctor } from "./doctor.ts";
 import { type InitSystem, runInit } from "./init.ts";
-import { runLoop } from "./loop.ts";
+import { type LoopIO, runLoop } from "./loop.ts";
 import { runPause, runResume } from "./pause.ts";
 
-export interface CliIO {
+export interface CliIO extends Pick<LoopIO, "cliUrl" | "selfUpdateRunner"> {
   out: (line: string) => void;
   err: (line: string) => void;
   /** Defaults to process.cwd(). */
