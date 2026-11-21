@@ -135,11 +135,22 @@ test("without holdSizes, a row above the pinned row updates its contents", () =>
   assert.equal(out[0]?.rows[0]?.lastAction, "Edit");
 });
 
-test("a card above the pinned card that turns loud never holds, so Needs you shows it at once", () => {
+test("a card above the pinned card that turns loud goes to Needs you at once", () => {
   const shown = [group("needs-you"), group("ready", run("MET-1"), run("MET-2"))];
   const next = [group("needs-you", run("MET-1", "Blocked")), group("ready", run("MET-2"))];
   const loud = (r: Run) => r.lastAction === "Blocked";
   const out = pin(shown, next, key, ["MET-2"], { holdSizes: true, neverHold: loud });
   assert.deepEqual(keys(out), ["needs-you:MET-1", "ready:MET-2"]);
   assert.equal(out[0]?.rows[0]?.lastAction, "Blocked");
+});
+
+test("a pinned card in Needs you keeps its index: cards that were loud already still hold", () => {
+  const loud = (r: Run) => r.lastAction === "Blocked";
+  const shown = [group("needs-you", run("MET-1", "Blocked"), run("MET-2", "Blocked"))];
+  const next = [group("needs-you", run("MET-1", "Blocked"), run("MET-2", "Blocked"))];
+  const out = pin(shown, next, key, ["MET-2"], { holdSizes: true, neverHold: loud });
+  assert.deepEqual(keys(out), ["needs-you:MET-1,MET-2"]);
+  const arrived = [group("needs-you", run("MET-9", "Blocked"), ...(next[0]?.rows ?? []))];
+  const after = pin(out, arrived, key, ["MET-2"], { holdSizes: true, neverHold: loud });
+  assert.deepEqual(keys(after), ["needs-you:MET-1,MET-2,MET-9"], "a new loud card goes below");
 });

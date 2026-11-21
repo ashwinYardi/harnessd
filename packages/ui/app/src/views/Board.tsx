@@ -30,8 +30,7 @@ const PRIORITY: Record<number, string> = { 1: "Urgent", 2: "High" };
 type Lane = Omit<Column, "issues"> & { rows: BoardIssue[] };
 
 const issueKey = (issue: BoardIssue) => issue.key;
-// Cards change height (an agent label, a blocked line), so the cards above a pinned card hold.
-// A card that turns Blocked or Needs input never holds: it goes to Needs you at once.
+// Cards change height, and a card that turns loud must reach Needs you (lib/pin.ts).
 const PIN: PinOptions<BoardIssue> = { holdSizes: true, neverHold: needsYou };
 
 function IssueRow({

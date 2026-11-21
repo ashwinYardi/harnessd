@@ -22,9 +22,10 @@ export interface PinOptions<T = unknown> {
    */
   holdSizes?: boolean;
   /**
-   * A row that this marks in `next` never holds, unless it is pinned itself: it takes its true
-   * place at once. The Board uses it, so a card that turns Blocked or Needs input reaches Needs
-   * you at once (PRODUCT.md: they are the loudest things on screen).
+   * A row that this marks in `next`, but not in `shown`, never holds, unless it is pinned
+   * itself: it takes its true place at once, and the pinned row moves up one row. The Board
+   * uses it, so a card that turns Blocked or Needs input reaches Needs you at once (PRODUCT.md:
+   * they are the loudest things on screen).
    */
   neverHold?: (row: T) => boolean;
 }
@@ -35,8 +36,8 @@ export interface PinOptions<T = unknown> {
  * in `shown`, with its contents from `next`. To keep that index, the rows above it in its
  * group hold too (and, when `stacked`, all rows of the groups above). Held rows show their
  * contents from `next`, or their last contents if they left it (or, with `holdSizes`, until
- * release). The other rows take their new places below the held rows. A held group that left `next` stays at its index. Release (no
- * pinned keys) restores the true order.
+ * release). The other rows take their new places below the held rows. A held group that left
+ * `next` stays at its index. Release (no pinned keys) restores the true order.
  */
 export function pin<T, G extends Group<T>>(
   shown: readonly G[],
@@ -62,7 +63,8 @@ export function pin<T, G extends Group<T>>(
   const holdable = (r: T) => {
     if (pinnedKeys.has(key(r)) || !options.neverHold) return true;
     const fresh = find(next, key, key(r))?.row;
-    return fresh === undefined || !options.neverHold(fresh);
+    // Only a row that turns loud goes: a row that was loud already keeps the pinned row's place.
+    return fresh === undefined || options.neverHold(r) || !options.neverHold(fresh);
   };
   const heldRows = holds.map((h) => h.group.rows.slice(0, h.count).filter(holdable));
   const held = new Set(heldRows.flat().map(key));
