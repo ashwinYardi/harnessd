@@ -1,6 +1,8 @@
-// The loop state (GET /api/loop) and the Start action (POST /api/start, D-026).
+// The loop state (GET /api/loop, then live `loop` events) and the Start action
+// (POST /api/start, D-026).
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "../components/ui/toast.tsx";
+import { mergeLoop } from "../lib/limits.ts";
 import type { LoopState } from "../lib/route.ts";
 import { readLoop, startLoop } from "../setupApi.ts";
 
@@ -18,6 +20,10 @@ export function useLoop() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+  /** A live update from the event stream, such as a new set of harness holds (MET-70). */
+  const receive = useCallback((next: Partial<LoopState>) => {
+    setLoop((prev) => mergeLoop(prev, next));
+  }, []);
   const start = useCallback(async () => {
     setStarting(true);
     try {
@@ -39,7 +45,7 @@ export function useLoop() {
       setStarting(false);
     }
   }, [refresh]);
-  return { loop, starting, start, refresh };
+  return { loop, starting, start, refresh, receive };
 }
 
 export type Loop = ReturnType<typeof useLoop>;

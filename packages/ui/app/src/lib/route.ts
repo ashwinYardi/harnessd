@@ -1,5 +1,6 @@
 // The app's views live in the hash, so the daemon serves one page and Back works.
 import type { SelfUpdateView } from "@harnessd/shared";
+import type { HarnessLimit } from "./limits.ts";
 
 export type View = "board" | "agents" | "logs" | "settings";
 export type SettingsPage = "harnesses" | "connections" | "team";
@@ -32,6 +33,8 @@ export interface LoopState {
   blocking: string[];
   /** The last self-update, once there was one (MET-63). */
   selfUpdate?: SelfUpdateView;
+  /** Harnesses held by a usage limit (MET-70). Absent from a daemon before MET-70 part 4. */
+  limits?: HarnessLimit[];
 }
 
 /**

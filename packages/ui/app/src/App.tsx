@@ -38,13 +38,13 @@ type AppCommand = Command & { run: () => void };
 const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
 export function App() {
-  const api = useHarnessd();
+  const loop = useLoop();
+  const api = useHarnessd(loop.receive);
   const now = useNow();
   const { route, go } = useRoute();
   const { theme, setTheme } = useTheme();
   const pause = usePause(api.pause, api.setPause);
   const status = useStatus();
-  const loop = useLoop();
   const { refresh: refreshLoop } = loop;
 
   // First launch: a blocking check opens the Settings page that fixes it (MET-28).
@@ -262,6 +262,7 @@ export function App() {
           boardDown={boardDown}
           connection={api.connection}
           lastPollAt={lastPollAt}
+          limits={loop.loop?.limits}
           needsYou={waiting}
           now={now}
           onShowNeedsYou={() => goTo("board")}
@@ -299,7 +300,12 @@ export function App() {
             />
           )}
           {route.view === "agents" && (
-            <Agents agents={api.agents} now={now} retry={api.retry.agents} />
+            <Agents
+              agents={api.agents}
+              limits={loop.loop?.limits}
+              now={now}
+              retry={api.retry.agents}
+            />
           )}
           {route.view === "logs" && <Logs logs={api.logs} retry={api.retry.logs} />}
           {route.view === "settings" && <Settings loop={loop} page={route.page} status={status} />}

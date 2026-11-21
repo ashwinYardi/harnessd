@@ -1,9 +1,10 @@
 // The daemon's API (docs/API.md): reads on load, then live changes from /api/events.
 import type { AgentsSnapshot, BoardSnapshot, LogLine, LogSnapshot } from "@harnessd/shared";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { HarnessLimit } from "./lib/limits.ts";
 import { appendLines } from "./lib/log.ts";
-
 import type { PauseState } from "./lib/pause.ts";
+import type { LoopState } from "./lib/route.ts";
 
 export type { PauseState };
 
@@ -59,7 +60,16 @@ export const post = <T>(path: string, body: unknown) =>
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
-export function useHarnessd() {
+/**
+ * `onLoop` gets each live change to the loop state: a `loop` event, or the `limits` an
+ * `agents` event carries (MET-70).
+ */
+export function useHarnessd(onLoop?: (next: Partial<LoopState>) => void) {
+  // A ref, so a new callback does not reopen the event stream.
+  const loopRef = useRef(onLoop);
+  useEffect(() => {
+    loopRef.current = onLoop;
+  });
   const [board, setBoard] = useState<Load<BoardSnapshot>>({ status: "loading" });
   const [agents, setAgents] = useState<Load<AgentsSnapshot>>({ status: "loading" });
   const [logs, setLogs] = useState<Load<LogLine[]>>({ status: "loading" });
@@ -107,7 +117,11 @@ export function useHarnessd() {
     const on = <T>(name: string, apply: (data: T) => void) =>
       events.addEventListener(name, (e) => apply(JSON.parse((e as MessageEvent<string>).data)));
     on<PauseState>("pause", (data) => setPause({ status: "ready", data }));
-    on<AgentsSnapshot>("agents", (data) => setAgents({ status: "ready", data }));
+    on<AgentsSnapshot & { limits?: HarnessLimit[] }>("agents", ({ limits, ...data }) => {
+      setAgents({ status: "ready", data });
+      if (limits) loopRef.current?.({ limits });
+    });
+    on<Partial<LoopState>>("loop", (data) => loopRef.current?.(data));
     on<BoardSnapshot>("board", (data) => setBoard({ status: "ready", data }));
     on<LogLine>("log", (line) =>
       setLogs((l) => ({
