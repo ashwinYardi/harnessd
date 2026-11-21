@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, rename, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { type Exec, execFile, isExecutableFile, pathDirs } from "../status/detect.ts";
@@ -66,7 +66,7 @@ export function createUpdateApplier(options: ApplyOptions) {
     }
 
     const git = (...args: string[]) => run(installRoot, "git", ...args);
-    async function checkInstall(): Promise<void> {
+    async function checkCheckout(expectedHead: string): Promise<void> {
       const changes = await git(
         "--no-optional-locks",
         "status",
@@ -97,13 +97,20 @@ export function createUpdateApplier(options: ApplyOptions) {
         throw new Error(`The install clone must be on the default branch (${defaultBranch}).`);
       }
       const head = await git("rev-parse", "--verify", "HEAD^{commit}");
+      if (head !== expectedHead) {
+        throw new Error("The install commit changed during the update.");
+      }
+    }
+
+    async function checkInstall(): Promise<void> {
+      await checkCheckout(from);
       const origin = await git(
         "rev-parse",
         "--verify",
         `refs/remotes/origin/${defaultBranch}^{commit}`,
       );
-      if (head !== from || origin !== to) {
-        throw new Error("The install or origin commit changed after the update check.");
+      if (origin !== to) {
+        throw new Error("The origin commit changed after the update check.");
       }
       await git("merge-base", "--is-ancestor", from, to);
     }
@@ -153,27 +160,89 @@ export function createUpdateApplier(options: ApplyOptions) {
       }
       if (stageFailure) return stageFailure;
 
-      await checkInstall();
-      await git("merge", "--ff-only", to);
+      // Keep the old outputs and dependencies on the same filesystem so recovery
+      // still works when a build runs out of disk space.
+      const cache = join(installRoot, ".turbo");
+      await mkdir(cache, { recursive: true });
+      const backup = await mkdtemp(join(cache, "self-update-"));
+      const saved = new Map<string, string | undefined>();
+      let advanced = false;
+      let keepBackup = false;
       try {
+        const workspaceDirs = await readdir(join(installRoot, "packages"), {
+          withFileTypes: true,
+        }).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return [];
+          throw error;
+        });
+        const roots = [
+          installRoot,
+          ...workspaceDirs
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => join(installRoot, "packages", entry.name)),
+        ];
+        await checkInstall();
+        for (const root of roots) {
+          for (const name of ["dist", "node_modules"]) {
+            const path = join(root, name);
+            const copy = join(backup, String(saved.size));
+            try {
+              await rename(path, copy);
+              saved.set(path, copy);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+              saved.set(path, undefined);
+            }
+          }
+        }
+        await git("merge", "--ff-only", "--no-overwrite-ignore", to);
+        advanced = true;
         await build(installRoot);
+        step = "pull";
+        await checkCheckout(to);
         step = "restart";
         await options.writePending({ from, to, at: (options.now?.() ?? new Date()).toISOString() });
         await run(installRoot, "launchctl", "kickstart", "-k", `gui/${uid}/${LAUNCHD_LABEL}`);
         return { status: "restarted" };
       } catch (error) {
         const failure = failed(step, error);
-        try {
-          step = "pull";
-          await git("reset", "--hard", from);
-          await build(installRoot);
-        } catch (rollbackError) {
-          failure.error += `\nRestore the old build: ${failed(step, rollbackError).error}`;
+        if (advanced) {
+          try {
+            await checkCheckout(to);
+            await git("reset", "--keep", from);
+          } catch (rollbackError) {
+            failure.error += `\nRestore the old commit: ${failed("pull", rollbackError).error}`;
+          }
+        }
+        for (const [path, copy] of saved) {
+          try {
+            if (advanced) await rm(path, { recursive: true, force: true });
+            if (copy !== undefined) await rename(copy, path);
+          } catch (restoreError) {
+            keepBackup = true;
+            failure.error += `\nRestore ${path}${copy ? ` from ${copy}` : ""}: ${failed("build", restoreError).error}`;
+          }
         }
         return failure;
+      } finally {
+        if (!keepBackup) await rm(backup, { recursive: true, force: true }).catch(() => {});
       }
     } catch (error) {
       return failed(step, error);
     }
+  };
+}
+
+/** Bind the install check and the applier to the coordinator's safe-point interface. */
+export function createSelfUpdater(
+  options: ApplyOptions & { checkForUpdate(): Promise<Target | undefined> },
+) {
+  const applyUpdate = createUpdateApplier(options);
+  return {
+    checkForUpdate: () => options.checkForUpdate(),
+    async applyUpdate(target: Target): Promise<{ status: "applied" } | Failure> {
+      const result = await applyUpdate(target);
+      return result.status === "restarted" ? { status: "applied" } : result;
+    },
   };
 }

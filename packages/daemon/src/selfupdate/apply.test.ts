@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import test, { type TestContext } from "node:test";
-import type { Exec, ExecResult } from "../status/detect.ts";
-import { createUpdateApplier } from "./apply.ts";
+import { type Exec, type ExecResult, execFile } from "../status/detect.ts";
+import { createSelfUpdater, createUpdateApplier } from "./apply.ts";
 
 const from = "a".repeat(40);
 const to = "b".repeat(40);
@@ -17,11 +17,13 @@ async function fixture(
     dirty?: "before" | "after staging";
     corepack?: boolean;
     operationDuringStage?: boolean;
+    useLoopAdapter?: boolean;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "harnessd-apply-test-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const installRoot = join(root, "install");
+  await mkdir(installRoot);
   const nodeDir = dirname(process.execPath);
   const pnpm = join(nodeDir, "pnpm");
   const calls: string[] = [];
@@ -68,21 +70,26 @@ async function fixture(
     if (args[0] === "reset") head = from;
     return ok();
   };
-  const applyUpdate = createUpdateApplier({
+  const applyOptions = {
     installRoot,
     defaultBranch: "main",
     uid: 501,
     tempDir: root,
     now: () => now,
     exec,
-    isExecutable: async (path) => !options.corepack && path === pnpm,
-    async writePending(record) {
+    isExecutable: async (path: string) => !options.corepack && path === pnpm,
+    async writePending(record: { from: string; to: string; at: string }) {
       assert.deepEqual(record, { from, to, at: now.toISOString() });
       calls.push("write pending");
       if (options.fail === "write pending") throw new Error("Cannot save state.");
     },
-  });
-  const result = await applyUpdate({ from, to });
+  };
+  const updater = options.useLoopAdapter
+    ? createSelfUpdater({ ...applyOptions, checkForUpdate: async () => ({ from, to }) })
+    : undefined;
+  const target = updater ? await updater.checkForUpdate() : { from, to };
+  assert.ok(target);
+  const result = await (updater?.applyUpdate ?? createUpdateApplier(applyOptions))(target);
   if (staged !== undefined) await assert.rejects(access(dirname(staged)), { code: "ENOENT" });
   return { result, calls, head, pnpm };
 }
@@ -96,7 +103,7 @@ test("a staged build must pass before the install changes and the service restar
     `stage: ${pnpm} install --frozen-lockfile`,
     `stage: ${pnpm} build`,
     "remove stage",
-    `install: git merge --ff-only ${to}`,
+    `install: git merge --ff-only --no-overwrite-ignore ${to}`,
     `install: ${pnpm} install --frozen-lockfile`,
     `install: ${pnpm} build`,
     "write pending",
@@ -122,16 +129,16 @@ for (const [step, args] of [
   });
 }
 
-test("a failed in-place build restores and rebuilds the old commit without a restart", async (t) => {
+test("a failed in-place build restores the old commit without a restart", async (t) => {
   const pnpm = join(dirname(process.execPath), "pnpm");
   const { result, calls, head } = await fixture(t, { fail: `install: ${pnpm} build` });
   assert.equal(result.status, "failed");
   assert.equal(result.status === "failed" && result.step, "build");
   assert.equal(head, from);
   assert.deepEqual(calls.slice(-3), [
-    `install: git reset --hard ${from}`,
     `install: ${pnpm} install --frozen-lockfile`,
     `install: ${pnpm} build`,
+    `install: git reset --keep ${from}`,
   ]);
   assert.ok(calls.every((call) => !call.includes("kickstart") && call !== "write pending"));
 });
@@ -160,11 +167,13 @@ test("Corepack runs pnpm when PATH has no pnpm executable", async (t) => {
 });
 
 test("a failed fast-forward does not build in place or restart the service", async (t) => {
-  const { result, calls, head } = await fixture(t, { fail: `install: git merge --ff-only ${to}` });
+  const { result, calls, head } = await fixture(t, {
+    fail: `install: git merge --ff-only --no-overwrite-ignore ${to}`,
+  });
   assert.equal(result.status, "failed");
   assert.equal(result.status === "failed" && result.step, "pull");
   assert.equal(head, from);
-  assert.equal(calls.at(-1), `install: git merge --ff-only ${to}`);
+  assert.equal(calls.at(-1), `install: git merge --ff-only --no-overwrite-ignore ${to}`);
 });
 
 test("a failed state write restores the old build and prevents a restart", async (t) => {
@@ -175,7 +184,7 @@ test("a failed state write restores the old build and prevents a restart", async
     error: "restart: Cannot save state.",
   });
   assert.equal(head, from);
-  assert.ok(calls.includes(`install: git reset --hard ${from}`));
+  assert.ok(calls.includes(`install: git reset --keep ${from}`));
   assert.ok(calls.every((call) => !call.includes("kickstart")));
 });
 
@@ -198,5 +207,75 @@ test("a failed kickstart reports failure and restores the old build", async (t) 
   assert.equal(result.status === "failed" && result.step, "restart");
   assert.equal(head, from);
   assert.ok(calls.indexOf("write pending") < calls.findIndex((call) => call.includes("kickstart")));
-  assert.ok(calls.includes(`install: git reset --hard ${from}`));
+  assert.ok(calls.includes(`install: git reset --keep ${from}`));
+});
+
+test("a failed in-place build restores artifacts and preserves edits made during the build", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-apply-git-test-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  async function git(...args: string[]) {
+    const result = await execFile("git", args, { cwd: root });
+    assert.equal(result.code, 0, result.stderr);
+    return result.stdout.trim();
+  }
+  await git("init", "-b", "main");
+  await git("config", "user.name", "Test");
+  await git("config", "user.email", "test@example.invalid");
+  await writeFile(join(root, ".gitignore"), "dist/\nnode_modules/\n.turbo/\n");
+  await writeFile(join(root, "source"), "old");
+  await git("add", ".");
+  await git("commit", "-m", "old");
+  const from = await git("rev-parse", "HEAD");
+  await writeFile(join(root, "source"), "new");
+  await git("commit", "-am", "new");
+  const to = await git("rev-parse", "HEAD");
+  await git("update-ref", "refs/remotes/origin/main", to);
+  await git("reset", "--hard", from);
+
+  const artifact = join(root, "dist", "daemon.js");
+  const dependency = join(root, "node_modules", "dependency");
+  for (const path of [artifact, dependency]) {
+    await mkdir(dirname(path));
+    await writeFile(path, "old");
+  }
+  let kicks = 0;
+  let builds = 0;
+  const apply = createUpdateApplier({
+    installRoot: root,
+    defaultBranch: "main",
+    uid: 501,
+    isExecutable: async () => true,
+    writePending: async () => assert.fail("A failed build cannot write pending state."),
+    async exec(cmd, args, options) {
+      if (cmd === "git") return execFile(cmd, args, options);
+      if (cmd === "launchctl") kicks++;
+      if (options?.cwd !== root) return { code: 0, stdout: "", stderr: "" };
+      const path = args[0] === "install" ? dependency : artifact;
+      await mkdir(dirname(path), { recursive: true });
+      await writeFile(path, "partial");
+      if (args[0] === "build") {
+        if (++builds === 1) await writeFile(join(root, "source"), "local edit");
+        return { code: 1, stdout: "", stderr: "Disk write failed." };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+
+  const result = await apply({ from, to });
+  assert.equal(result.status, "failed");
+  assert.equal(kicks, 0);
+  assert.equal(builds, 1);
+  assert.equal(await readFile(join(root, "source"), "utf8"), "local edit");
+  assert.equal(await readFile(artifact, "utf8"), "old");
+  assert.equal(await readFile(dependency, "utf8"), "old");
+});
+
+test("the loop adapter reports applied after the commit is built and restart is requested", async (t) => {
+  const { result, calls, head } = await fixture(t, { useLoopAdapter: true });
+  assert.deepEqual(result, { status: "applied" });
+  assert.equal(head, to);
+  assert.deepEqual(calls.slice(-2), [
+    "write pending",
+    "install: launchctl kickstart -k gui/501/dev.harnessd.daemon",
+  ]);
 });
