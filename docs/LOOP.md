@@ -17,7 +17,7 @@ harnessd run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
 - SIGINT or SIGTERM stops the polling. Runs already started are allowed to finish. Queued Slack posts get up to 5 s.
 
 ## One tick
-1. **Re-queue.** Any run recorded in `loop.json` that this process does not own was left by a previous process. Its worktree is removed and its sub-issue goes back to Ready, with no attempt counted. A run a pause had already marked keeps its worktree (see Pause).
+1. **Re-queue.** Any run recorded in `loop.json` that this process does not own was left by a previous process. Its worktree is removed unless it holds unshipped work; then it is kept and the sub-issue resumes in it. Its sub-issue goes back to Ready, with no attempt counted. A run a pause had already marked keeps its worktree (see Pause).
 2. **Pause check.** The pause flag is re-read. If it is set, anything still running is cancelled and the tick stops.
 3. **Release holds.** A usage-limit hold whose time has passed ends (see Usage limits).
 4. **Merge.** Every QA approval recorded in `loop.json` goes one step through the merge gate (see Merge).
@@ -64,23 +64,30 @@ When the split is done, the parent moves to In Progress.
   - uses the adapter for its agent's harness;
   - gets a prompt made of the agent's layered instructions plus the sub-issue body;
   - runs within the budget for its size.
-- The prompt tells the agent to commit, run `git push -u origin <branch>` and run `gh pr create`, with the sub-issue key in the PR title. A part that QA sent back gets the failing items and is told to push to its open PR instead.
+- The prompt tells the agent to edit and test in the worktree only. It does not commit, push or open the PR: the daemon ships the work after the run (D-038). A part that QA sent back gets the failing items and works on its open PR.
 - A QA sub-issue runs the QA round below instead of a single agent run.
 - When the sub-issue starts it moves to In Progress. When the run finishes:
 
 | Result | What happens |
 |---|---|
-| ok | The sub-issue moves to In Review. |
+| ok | The daemon ships the run (see Ship). The sub-issue then moves to In Review. |
 | error or timeout, first time | A comment is posted and the sub-issue goes back to Ready for one retry. |
 | error or timeout, second time | A comment is posted, the sub-issue moves to Needs input and one notice is sent. |
 | cancelled | The sub-issue goes back to Ready. No attempt is counted. |
 | limited | The harness hit a usage or rate limit. The sub-issue goes back to Ready. No attempt is counted. |
 | cancelled by a pause | The worktree is kept. See Pause. |
 
-The worktree is removed after every run, except a run a pause cancelled.
+**Ship.** After an `ok` part run, the daemon ships the work before it moves the sub-issue to In Review (D-038).
+- It commits the worktree with the run's excludes file, so generated files stay out of the commit. The commit subject is `<key>: <title>` and the body is the agent's last message.
+- It compares the branch with the remote default branch (`origin/main` or `origin/master`). With no new commit and no commit ahead of base, the run fails as `no changes`.
+- It pushes with `git push -u origin <branch>`. It never force-pushes.
+- It finds the newest open PR with the issue key in its title. If there is one, the push updates it. Else it opens one with `gh pr create`, the issue key in the title, and the agent's last message as the body.
+- A failed commit or push fails the run as `push failed: <reason>`. A failed PR fails it as `pr failed: <reason>`, and a run with nothing to ship fails as `no changes`. Such a run is never "done, In Review": it counts an attempt, as an error run does.
+
+The worktree is removed after a run when it holds no unshipped work. A worktree with **uncommitted changes** or **commits not on the remote** is kept, with one Linear comment: "worktree kept at <path>: uncommitted changes" or "…: commits not on the remote". It is listed under `interrupted`, so the next run resumes it on the same branch. If the issue was renamed, the branch changed and the old worktree cannot be resumed; it is still kept and commented on. A pause keeps its worktree too (see Pause). A QA PR-head checkout is a scratch tree; it is removed after the round, unless a pause cancelled the round (see Pause).
 
 ## What an agent run sees
-A worktree is cut from `origin/main`, so it holds only what the repo commits. harnessd fills in the rest before the agent starts.
+A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch already exists on the remote (a part QA sent back), so it holds only what the repo commits. harnessd fills in the rest before the agent starts.
 
 - **Worktree sync.** Before each part run, resumed run and QA agent run, the loop writes the same native files as `harnessd sync` (docs/SYNC.md) into the worktree: skills, rules, AGENTS.md and CLAUDE.md, settings and MCP.
   - It reads the workspace layer from the main repo's `.harnessd/`, so changes there count even when they are not committed.
@@ -129,7 +136,7 @@ harnessd resume                    # "Resumed."
 
   The run is marked in `loop.json` before it is killed. If the process stops before the cancel is recorded, the restart still keeps the worktree.
 - **A cancelled QA round** stops its tests and its QA agent, keeps the PR checkout in use and is recorded the same way. It posts no review, counts no QA failure and sends no part back. When QA runs again, the kept checkout is removed and the PR head is checked out afresh, in the same round.
-- **Resume.** The next dispatch of that sub-issue **reuses** the kept worktree: same branch and path, with the earlier work, committed or not. The prompt then says so, after any QA feedback. The kept worktree is removed only if the branch name changed in the meantime (the issue was renamed). Once the resumed run finishes, its worktree is removed as usual.
+- **Resume.** The next dispatch of that sub-issue **reuses** the kept worktree: same branch and path, with the earlier work, committed or not. The prompt then says so, after any QA feedback. This is also how a worktree kept for unshipped work resumes. The kept worktree is removed only if the branch name changed in the meantime (the issue was renamed), and the guard still keeps it when it holds unshipped work. Once the resumed run finishes, its worktree is removed when it holds no unshipped work.
 - **Restart.** Paused survives a restart. `harnessd run` while paused starts the API and the loop in the paused state and prints `harnessd run: paused since … Run "harnessd resume" to dispatch again.`
 
 ## QA
@@ -165,7 +172,7 @@ The whole round runs within the QA sub-issue's size budget. Failures are counted
 ## Usage limits
 A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.
 
-- **Part run.** The worktree is removed and the sub-issue goes back to Ready. No attempt is counted and no comment is posted.
+- **Part run.** The worktree is removed when it holds no unshipped work (see Dispatch), and the sub-issue goes back to Ready. No attempt is counted and no comment is posted.
 - **QA run.** See QA: no review and no QA failure.
 - **Grill or plan run.** Nothing is written, nothing escalates and the issue stays in Ready. A limited plan is not replaced by the fallback plan.
 
@@ -253,6 +260,6 @@ daemon start and loop ticks ──┴─► check ─► pending ─► safe poi
 { "version": 1, "lastPollAt": "…", "inFlight": [{ "issueId": "…", "issueKey": "MET-41", "role": "backend", "agent": "backend", "worktree": "…", "branch": "…", "startedAt": "…", "pid": 123, "pausedAt": "…", "stopReason": "self-update" }], "interrupted": [{ "issueId": "…", "issueKey": "MET-42", "role": "frontend", "agent": "frontend", "worktree": "…", "branch": "…", "interruptedAt": "…", "reason": "paused" }], "attempts": { "<issueId>": 1 }, "qaFailures": { "<parentId>": 1 }, "qaFeedback": { "<partId>": { "prUrl": "…", "reviewUrl": "…", "failing": ["…"] } }, "merges": [{ "qaId": "…", "qaKey": "MET-43", "parentId": "…", "parentKey": "MET-40", "parentUrl": "…", "approvedAt": "…", "prs": [{ "partId": "…", "partKey": "MET-41", "number": 7, "url": "…", "sha": "…", "mergedAt": "…", "needsHuman": "…", "labeled": true, "closedAt": "…" }] }], "gateFailures": { "<parentId>": 1 }, "humanPings": { "<prUrl>": "…" }, "selfUpdateNotices": { "<sha>": "…" }, "selfUpdate": { "from": "<sha>", "to": "<sha>", "at": "…", "state": "pending", "error": "…", "trigger": { "id": "…", "key": "MET-40", "url": "…" } }, "limits": { "claude-code": { "until": "…", "since": "…", "backoffMs": 900000, "endedAt": "…" } } }
 ```
 
-`pausedAt` is set only on an in-flight run that a pause is cancelling. `stopReason: "self-update"` is set with it when a waiting self-update stops the run. `interrupted[].reason` is `paused` or `self-update`. `selfUpdate.state` is `pending`, `applying`, `done`, `blocked` or `failed`. `endedAt` is set only on an ended hold kept for its backoff.
+`pausedAt` is set only on an in-flight run that a pause is cancelling. `stopReason: "self-update"` is set with it when a waiting self-update stops the run. `interrupted[].reason` is `paused`, `self-update`, `uncommitted changes` or `commits not on the remote`; a file from before these reasons loads as `paused`. `selfUpdate.state` is `pending`, `applying`, `done`, `blocked` or `failed`. `endedAt` is set only on an ended hold kept for its backoff.
 
 Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the QA approvals waiting to merge, the needs-human notices already sent and the usage-limit holds. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.
