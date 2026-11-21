@@ -34,6 +34,9 @@ port = 4747                 # the local API on 127.0.0.1 (docs/API.md); 0 picks 
 [harnesses.claude-code]     # Settings → Harnesses writes this in ~/.harnessd/config.toml
 bin = "/opt/homebrew/bin/claude"   # absolute path; wins over HARNESSD_CLAUDE_BIN and PATH
 
+[harnesses.codex]
+bin = "/opt/homebrew/bin/codex"    # absolute path; wins over HARNESSD_CODEX_BIN and PATH
+
 [secrets.linear]            # ~/.harnessd/config.toml only; a reference, never a value (D-030)
 api_key = "op://Private/Linear/credential"   # or "env:MY_LINEAR_KEY"
 
@@ -113,6 +116,20 @@ model: gpt-5
 You own the API layer.
 ```
 An agent may be defined in both config.toml and `agents/<name>.md` of the same folder, but each field (and the instructions) only once per folder.
+
+## Codex agents
+Set `harness = "codex"` to run an agent on Codex (D-032).
+```toml
+[agents.backend]
+harness = "codex"
+model = "gpt-5"             # optional, passed as --model
+```
+- `model` is optional. Without it, Codex uses its built-in default model. The run ignores your Codex user config (D-032), so a model set there does not apply.
+- harnessd finds the `codex` binary in this order:
+  1. `[harnesses.codex] bin` in the config;
+  2. else `$HARNESSD_CODEX_BIN`;
+  3. else `codex` on PATH.
+- docs/INSTALL.md "Codex" has the install and sign-in steps.
 
 ## skills/<folder>/SKILL.md
 Optional frontmatter with `name` (defaults to the folder name) and `description`. Sync copies other frontmatter keys (such as `disable-model-invocation`) as they are. The frontmatter is flat `key: value` lines; indented lines continue the previous value. Sync copies every other file in the folder too.
