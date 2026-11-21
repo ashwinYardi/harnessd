@@ -7,10 +7,11 @@
 import { execFile } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { globalStateDir } from "../control/files.ts";
 import { syncRepo } from "../sync/sync.ts";
+import { excludesEnv } from "../worktrees/excludes.ts";
 
 const run = promisify(execFile);
 
@@ -67,15 +68,13 @@ export function excludeLine(path: string): string {
   return `/${path.replace(/[\\*?[\]!# ]/g, (c) => `\\${c}`)}`;
 }
 
-/** `GIT_CONFIG_*` entries that set core.excludesFile after any the daemon already has. */
-function excludesEnv(file: string, env: NodeJS.ProcessEnv): Record<string, string> {
-  const count = Number.parseInt(env.GIT_CONFIG_COUNT ?? "", 10);
-  const n = Number.isInteger(count) && count > 0 ? count : 0;
-  return {
-    GIT_CONFIG_COUNT: String(n + 1),
-    [`GIT_CONFIG_KEY_${n}`]: "core.excludesFile",
-    [`GIT_CONFIG_VALUE_${n}`]: file,
-  };
+/** Where a run's excludes file lives. It needs no sync, so the loop can save it first. */
+export function excludesFileFor(globalDir: string, runId: string): string {
+  return join(
+    globalStateDir(globalDir),
+    "excludes",
+    `${runId.replace(/[^A-Za-z0-9._-]/g, "_")}.gitignore`,
+  );
 }
 
 /**
@@ -101,9 +100,8 @@ export async function syncWorktree(input: WorktreeSyncInput): Promise<WorktreeSy
     await git(input.worktree, ["update-index", "--skip-worktree", "--", ...hide], env);
   }
 
-  const dir = join(globalStateDir(input.globalDir), "excludes");
-  await mkdir(dir, { recursive: true });
-  const excludesFile = join(dir, `${input.runId.replace(/[^A-Za-z0-9._-]/g, "_")}.gitignore`);
+  const excludesFile = excludesFileFor(input.globalDir, input.runId);
+  await mkdir(dirname(excludesFile), { recursive: true });
   const lines = untracked.map(excludeLine);
   await writeFile(
     excludesFile,

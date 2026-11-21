@@ -33,7 +33,7 @@ import {
   type SelfUpdater,
   shortSha,
 } from "../selfupdate/index.ts";
-import type { TaskWorktrees } from "../worktrees/index.ts";
+import type { TaskWorktrees, WorktreeKeepReason } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
 import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
 import { grillIssue } from "./grill.ts";
@@ -62,12 +62,14 @@ import {
 import type {
   HarnessHold,
   InFlightRun,
+  InterruptedReason,
+  InterruptedRun,
   LoopState,
   LoopStore,
   SelfUpdateRecord,
   SelfUpdateTrigger,
 } from "./state.ts";
-import { syncWorktree } from "./worktree-sync.ts";
+import { excludesFileFor, syncWorktree } from "./worktree-sync.ts";
 
 /** The Linear calls the loop makes. A LinearClient satisfies it. */
 export type LoopLinear = Pick<
@@ -164,6 +166,12 @@ export interface CoordinatorLoopOptions {
   /** Not set when `[daemon] self_update = false`: then the loop never updates itself. */
   selfUpdate?: LoopSelfUpdate;
 }
+
+/** The run fields the worktree guard needs, from an in-flight or interrupted run. */
+type KeptRun = Pick<
+  InFlightRun,
+  "issueId" | "issueKey" | "role" | "agent" | "branch" | "excludesFile"
+>;
 
 /** What a QA run checks: the parent's checklist and the parts that block QA. */
 interface QaContext {
@@ -482,9 +490,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         continue;
       }
       if (entry.worktree !== "") {
-        await safely(`remove the worktree of ${entry.issueKey}`, () =>
-          worktrees.remove(entry.worktree),
-        );
+        // A QA round's checkout is detached and holds no branch work.
+        await removeWithGuard(s, entry, entry.worktree, { scratch: entry.role === "qa" });
       }
       const moved = await safely(`re-queue ${entry.issueKey}`, () =>
         linear.moveTo(entry.issueId, "Ready"),
@@ -516,20 +523,38 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     );
   }
 
+  /** The `interrupted` record for a kept worktree. */
+  function toInterrupted(
+    entry: KeptRun,
+    path: string,
+    reason: InterruptedReason,
+    at: string,
+  ): InterruptedRun {
+    return {
+      issueId: entry.issueId,
+      issueKey: entry.issueKey,
+      role: entry.role,
+      agent: entry.agent,
+      worktree: path,
+      branch: entry.branch,
+      interruptedAt: at,
+      reason,
+      ...(entry.excludesFile ? { excludesFile: entry.excludesFile } : {}),
+    };
+  }
+
   /** Records a run a pause cancelled, worktree kept for inspection, and says so on the issue. */
   async function keepInterrupted(s: LoopState, entry: InFlightRun): Promise<void> {
     s.interrupted = s.interrupted.filter((e) => e.issueId !== entry.issueId);
     if (entry.worktree !== "") {
-      s.interrupted.push({
-        issueId: entry.issueId,
-        issueKey: entry.issueKey,
-        role: entry.role,
-        agent: entry.agent,
-        worktree: entry.worktree,
-        branch: entry.branch,
-        interruptedAt: entry.pausedAt ?? clock.now().toISOString(),
-        reason: entry.stopReason ?? "paused",
-      });
+      s.interrupted.push(
+        toInterrupted(
+          entry,
+          entry.worktree,
+          entry.stopReason ?? "paused",
+          entry.pausedAt ?? clock.now().toISOString(),
+        ),
+      );
     }
     const where =
       entry.worktree === "" ? "it had no worktree yet" : `worktree kept at ${entry.worktree}`;
@@ -541,6 +566,56 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       linear.comment(entry.issueId, `**harnessd**: ${why}; ${where}.`),
     );
     log(`${entry.issueKey}: ${entry.stopReason ?? "paused"}, re-queued, ${where}`);
+  }
+
+  /**
+   * Keeps a worktree that holds unshipped work: it goes under `interrupted` so the next
+   * dispatch resumes it on the same branch, and the issue gets one comment.
+   */
+  async function keepUnshipped(
+    s: LoopState,
+    entry: KeptRun,
+    path: string,
+    reason: WorktreeKeepReason,
+    resumable = true,
+  ): Promise<void> {
+    const already = s.interrupted.some(
+      (e) => e.issueId === entry.issueId && e.worktree === path && e.reason === reason,
+    );
+    if (resumable) {
+      s.interrupted = s.interrupted.filter((e) => e.issueId !== entry.issueId);
+      s.interrupted.push(toInterrupted(entry, path, reason, clock.now().toISOString()));
+    }
+    if (!already) {
+      await safely(`comment on ${entry.issueKey}`, () =>
+        linear.comment(entry.issueId, `**harnessd**: worktree kept at ${path}: ${reason}.`),
+      );
+      log(`${entry.issueKey}: worktree kept at ${path}: ${reason}`);
+    }
+  }
+
+  /**
+   * Removes a worktree through the guard. A kept worktree is recorded for the next run
+   * (unless `resumable` is false) and commented on once.
+   */
+  async function removeWithGuard(
+    s: LoopState,
+    entry: KeptRun,
+    path: string,
+    options: { scratch?: boolean; resumable?: boolean } = {},
+  ): Promise<void> {
+    try {
+      const remove = {
+        ...(entry.excludesFile ? { excludesFile: entry.excludesFile } : {}),
+        ...(options.scratch ? { scratch: true } : {}),
+      };
+      const result = await worktrees.remove(path, remove);
+      if (!result.removed && result.kept !== undefined) {
+        await keepUnshipped(s, entry, path, result.kept, options.resumable ?? true);
+      }
+    } catch (error) {
+      log(`could not remove the worktree of ${entry.issueKey}: ${message(error)}`);
+    }
   }
 
   /** Keep the run in flight until Linear confirms that it is Ready. */
@@ -568,11 +643,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     syncWatch();
     if (stopped) return;
     s.inFlight = s.inFlight.filter((e) => e !== entry);
-    if (entry.worktree !== "") {
-      await safely(`remove the worktree of ${entry.issueKey}`, () =>
-        worktrees.remove(entry.worktree),
-      );
-    }
+    if (entry.worktree !== "") await removeWithGuard(s, entry, entry.worktree);
     const id = entry.issueId;
     if (result.status === "ok") {
       delete s.attempts[id];
@@ -675,12 +746,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
 
     if (qa !== undefined) {
       // QA always checks the PR head out afresh, so a worktree a pause kept is removed.
-      const kept = s.interrupted.find((e) => e.issueId === issue.id);
-      if (kept !== undefined) {
-        s.interrupted = s.interrupted.filter((e) => e !== kept);
-        await safely(`remove the old worktree of ${issue.key}`, () =>
-          worktrees.remove(kept.worktree),
-        );
+      const oldCheckout = s.interrupted.find((e) => e.issueId === issue.id);
+      if (oldCheckout !== undefined) {
+        s.interrupted = s.interrupted.filter((e) => e !== oldCheckout);
+        // It is a detached PR-head checkout: no branch work to keep.
+        await removeWithGuard(s, oldCheckout, oldCheckout.worktree, {
+          scratch: true,
+          resumable: false,
+        });
         await save();
       }
       report.dispatched.push(issue.key);
@@ -700,9 +773,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         s.interrupted = s.interrupted.filter((e) => e !== kept);
         if (kept.worktree !== worktree.path) {
           // The title, and so the branch, changed: the old worktree is not this run's.
-          await safely(`remove the old worktree of ${issue.key}`, () =>
-            worktrees.remove(kept.worktree),
-          );
+          // Keep it and say so when it holds unshipped work, but it cannot be resumed.
+          await removeWithGuard(s, kept, kept.worktree, { resumable: false });
         }
       }
       await save();
@@ -716,6 +788,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       });
       if (kept?.worktree === worktree.path) prompt += `\n\n${RESUMED_RUN_NOTE}`;
       const id = `${issue.key}-${(s.attempts[issue.id] ?? 0) + 1}`;
+      if (globalDir !== undefined) {
+        // Save the guard's excludes path before sync writes anything, so a crash between
+        // the two does not make synced files look like uncommitted work.
+        entry.excludesFile = excludesFileFor(globalDir, id);
+        await save();
+      }
       // Before the agent starts, never in the adapter (D-002). A failure fails the run.
       const env = await prepareWorktree(worktree.path, id);
       const task: Task = {

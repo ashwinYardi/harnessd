@@ -10,6 +10,7 @@ import {
   type SelfUpdateState,
   type SelfUpdateView,
 } from "@harnessd/shared";
+import type { WorktreeKeepReason } from "../worktrees/index.ts";
 
 /** A sub-issue an agent is working on. */
 export interface InFlightRun {
@@ -30,9 +31,14 @@ export interface InFlightRun {
   pausedAt?: string;
   /** Why the run was cancelled with its worktree kept. Unset means `harnessd pause`. */
   stopReason?: "self-update";
+  /** The run's excludes file, so synced files do not count as uncommitted changes. */
+  excludesFile?: string;
 }
 
-/** A run `harnessd pause` cancelled. Its worktree is kept until the sub-issue runs again. */
+/** Why a worktree is kept for the next run. */
+export type InterruptedReason = "paused" | "self-update" | WorktreeKeepReason;
+
+/** A run `harnessd pause` cancelled, or whose worktree holds unshipped work. */
 export interface InterruptedRun {
   issueId: string;
   issueKey: string;
@@ -41,9 +47,18 @@ export interface InterruptedRun {
   worktree: string;
   branch: string;
   interruptedAt: string;
-  /** `paused`: `harnessd pause`. `self-update`: it ran over its budget while an update waited. */
-  reason: "paused" | "self-update";
+  /** `paused`: `harnessd pause`. `self-update`: over budget while an update waited. */
+  reason: InterruptedReason;
+  /** The run's excludes file, so synced files do not count as uncommitted changes. */
+  excludesFile?: string;
 }
+
+const INTERRUPTED_REASONS: Record<InterruptedReason, true> = {
+  paused: true,
+  "self-update": true,
+  "uncommitted changes": true,
+  "commits not on the remote": true,
+};
 
 /** The issue whose merge started a self-update, for the comment and the notice. */
 export interface SelfUpdateTrigger {
@@ -180,24 +195,45 @@ function isRun(value: unknown): value is InFlightRun {
     typeof r.startedAt === "string" &&
     typeof r.pid === "number" &&
     (r.pausedAt === undefined || typeof r.pausedAt === "string") &&
-    (r.stopReason === undefined || r.stopReason === "self-update")
+    (r.stopReason === undefined || r.stopReason === "self-update") &&
+    (r.excludesFile === undefined || typeof r.excludesFile === "string")
   );
 }
 
-function isInterrupted(value: unknown): value is InterruptedRun {
+function interruptedRun(value: unknown): InterruptedRun | undefined {
   const r = value as Partial<InterruptedRun> | null;
-  return (
-    typeof r === "object" &&
-    r !== null &&
-    typeof r.issueId === "string" &&
-    typeof r.issueKey === "string" &&
-    typeof r.role === "string" &&
-    typeof r.agent === "string" &&
-    typeof r.worktree === "string" &&
-    typeof r.branch === "string" &&
-    typeof r.interruptedAt === "string" &&
-    (r.reason === "paused" || r.reason === "self-update")
-  );
+  if (
+    typeof r !== "object" ||
+    r === null ||
+    typeof r.issueId !== "string" ||
+    typeof r.issueKey !== "string" ||
+    typeof r.role !== "string" ||
+    typeof r.agent !== "string" ||
+    typeof r.worktree !== "string" ||
+    typeof r.branch !== "string" ||
+    typeof r.interruptedAt !== "string" ||
+    // A file from before the unshipped-work reasons has no reason: it means paused.
+    (r.reason !== undefined && INTERRUPTED_REASONS[r.reason] !== true) ||
+    (r.excludesFile !== undefined && typeof r.excludesFile !== "string")
+  ) {
+    return undefined;
+  }
+  return {
+    issueId: r.issueId,
+    issueKey: r.issueKey,
+    role: r.role as AgentRole,
+    agent: r.agent,
+    worktree: r.worktree,
+    branch: r.branch,
+    interruptedAt: r.interruptedAt,
+    reason: r.reason ?? "paused",
+    ...(r.excludesFile !== undefined ? { excludesFile: r.excludesFile } : {}),
+  };
+}
+
+function interruptedRuns(value: unknown): InterruptedRun[] {
+  if (!Array.isArray(value)) return [];
+  return value.map(interruptedRun).filter((run): run is InterruptedRun => run !== undefined);
 }
 
 function counts(value: unknown): Record<string, number> {
@@ -342,7 +378,7 @@ export function parseLoopState(text: string): LoopState {
     version: 1,
     lastPollAt: typeof raw.lastPollAt === "string" ? raw.lastPollAt : null,
     inFlight: raw.inFlight.filter(isRun),
-    interrupted: Array.isArray(raw.interrupted) ? raw.interrupted.filter(isInterrupted) : [],
+    interrupted: interruptedRuns(raw.interrupted),
     attempts: counts(raw.attempts),
     qaFailures: counts(raw.qaFailures),
     qaFeedback: feedback(raw.qaFeedback),
