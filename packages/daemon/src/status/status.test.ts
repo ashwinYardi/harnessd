@@ -394,6 +394,113 @@ test("an unparseable Codex version is a warning that names the minimum", async (
   assert.ok(!isBlocking(v));
 });
 
+const OPENCODE_AGENT =
+  '[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "opencode"\nmodel = "deepseek/deepseek-chat"\n';
+const OPENCODE_AUTH = "/bin/opencode auth list --format json --standalone";
+const signedIn = (...ids: string[]) =>
+  ok(
+    JSON.stringify(
+      ids.map((id) => ({
+        id,
+        name: id,
+        connections: [{ type: "credential", id: "c1", label: "SECRET-LABEL", method: "key" }],
+      })),
+    ),
+  );
+
+async function opencodeWorld(config = OPENCODE_AGENT) {
+  const w = await world(config);
+  w.bins.add("/bin/opencode");
+  w.replies.set("/bin/opencode --version", ok("opencode v2.0.20\n"));
+  w.replies.set(OPENCODE_AUTH, signedIn("deepseek", "opencode"));
+  return w;
+}
+
+test("OpenCode is checked only when an agent uses it: CLI, version and the signed-in providers", async () => {
+  const none = await opencodeWorld('[linear]\nteam_id = "MET"\n');
+  assert.ok(!(await runStatus(none.options)).some((c) => c.id.startsWith("harness.opencode.")));
+
+  const w = await opencodeWorld();
+  const checks = await runStatus(w.options);
+  assert.equal(byId(checks, "harness.opencode.cli").detail, "opencode v2.0.20 (/bin/opencode)");
+  assert.deepEqual(byId(checks, "harness.opencode.version"), {
+    id: "harness.opencode.version",
+    state: "ok",
+    detail: "2.0.20 has no known problems",
+    fix: "",
+  });
+  assert.deepEqual(byId(checks, "harness.opencode.auth"), {
+    id: "harness.opencode.auth",
+    state: "ok",
+    detail: "signed in: deepseek",
+    fix: "",
+  });
+  assert.ok(w.calls.includes(OPENCODE_AUTH));
+  assert.doesNotMatch(JSON.stringify(checks), /SECRET-LABEL|"key"/);
+});
+
+test("a missing OpenCode CLI names [harnesses.opencode] bin and ~/.opencode/bin", async () => {
+  const w = await opencodeWorld();
+  w.bins.delete("/bin/opencode");
+  const checks = await runStatus(w.options);
+  const cli = byId(checks, "harness.opencode.cli");
+  assert.equal(cli.state, "missing");
+  assert.equal(cli.detail, "opencode is not on PATH");
+  assert.match(cli.fix, /curl -fsSL https:\/\/opencode\.ai\/install \| bash/);
+  assert.match(cli.fix, /~\/\.opencode\/bin/);
+  assert.match(cli.fix, /\[harnesses\.opencode\] bin/);
+  assert.equal(byId(checks, "harness.opencode.auth").detail, "not checked");
+});
+
+test("OpenCode below 2.0.20, or with an unreadable version, warns with `opencode upgrade`", async () => {
+  const w = await opencodeWorld();
+  w.replies.set("/bin/opencode --version", ok("opencode v2.0.19\n"));
+  const old = byId(await runStatus(w.options), "harness.opencode.version");
+  assert.deepEqual(
+    [old.state, old.detail, old.fix],
+    ["warn", "2.0.19 is below the minimum 2.0.20", "Run: opencode upgrade"],
+  );
+  assert.ok(!isBlocking(old));
+  w.replies.set("/bin/opencode --version", failed("crash"));
+  const unknown = byId(await runStatus(w.options), "harness.opencode.version");
+  assert.deepEqual(
+    [unknown.state, unknown.detail],
+    ["warn", "version unknown; the minimum is 2.0.20"],
+  );
+});
+
+test("OpenCode auth fails and names each provider an agent uses that is not signed in", async () => {
+  const w = await opencodeWorld(
+    `${OPENCODE_AGENT}\n[agents.qa]\nrole = "qa"\nharness = "claude-code"\nfallback_harness = "opencode"\nfallback_model = "kimi/kimi-k2"\n`,
+  );
+  w.replies.set(OPENCODE_AUTH, signedIn("opencode"));
+  const auth = byId(await runStatus(w.options), "harness.opencode.auth");
+  assert.equal(auth.state, "fail");
+  assert.equal(auth.detail, "not signed in: deepseek, kimi");
+  assert.match(auth.fix, /opencode auth login deepseek/);
+  assert.ok(isBlocking(auth));
+});
+
+test("OpenCode auth warns when no agent names a provider and none is signed in", async () => {
+  const w = await opencodeWorld(
+    '[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "opencode"\n',
+  );
+  w.replies.set(OPENCODE_AUTH, ok("[]"));
+  const auth = byId(await runStatus(w.options), "harness.opencode.auth");
+  assert.equal(auth.state, "warn");
+  assert.equal(auth.detail, "no provider is signed in, and no opencode agent names one");
+
+  w.replies.set(OPENCODE_AUTH, signedIn("opencode"));
+  assert.equal(byId(await runStatus(w.options), "harness.opencode.auth").state, "ok");
+
+  w.replies.set(OPENCODE_AUTH, ok("not json"));
+  const unread = byId(await runStatus(w.options), "harness.opencode.auth");
+  assert.deepEqual(
+    [unread.state, unread.detail],
+    ["warn", "could not read the signed-in providers"],
+  );
+});
+
 test("GitHub: signed out, read-only access and no required checks", async () => {
   const w = await world();
   w.replies.set(

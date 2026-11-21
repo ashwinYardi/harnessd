@@ -12,6 +12,7 @@ import {
   type HarnessId,
   harnessName,
   hasControlChar,
+  OPENCODE_PROVIDER,
   parseConfigFile,
   type TeamRow,
   validateTeam,
@@ -21,7 +22,16 @@ import { applyTableKey, withFileLock } from "../config/edit.ts";
 import { loadConfig } from "../config/load.ts";
 import { applyTeam, type TeamChange, TeamEditError } from "../config/team.ts";
 import { EventStream, HttpError, type Route, type SendEvent } from "../server/router.ts";
-import { isExecutableFile } from "../status/detect.ts";
+import { type Exec, execFile, isExecutableFile } from "../status/detect.ts";
+import {
+  OPENCODE_AUTH_LIST,
+  OPENCODE_MODELS,
+  opencodeSigninArgs,
+  opencodeSigninCommand,
+  parseAuthProviders,
+  parseModels,
+  requiredProviders,
+} from "../status/opencode.ts";
 import {
   type Check,
   harnessSetupSpec,
@@ -33,7 +43,11 @@ import { type SyncResult, syncRepo } from "../sync/sync.ts";
 import { parseLoginPrompt } from "./login-prompt.ts";
 
 /** The harnesses the Settings page shows a card for. */
-export const SETUP_HARNESSES = ["claude-code", "codex"] as const satisfies readonly HarnessId[];
+export const SETUP_HARNESSES = [
+  "claude-code",
+  "codex",
+  "opencode",
+] as const satisfies readonly HarnessId[];
 type SetupHarness = (typeof SETUP_HARNESSES)[number];
 
 export type HarnessAction = "install" | "update" | "signin";
@@ -55,6 +69,10 @@ export interface SetupOptions {
   runner?: SetupRunner;
   isExecutable?: (path: string) => Promise<boolean>;
   sync?: (options: { repoDir: string; globalDir: string }) => Promise<SyncResult>;
+  /** Runs the short OpenCode reads: `auth list` and `models`. Default: detect.ts execFile. */
+  exec?: Exec;
+  /** Default Date.now; the models cache reads it. */
+  now?: () => number;
 }
 
 export interface JobView {
@@ -71,10 +89,21 @@ export interface JobView {
   url?: string;
   /** Sign-in only: the first device code in the output, for the person to copy. */
   code?: string;
+  /** OpenCode sign-in only: the provider, from the daemon's own allowed set. */
+  provider?: string;
+  /**
+   * The one command to run in a terminal, when the daemon does not or could not run it:
+   * the OpenCode installer, or a provider sign-in that waits for a typed key (D-036).
+   */
+  manual?: string;
 }
 
 const MAX_LINES = 200;
 const JOB_TIMEOUT_MS = 10 * 60_000;
+/** `opencode models` and `opencode auth list` start a private server; give them time. */
+export const OPENCODE_READ_TIMEOUT_MS = 30_000;
+/** How long a model list stays fresh. */
+export const MODELS_CACHE_MS = 5 * 60_000;
 
 /** The real runner: no shell, inherited environment, killed after ten minutes. */
 export const spawnRunner: SetupRunner = (cmd, args, onLine) =>
@@ -112,7 +141,8 @@ export const spawnRunner: SetupRunner = (cmd, args, onLine) =>
 
 /**
  * The fixed argv of each action. Sign-in runs the CLI's own login as a child process, at
- * the path the status engine uses (D-031). No other app is started or driven.
+ * the path the status engine uses (D-031); so does a self-update such as `opencode
+ * upgrade`. No other app is started or driven.
  */
 function commandFor(
   harness: SetupHarness,
@@ -121,21 +151,31 @@ function commandFor(
 ): { cmd: string; args: string[]; text: string } {
   const spec = harnessSetupSpec(harness);
   if (!spec) throw new HttpError(404, "not_found");
-  if (action === "install") {
-    return { cmd: "npm", args: ["install", "-g", spec.pkg], text: `npm install -g ${spec.pkg}` };
-  }
-  if (action === "update") {
-    const pkg = `${spec.pkg}@latest`;
-    return { cmd: "npm", args: ["install", "-g", pkg], text: `npm install -g ${pkg}` };
-  }
-  return { cmd: bin ?? spec.bin, args: spec.loginArgs, text: spec.login };
+  const fixed =
+    action === "install"
+      ? spec.install
+      : action === "update"
+        ? spec.update
+        : spec.loginArgs === undefined
+          ? undefined
+          : { args: spec.loginArgs, text: spec.login };
+  if (fixed === undefined) throw new HttpError(404, "not_found");
+  const cmd = "cmd" in fixed && fixed.cmd !== undefined ? fixed.cmd : (bin ?? spec.bin);
+  return { cmd, args: [...fixed.args], text: fixed.text };
+}
+
+/** True when the action runs the harness's own binary, so the daemon must find it first. */
+function runsOwnBin(harness: SetupHarness, action: HarnessAction): boolean {
+  const spec = harnessSetupSpec(harness);
+  if (action === "signin") return true;
+  return action === "update" && spec?.update.cmd === undefined;
 }
 
 function manualCommands(harness: SetupHarness): Record<HarnessAction, string> {
   const spec = harnessSetupSpec(harness);
   return {
-    install: `npm install -g ${spec?.pkg}`,
-    update: `npm install -g ${spec?.pkg}@latest`,
+    install: spec?.installText ?? "",
+    update: spec?.update.text ?? "",
     signin: spec?.login ?? "",
   };
 }
@@ -202,7 +242,10 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
   const sync = options.sync ?? syncRepo;
   const workspaceFile = join(options.repoDir, ".harnessd", "config.toml");
   const globalFile = join(options.globalDir, "config.toml");
+  const exec = options.exec ?? execFile;
+  const now = options.now ?? Date.now;
   const jobs = new Map<SetupHarness, JobView>();
+  let modelsCache: { at: number; models: string[] } | undefined;
   const queue = serial();
   const listeners = new Set<SendEvent>();
   const emit = (job: JobView) => {
@@ -255,8 +298,12 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     return found.path;
   }
 
-  async function start(harness: SetupHarness, action: HarnessAction): Promise<JobView> {
-    const bin = action === "signin" ? await loginBin(harness) : undefined;
+  async function start(
+    harness: SetupHarness,
+    action: HarnessAction,
+    provider?: string,
+  ): Promise<JobView> {
+    const bin = runsOwnBin(harness, action) ? await loginBin(harness) : undefined;
     // Checked after the await, so two clicks never start two commands.
     if (jobs.get(harness)?.state === "running") {
       throw new HttpError(
@@ -265,7 +312,14 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
         `${harnessName(harness)} is already running a command. Wait for it to end.`,
       );
     }
-    const { cmd, args, text } = commandFor(harness, action, bin);
+    const { cmd, args, text } =
+      provider === undefined
+        ? commandFor(harness, action, bin)
+        : {
+            cmd: bin ?? "opencode",
+            args: opencodeSigninArgs(provider),
+            text: opencodeSigninCommand(provider),
+          };
     const job: JobView = {
       id: randomUUID(),
       harness,
@@ -274,6 +328,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
       state: "running",
       lines: [],
       startedAt: new Date().toISOString(),
+      ...(provider === undefined ? {} : { provider }),
     };
     jobs.set(harness, job);
     emit(job);
@@ -290,9 +345,109 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     }).then((code) => {
       job.state = code === 0 ? "ok" : "failed";
       job.exitCode = code;
+      if (provider !== undefined && code !== 0) job.manual = text;
+      // A new sign-in or version can change the models OpenCode lists.
+      if (harness === "opencode") modelsCache = undefined;
       emit({ ...job });
     });
     return { ...job };
+  }
+
+  /** Runs one short OpenCode read with the binary the status engine checks. */
+  async function opencodeRead(
+    args: readonly string[],
+  ): Promise<{ stdout: string } | { reason: string }> {
+    const found = await locateHarness("opencode", {
+      config: await mergedConfig(),
+      env: options.env,
+      isExecutable: isExec,
+    });
+    if ("absent" in found) return { reason: `${found.absent}. Install OpenCode first.` };
+    const res = await exec(found.path, args, {
+      cwd: options.repoDir,
+      env: options.env,
+      timeoutMs: OPENCODE_READ_TIMEOUT_MS,
+    });
+    const shown = `opencode ${args.slice(0, 2).join(" ")}`;
+    if (res.code === 124) {
+      return { reason: `${shown} timed out after ${OPENCODE_READ_TIMEOUT_MS / 1000} s` };
+    }
+    if (res.code !== 0) {
+      const line =
+        res.stderr
+          .split("\n")
+          .find((l) => l.trim() !== "")
+          ?.trim() ?? "";
+      const why = maskEnvSecrets(line, options.env).slice(0, 200);
+      return { reason: `${shown} exited ${res.code}${why === "" ? "" : `: ${why}`}` };
+    }
+    return { stdout: res.stdout };
+  }
+
+  /** GET /api/setup/opencode/models: the `<provider>/<model>` ids OpenCode lists. Never a 500. */
+  async function opencodeModels(): Promise<{ models: string[]; reason?: string }> {
+    if (modelsCache !== undefined && now() - modelsCache.at < MODELS_CACHE_MS) {
+      return { models: [...modelsCache.models] };
+    }
+    let read: { stdout: string } | { reason: string };
+    try {
+      read = await opencodeRead(OPENCODE_MODELS);
+    } catch (e) {
+      read = { reason: (e as Error).message };
+    }
+    if ("reason" in read) return { models: [], reason: read.reason };
+    const models = parseModels(read.stdout);
+    if (models.length === 0) {
+      return { models: [], reason: "opencode models listed no models. Sign in a provider first." };
+    }
+    modelsCache = { at: now(), models };
+    return { models: [...models] };
+  }
+
+  /**
+   * The providers the OpenCode card shows, and the daemon's own allowed set for sign-in:
+   * the signed-in ones from `opencode auth list`, plus the ones opencode agents name.
+   */
+  async function opencodeProviders(): Promise<{
+    providers: Array<{ id: string; signedIn: boolean; required: boolean; command: string }>;
+    reason?: string;
+  }> {
+    const required = requiredProviders(await mergedConfig());
+    const read = await opencodeRead(OPENCODE_AUTH_LIST);
+    let signed: string[] = [];
+    let reason: string | undefined;
+    if ("reason" in read) reason = read.reason;
+    else {
+      const parsed = parseAuthProviders(read.stdout);
+      if (parsed === undefined) reason = "could not read the signed-in providers";
+      else signed = parsed;
+    }
+    const ids = [...new Set([...signed, ...required])].sort();
+    return {
+      providers: ids.map((id) => ({
+        id,
+        signedIn: signed.includes(id),
+        required: required.includes(id),
+        command: opencodeSigninCommand(id),
+      })),
+      ...(reason === undefined ? {} : { reason }),
+    };
+  }
+
+  /**
+   * POST /api/setup/opencode/providers/:provider/signin (D-036). The path value must match
+   * the provider regex and be in the daemon's own set; the argv takes the set's value.
+   * Anything else is a 404 and runs nothing.
+   */
+  async function providerSignin(raw: string | undefined, body: unknown): Promise<JobView> {
+    emptyBody(body);
+    const unknown = () =>
+      new HttpError(404, "unknown_provider", "OpenCode has no such provider to sign in.");
+    if (raw === undefined || !OPENCODE_PROVIDER.test(raw)) throw unknown();
+    const { providers } = await opencodeProviders();
+    const stored = providers.find((p) => p.id === raw)?.id;
+    if (stored === undefined) throw unknown();
+    return start("opencode", "signin", stored);
   }
 
   async function setBin(harness: SetupHarness, body: unknown): Promise<{ bin: string | null }> {
@@ -485,10 +640,36 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     },
   ];
   for (const harness of SETUP_HARNESSES) {
+    const spec = harnessSetupSpec(harness);
     for (const action of ACTIONS) {
+      if (action === "signin" && spec?.loginArgs === undefined) continue;
+      const path = `/api/harnesses/${harness}/${action}`;
+      if (action === "install" && spec?.install === undefined) {
+        // No route runs this installer: the app shows the command to copy.
+        routes.push({
+          method: "POST",
+          path,
+          handler: ({ body }): JobView => {
+            emptyBody(body);
+            const text = spec?.installText ?? "";
+            // A finished job that ran nothing: the card shows the line and `manual` to copy.
+            return {
+              id: randomUUID(),
+              harness,
+              action,
+              command: text,
+              state: "failed",
+              lines: ["harnessd does not run this installer. Run it in a terminal."],
+              startedAt: new Date().toISOString(),
+              manual: text,
+            };
+          },
+        });
+        continue;
+      }
       routes.push({
         method: "POST",
-        path: `/api/harnesses/${harness}/${action}`,
+        path,
         handler: ({ body }) => {
           emptyBody(body);
           return start(harness, action);
@@ -501,5 +682,14 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
       handler: ({ body }) => queue(() => setBin(harness, body)),
     });
   }
+  routes.push(
+    { method: "GET", path: "/api/setup/opencode/models", handler: opencodeModels },
+    { method: "GET", path: "/api/setup/opencode/providers", handler: opencodeProviders },
+    {
+      method: "POST",
+      path: "/api/setup/opencode/providers/:provider/signin",
+      handler: ({ body, params }) => providerSignin(params?.provider, body),
+    },
+  );
   return { routes };
 }

@@ -57,3 +57,49 @@ test("a file that is not a JSON object is refused, not overwritten", () => {
     );
   }
 });
+
+test("opencode.json: sync replaces only its own mcp entries by name and keeps every user key", () => {
+  const existing = {
+    model: "deepseek/deepseek-chat",
+    $schema: "https://example.com/old.json",
+    mcp: {
+      mine: { type: "remote", url: "https://mcp.example.com" },
+      "harnessd-memory": { type: "local", command: ["old"], enabled: false },
+    },
+    provider: { deepseek: { options: { timeout: 1 } } },
+  };
+  const memory = { type: "local", command: ["harnessd", "mcp", "memory"], enabled: true };
+  const text = mergeSettings(
+    JSON.stringify(existing),
+    {
+      keys: { $schema: "https://opencode.ai/config.json" },
+      hooks: {},
+      entries: { mcp: { "harnessd-memory": memory } },
+    },
+    "opencode.json",
+  );
+  const out = JSON.parse(text);
+  assert.deepEqual(Object.keys(out), ["model", "$schema", "mcp", "provider"]);
+  assert.equal(out.$schema, "https://opencode.ai/config.json");
+  assert.deepEqual(out.mcp, { mine: existing.mcp.mine, "harnessd-memory": memory });
+  assert.deepEqual(out.provider, existing.provider);
+  assert.equal(out.hooks, undefined);
+  // A second run gives the same bytes.
+  assert.equal(
+    mergeSettings(
+      text,
+      {
+        keys: { $schema: "https://opencode.ai/config.json" },
+        hooks: {},
+        entries: { mcp: { "harnessd-memory": memory } },
+      },
+      "opencode.json",
+    ),
+    text,
+  );
+  assert.throws(
+    () =>
+      mergeSettings('{"mcp": []}', { keys: {}, hooks: {}, entries: { mcp: {} } }, "opencode.json"),
+    /opencode.json has a "mcp" that is not an object/,
+  );
+});

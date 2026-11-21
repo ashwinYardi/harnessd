@@ -1,5 +1,5 @@
 // Merges what sync owns into a harness settings file that the user may also edit:
-// `.claude/settings.json` and `.codex/hooks.json`. The user's keys, permissions and
+// `.claude/settings.json`, `.codex/hooks.json` and `opencode.json`. The user's keys, permissions and
 // hooks stay where they are. See docs/SYNC.md "Hooks and subagents".
 import type { HookEvents, HookGroup } from "@harnessd/shared";
 import { jsonFile } from "./format.ts";
@@ -10,6 +10,11 @@ export interface NativeSettings {
   keys: Record<string, unknown>;
   /** Hook groups sync adds to `hooks`; {} adds no `hooks` key. */
   hooks: HookEvents;
+  /**
+   * Named entries sync owns inside a top-level object, such as `{ mcp: { name: {...} } }`.
+   * Each entry replaces the one of the same name; every other entry stays.
+   */
+  entries?: Record<string, Record<string, unknown>>;
 }
 
 type Json = Record<string, unknown>;
@@ -75,6 +80,13 @@ export function mergeSettings(
   }
   const out: Json = { ...base, ...ours.keys };
   if (Object.keys(ours.hooks).length > 0) out.hooks = mergeHooks(base.hooks, ours.hooks, path);
+  for (const [key, entries] of Object.entries(ours.entries ?? {})) {
+    const current = base[key];
+    if (current !== undefined && !isObject(current)) {
+      refuse(path, `has a "${key}" that is not an object`);
+    }
+    out[key] = { ...(current ?? {}), ...entries };
+  }
   return jsonFile(out);
 }
 

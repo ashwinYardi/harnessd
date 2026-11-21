@@ -9,10 +9,11 @@
 | `.claude/settings.json` | Claude Code | `enabledMcpjsonServers`: every MCP server name, plus the skills' hooks. Merged, not replaced (see "Hooks and subagents") |
 | `.claude/agents/<name>.md` | Claude Code | the Claude Code subagents that enabled skills ship |
 | `.claude/skills/<name>/` | Claude Code | each merged, enabled skill: SKILL.md and every other file in its folder |
-| `.agents/skills/<name>/` | Codex | the same skills |
+| `.agents/skills/<name>/` | Codex | the same skills. OpenCode 2.x reads `.claude/skills/` and `.agents/skills/`, so it gets no folder of its own |
 | `.mcp.json` | Claude Code | `[mcp.<name>]` tables plus `harnessd-memory` |
 | `.codex/config.toml` | Codex | the same servers as `[mcp_servers.<name>]` |
 | `.codex/hooks.json` | Codex | the skills' Codex hooks; only when a skill has some. Merged, not replaced |
+| `opencode.json` | OpenCode | the same servers as local `mcp` entries. Merged, not replaced: sync owns `$schema` and its own `mcp` entries by name |
 
 Every repo gets the built-in memory server (docs/MEMORY.md) as `harnessd-memory`, run as `harnessd mcp memory`. To run it another way (say `npx -y @harnessd/cli mcp memory` when `harnessd` is not on PATH), define `[mcp.harnessd-memory]` yourself; it replaces the default.
 
@@ -61,7 +62,10 @@ Commit `.harnessd/` (including `vault/`, the repo's shared memory), `AGENTS.md`,
 ```gitignore
 .mcp.json
 .codex/
+opencode.json
 ```
+
+**opencode.json.** Sync merges into it. It sets `$schema` and one `mcp` entry for each of its servers, by name. A user's own `mcp` entries and every other key, such as `model` or `provider`, stay. A file that is not a JSON object, or whose `mcp` is not an object, stops sync.
 
 Global AGENTS.md and rules end up in the repo's AGENTS.md, so keep anything private out of `~/.harnessd/`.
 

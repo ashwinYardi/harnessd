@@ -19,6 +19,7 @@ test("generateSyncFiles lists every native file in a stable order", () => {
     ".claude/settings.json",
     ".mcp.json",
     ".codex/config.toml",
+    "opencode.json",
   ]);
 });
 

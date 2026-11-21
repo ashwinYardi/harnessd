@@ -131,3 +131,39 @@ test("excludeLine anchors a path and escapes gitignore syntax", () => {
   assert.equal(excludeLine(".claude/skills/a*b/#x!.md"), "/.claude/skills/a\\*b/\\#x\\!.md");
   assert.equal(excludeLine("a/b "), "/a/b\\ ");
 });
+
+test("an OpenCode run in a repo with no harness files gets AGENTS.md, the skills and the memory server", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-wtsync-bare-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  const globalDir = join(root, "global");
+  await mkdir(join(repo, ".harnessd"), { recursive: true });
+  await writeFile(join(repo, ".harnessd", "AGENTS.md"), "Workspace rules.\n");
+  await writeFile(join(repo, "README.md"), "# app\n");
+  await writeFile(join(repo, ".gitignore"), ".harnessd/\n");
+  git(repo, ["init", "-q", "-b", "main"]);
+  git(repo, ["add", "README.md", ".gitignore"]);
+  git(repo, ["commit", "-q", "-m", "init"]);
+  await mkdir(join(globalDir, "skills", "tdd"), { recursive: true });
+  await writeFile(
+    join(globalDir, "skills", "tdd", "SKILL.md"),
+    "---\nname: tdd\n---\nRed first.\n",
+  );
+  const worktree = join(root, "wt");
+  git(repo, ["worktree", "add", "-q", "-b", "met-2", worktree]);
+
+  const { env } = await syncWorktree({ repoDir: repo, globalDir, worktree, runId: "MET-2-1" });
+  assert.match(await readFile(join(worktree, "AGENTS.md"), "utf8"), /Workspace rules/);
+  // OpenCode 2.x reads skills from .claude/skills/ and .agents/skills/.
+  for (const dir of [".claude/skills", ".agents/skills"]) {
+    assert.match(await readFile(join(worktree, dir, "tdd", "SKILL.md"), "utf8"), /Red first/);
+  }
+  const opencode = JSON.parse(await readFile(join(worktree, "opencode.json"), "utf8"));
+  assert.equal(opencode.$schema, "https://opencode.ai/config.json");
+  assert.deepEqual(opencode.mcp["harnessd-memory"], {
+    type: "local",
+    command: ["harnessd", "mcp", "memory", "--workspace", repo],
+    enabled: true,
+  });
+  assert.equal(git(worktree, ["status", "--porcelain", "--untracked-files=all"], env), "");
+});
