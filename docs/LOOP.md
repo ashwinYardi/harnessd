@@ -174,7 +174,7 @@ The limit also starts a **hold** on that harness, kept in `loop.json` under `lim
 | a reset time | at the reset time |
 | no reset time | after a backoff: 15 minutes, doubled after each hold that ended, at most 2 hours |
 
-While a hold lasts, no part, QA, grill or plan run starts on that harness. The issue waits in Ready and nothing is logged per tick. Agents on other harnesses dispatch as usual. Runs in flight are not cancelled. More limited runs during a hold do not double it. An ok run on the harness clears the backoff.
+While a hold lasts, no part, QA, grill or plan run starts on that harness. An agent with a usable `fallback_harness` runs on its fallback harness and model instead (docs/CONFIG.md "Fallback harness", MET-81). A fallback is usable when it has an adapter and no hold of its own. Otherwise the issue waits in Ready and nothing is logged per tick. Agents on other harnesses dispatch as usual. Runs in flight are not cancelled. More limited runs during a hold do not double it. An ok run on the harness clears the backoff.
 
 The log gets one line when a hold starts and one when it ends, in the daemon's local time:
 
@@ -182,6 +182,7 @@ The log gets one line when a hold starts and one when it ends, in the daemon's l
 Claude Code limited until 18:37
 Claude Code limited until 17:52 (backoff)
 Claude Code available again
+MET-61: backend on Codex while Claude Code is limited
 ```
 
 ## Merge

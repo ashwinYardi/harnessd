@@ -3,6 +3,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import {
+  AGENT_FIELDS,
   type AgentLayerEntry,
   ConfigError,
   type ConfigFile,
@@ -238,7 +239,7 @@ export async function loadLayer(
     }
   }
 
-  // agents/<name>.md: frontmatter (role, harness, model, avatar) plus instructions as the body
+  // agents/<name>.md: frontmatter (AGENT_FIELDS) plus instructions as the body
   for (const ent of await listOptional(join(dir, "agents"))) {
     const path = join(dir, "agents", ent.name);
     const label = show(path);
@@ -251,7 +252,7 @@ export async function loadLayer(
     const text = body.trim();
     const existing = layer.agents[name];
     const entry: AgentLayerEntry = existing ?? { label, keyPrefix: "" };
-    for (const key of ["role", "harness", "model", "avatar"] as const) {
+    for (const key of AGENT_FIELDS) {
       if (def[key] === undefined) continue;
       if (existing?.[key] !== undefined) {
         throw new ConfigError(label, key, `also set as agents.${name}.${key} in ${existing.label}`);

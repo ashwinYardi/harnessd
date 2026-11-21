@@ -1,5 +1,6 @@
 // The hold on a harness that hit a usage limit (MET-70, docs/LOOP.md "Usage limits").
 // Pure: the loop owns the state, the clock and the log.
+import type { HarnessId, ResolvedAgentConfig } from "@harnessd/shared";
 import type { HarnessHold } from "./state.ts";
 
 /** The wait after the first limited run that gave no reset time. */
@@ -55,4 +56,25 @@ export function releaseExpired(
   }
   if (hold.backoffMs === undefined) return { hold: undefined, ended: true };
   return { hold: { ...hold, endedAt: now.toISOString() }, ended: true };
+}
+
+/**
+ * The agent config a run uses now (MET-81). It is the agent itself while its harness is
+ * free. While a limit holds that harness, it is the agent on its fallback harness and
+ * model, if the fallback is set, has an adapter and is not held. Undefined otherwise:
+ * the run waits.
+ */
+export function harnessForRun(
+  agent: ResolvedAgentConfig,
+  held: (harness: HarnessId) => boolean,
+  hasAdapter: (harness: HarnessId) => boolean,
+): ResolvedAgentConfig | undefined {
+  if (!held(agent.harness)) return agent;
+  const fallback = agent.fallback_harness;
+  if (fallback === undefined || fallback === agent.harness) return undefined;
+  if (!hasAdapter(fallback) || held(fallback)) return undefined;
+  const { model: _model, fallback_harness: _h, fallback_model, ...rest } = agent;
+  const onFallback: ResolvedAgentConfig = { ...rest, harness: fallback };
+  if (fallback_model !== undefined) onFallback.model = fallback_model;
+  return onFallback;
 }

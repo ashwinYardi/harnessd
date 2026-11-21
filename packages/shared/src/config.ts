@@ -90,6 +90,10 @@ export interface AgentSettings {
   role?: AgentRole;
   harness?: HarnessId;
   model?: string;
+  /** The harness the agent runs on while a usage limit holds `harness` (MET-81). */
+  fallback_harness?: HarnessId;
+  /** The model passed to the fallback harness. */
+  fallback_model?: string;
   /** Image path (relative to the `.harnessd/` folder) or URL shown for the agent. */
   avatar?: string;
   instructions?: string;
@@ -231,6 +235,8 @@ export interface AgentLayerEntry {
   role?: AgentRole;
   harness?: HarnessId;
   model?: string;
+  fallback_harness?: HarnessId;
+  fallback_model?: string;
   avatar?: string;
   instructions?: InstructionBlock;
   /** File that defined the agent, as shown in errors, and the key prefix used in it. */
@@ -262,6 +268,9 @@ export interface Agent {
   role: AgentRole;
   harness: HarnessId;
   model?: string;
+  /** The harness the agent runs on while a usage limit holds `harness`. */
+  fallback_harness?: HarnessId;
+  fallback_model?: string;
   /** Image path or URL; the UI shows the name's initial when unset. */
   avatar?: string;
   /** Agent-specific instructions, global first. */
@@ -287,6 +296,8 @@ export interface ResolvedAgentConfig {
   role: AgentRole;
   harness: HarnessId;
   model?: string;
+  fallback_harness?: HarnessId;
+  fallback_model?: string;
   avatar?: string;
   /** Global AGENTS.md, workspace AGENTS.md, then the agent's own instructions. */
   instructions: string;
@@ -500,6 +511,16 @@ export function parseMcpServer(value: unknown, file: string, path: string): McpS
   return out;
 }
 
+/** The agent keys a config.toml table and an `agents/<name>.md` frontmatter share. */
+export const AGENT_FIELDS = [
+  "role",
+  "harness",
+  "model",
+  "fallback_harness",
+  "fallback_model",
+  "avatar",
+] as const;
+
 /**
  * Validates one agent definition. `path` is the key prefix in the file
  * (`agents.backend` in config.toml, empty for `agents/<name>.md` frontmatter).
@@ -511,9 +532,7 @@ export function parseAgentSettings(
   allowInstructions = true,
 ): AgentSettings {
   const c = new Checker(file);
-  const keys = allowInstructions
-    ? ["role", "harness", "model", "avatar", "instructions"]
-    : ["role", "harness", "model", "avatar"];
+  const keys = allowInstructions ? [...AGENT_FIELDS, "instructions"] : [...AGENT_FIELDS];
   const t = c.table(value, path, keys);
   const out: AgentSettings = {};
   if (t.role !== undefined)
@@ -522,6 +541,17 @@ export function parseAgentSettings(
     out.harness = c.oneOf(t.harness, keyPath(path, "harness"), HARNESSES, isHarnessId);
   }
   if (t.model !== undefined) out.model = c.string(t.model, keyPath(path, "model"));
+  if (t.fallback_harness !== undefined) {
+    out.fallback_harness = c.oneOf(
+      t.fallback_harness,
+      keyPath(path, "fallback_harness"),
+      HARNESSES,
+      isHarnessId,
+    );
+  }
+  if (t.fallback_model !== undefined) {
+    out.fallback_model = c.string(t.fallback_model, keyPath(path, "fallback_model"));
+  }
   if (t.avatar !== undefined) out.avatar = c.string(t.avatar, keyPath(path, "avatar"));
   if (t.instructions !== undefined) {
     out.instructions = c.string(t.instructions, keyPath(path, "instructions"));

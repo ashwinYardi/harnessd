@@ -12,6 +12,7 @@ import {
   emptyTokenUsage,
   type HarnessAdapter,
   type HarnessId,
+  harnessName,
   type Issue,
   type LinkedIssue,
   limitAvailableLine,
@@ -35,7 +36,7 @@ import type { TaskWorktrees } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
 import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
 import { grillIssue } from "./grill.ts";
-import { afterLimited, afterOk, isHeld, releaseExpired } from "./limits.ts";
+import { afterLimited, afterOk, harnessForRun, isHeld, releaseExpired } from "./limits.ts";
 import { advanceMerges, pendingMerge } from "./merge.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
 import { planIssue, type SplitPlan } from "./plan.ts";
@@ -410,6 +411,20 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     };
   }
 
+  /**
+   * The agent config a run starts with: the agent on its own harness, or on its fallback
+   * while a limit holds its own (MET-81). Undefined when the run must wait.
+   */
+  function forRun(key: string, agent: ResolvedAgentConfig): ResolvedAgentConfig | undefined {
+    const chosen = harnessForRun(agent, held, (h) => adapters[h] !== undefined);
+    if (chosen !== undefined && chosen.harness !== agent.harness) {
+      log(
+        `${key}: ${agent.name} on ${harnessName(chosen.harness)} while ${harnessName(agent.harness)} is limited`,
+      );
+    }
+    return chosen;
+  }
+
   /** Ends the holds whose time has come, with one log line each. */
   async function releaseHolds(s: LoopState): Promise<void> {
     let changed = false;
@@ -576,14 +591,15 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       log(`${issue.key}: no agent has role ${role}`);
       return;
     }
-    const agent = resolveAgentConfig(config, agentName);
-    const adapter = adapters[agent.harness];
-    if (adapter === undefined) {
-      log(`${issue.key}: no adapter for harness ${agent.harness}`);
+    const own = resolveAgentConfig(config, agentName);
+    if (adapters[own.harness] === undefined) {
+      log(`${issue.key}: no adapter for harness ${own.harness}`);
       return;
     }
-    // A held harness starts nothing; the issue waits in Ready (MET-70).
-    if (held(agent.harness)) return;
+    // A held harness starts nothing: the agent runs on its fallback, or the issue waits in Ready (MET-70).
+    const agent = forRun(issue.key, own);
+    const adapter = agent && adapters[agent.harness];
+    if (agent === undefined || adapter === undefined) return;
     const budget = budgetMs(issue.size, config.limits);
     if (budget === undefined) {
       await escalate(
@@ -895,13 +911,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       log("no agent has role coordinator");
       return;
     }
-    const agent = resolveAgentConfig(config, name);
-    const harness = adapters[agent.harness];
-    if (harness === undefined) {
-      log(`${issue.key}: no adapter for harness ${agent.harness}`);
+    const own = resolveAgentConfig(config, name);
+    if (adapters[own.harness] === undefined) {
+      log(`${issue.key}: no adapter for harness ${own.harness}`);
       return;
     }
-    if (held(agent.harness)) return;
+    const agent = forRun(issue.key, own);
+    const harness = agent && adapters[agent.harness];
+    if (agent === undefined || harness === undefined) return;
     const adapter = tracked(harness);
 
     const children = await linear.listChildren(issue.id);

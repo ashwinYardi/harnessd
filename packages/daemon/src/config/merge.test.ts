@@ -244,6 +244,25 @@ test("resolveAgentConfig concatenates global, workspace, then agent instructions
   assert.equal("model" in backend, false);
 });
 
+test("fallback_harness and fallback_model override per layer and resolve", () => {
+  const merged = mergeLayers([
+    layer("global", {
+      agents: {
+        backend: { fallback_harness: "codex", fallback_model: "gpt-5", label: "g", keyPrefix: "" },
+      },
+    }),
+    layer("workspace", {
+      agents: { backend: { fallback_model: "gpt-5-codex", label: "w", keyPrefix: "" } },
+    }),
+  ]);
+  const backend = resolveAgentConfig(merged, "backend");
+  assert.equal(backend.fallback_harness, "codex");
+  assert.equal(backend.fallback_model, "gpt-5-codex");
+  const qa = resolveAgentConfig(merged, "qa");
+  assert.equal("fallback_harness" in qa, false);
+  assert.equal("fallback_model" in qa, false);
+});
+
 test("resolveAgentConfig rejects unknown agents", () => {
   assert.throws(() => resolveAgentConfig(mergeLayers([]), "nobody"), /unknown agent "nobody"/);
 });

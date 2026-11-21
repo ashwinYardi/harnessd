@@ -961,6 +961,114 @@ test("a limited QA run counts no QA failure and goes back to Ready", async () =>
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
 });
 
+// --- fallback harness (MET-81) ------------------------------------------------
+
+/** The backend agent runs on Claude Code with opus, and on Codex with gpt-5 while Claude Code is held. */
+const BACKEND_WITH_FALLBACK = mergeLayers([
+  {
+    scope: "workspace",
+    dir: "/repo/.harnessd",
+    settings: {},
+    agents: {
+      backend: {
+        model: "opus",
+        fallback_harness: "codex",
+        fallback_model: "gpt-5",
+        label: "backend",
+        keyPrefix: "agents.backend",
+      },
+    },
+    rules: [],
+    skills: [],
+    mcp: {},
+    skillSettings: {},
+  },
+]);
+
+function fallbackSetup() {
+  const time = manualClock();
+  const codex = fakeAdapter({ id: "codex" });
+  const claude = fakeAdapter();
+  const t = setup({
+    adapter: claude,
+    config: BACKEND_WITH_FALLBACK,
+    extra: { clock: time.clock, adapters: { "claude-code": claude.adapter, codex: codex.adapter } },
+  });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  return { t, time, codex, claude, parent };
+}
+
+test("while the main harness is held, the agent runs on its fallback harness and model, then on the main one after the reset", async () => {
+  const { t, time, codex, claude, parent } = fallbackSetup();
+  const a = part(t, parent.id, "backend", "A");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.equal(claude.runs()[0]?.model, "opus");
+  claude.pending[0]?.finish("limited", "usage limit reached", undefined, time.at(60 * MINUTE));
+  await t.loop.idle();
+  assert.equal(a.state, "Ready");
+
+  time.advance(5 * MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.equal(claude.runs().length, 1, "the held harness starts nothing");
+  assert.equal(codex.runs().length, 1);
+  assert.equal(codex.runs()[0]?.model, "gpt-5");
+  assert.ok(t.logs.includes(`${a.key}: backend on Codex while Claude Code is limited`));
+  codex.pending[0]?.finish("ok");
+  await t.loop.idle();
+  assert.equal(a.state, "In Review");
+  assert.ok(t.memory.state.limits["claude-code"], "an ok fallback run does not end the main hold");
+
+  time.advance(55 * MINUTE);
+  const b = part(t, parent.id, "backend", "B");
+  assert.deepEqual((await t.loop.tick()).dispatched, [b.key]);
+  assert.equal(claude.runs().length, 2, "back on the main harness after the reset");
+  assert.equal(claude.runs()[1]?.model, "opus");
+  assert.equal(codex.runs().length, 1);
+  claude.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+});
+
+test("a held fallback harness is not used: the part waits in Ready", async () => {
+  const { t, time, codex, claude, parent } = fallbackSetup();
+  const a = part(t, parent.id, "backend", "A");
+
+  await t.loop.tick();
+  claude.pending[0]?.finish("limited", "usage limit reached", undefined, time.at(60 * MINUTE));
+  await t.loop.idle();
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  codex.pending[0]?.finish("limited", "rate limit", undefined, time.at(30 * MINUTE));
+  await t.loop.idle();
+  assert.equal(a.state, "Ready");
+  assert.equal(t.memory.state.attempts[a.id], undefined);
+  assert.ok(t.memory.state.limits.codex, "the fallback run's limit holds the fallback harness");
+
+  time.advance(10 * MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, [], "both harnesses are held");
+  assert.equal(claude.runs().length + codex.runs().length, 2);
+
+  time.advance(20 * MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key], "the fallback hold ended first");
+  assert.equal(codex.runs().length, 2);
+  codex.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+});
+
+test("no fallback harness, or one with no adapter: a held agent waits as before", async () => {
+  const time = manualClock();
+  const claude = fakeAdapter();
+  const t = setup({ adapter: claude, config: BACKEND_WITH_FALLBACK, extra: { clock: time.clock } });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const a = part(t, parent.id, "backend", "A");
+
+  await t.loop.tick();
+  claude.pending[0]?.finish("limited", "usage limit reached", undefined, time.at(60 * MINUTE));
+  await t.loop.idle();
+  assert.deepEqual((await t.loop.tick()).dispatched, [], "codex has no adapter");
+  assert.ok(!t.logs.some((l) => / while /.test(l)));
+  assert.equal(a.state, "Ready");
+});
+
 test("a limited grill or plan run does not escalate: the issue stays Ready, nothing is posted", async () => {
   for (const which of ["grill", "plan"] as const) {
     const time = manualClock();
