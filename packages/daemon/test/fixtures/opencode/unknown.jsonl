@@ -1,0 +1,6 @@
+{"type":"step_start","timestamp":1795246092000,"sessionID":"ses_fake1","part":{"id":"prt_s1","sessionID":"ses_fake1","messageID":"msg_1","type":"step-start","snapshot":"0000000000000000000000000000000000000000"}}
+{"type":"reasoning","timestamp":1795246092100,"sessionID":"ses_fake1","part":{"id":"prt_r","sessionID":"ses_fake1","messageID":"msg_1","type":"reasoning","text":"Thinking."}}
+{"type":"future_event","timestamp":1795246092200,"sessionID":"ses_fake1","data":{}}
+not json
+[1,2]
+{"type":"text","timestamp":1795246092300,"sessionID":"ses_fake1","part":{"id":"prt_t1","sessionID":"ses_fake1","messageID":"msg_1","type":"text","text":"Still done.","time":{"start":1795246092200,"end":1795246092200}}}

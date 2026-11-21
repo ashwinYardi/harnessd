@@ -1,0 +1,2 @@
+{"type":"step_start","timestamp":1795246091600,"sessionID":"ses_fake1","part":{"id":"prt_s1","sessionID":"ses_fake1","messageID":"msg_1","type":"step-start","snapshot":"0000000000000000000000000000000000000000"}}
+{"type":"error","timestamp":1795246091700,"sessionID":"ses_fake1","error":{"type":"provider.rate-limit","message":"Too many requests","retryAfterMs":7200000}}

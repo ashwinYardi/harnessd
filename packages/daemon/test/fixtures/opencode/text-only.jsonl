@@ -1,0 +1,2 @@
+{"type":"step_start","timestamp":1795245925724,"sessionID":"ses_fake1","part":{"id":"prt_fake1","sessionID":"ses_fake1","messageID":"msg_fake1","type":"step-start","snapshot":"0000000000000000000000000000000000000000"}}
+{"type":"text","timestamp":1795245925736,"sessionID":"ses_fake1","part":{"id":"prt_fake2","sessionID":"ses_fake1","messageID":"msg_fake1","type":"text","text":"hi","time":{"start":1795245925729,"end":1795245925736}}}

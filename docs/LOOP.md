@@ -104,6 +104,8 @@ A worktree is cut from `origin/main`, so it holds only what the repo commits. ha
   - `.codex/config.toml`: the MCP servers, with `harnessd-memory`;
   - `.codex/hooks.json`: the skills' Codex hooks. `--dangerously-bypass-hook-trust` lets them run with no `/hooks` approval.
 - **The Codex gap.** Codex has no flag that skips `$CODEX_HOME/AGENTS.md` or the user-level skills. `CODEX_HOME` stays, because `auth.json` lives there. So a Codex run can still see the owner's `$CODEX_HOME/AGENTS.md` and user skills. A follow-up issue tracks this.
+- **OpenCode runs.** An agent with `harness = "opencode"` runs `opencode run --format json --standalone --auto`, with no approval prompts, as Claude runs (docs/decisions/D-036-opencode-adapter.md). `OPENCODE_CONFIG_DIR` points to an empty temp folder, so the owner's OpenCode config and global `AGENTS.md` do not load. The run reads `AGENTS.md` and the project skill folders.
+- **The OpenCode gap.** OpenCode 2.0.20 still loads skills from `~/.claude/skills` and `~/.agents/skills`. Impeccable hooks do not run, because OpenCode uses JS plugins, not `hooks.json`. Sync writes no OpenCode MCP config yet, so the run has no `harnessd-memory` server. Follow-up issues track these.
 - **Memory.** The prompt has a Memory section. It names `search_notes`, `read_note` and `write_note`, and the two vaults: `<repo>/.harnessd/vault/` and `$HARNESSD_HOME/vault/` (docs/MEMORY.md). The worktree's `.mcp.json` runs `harnessd mcp memory --workspace <main repo>`, so notes outlive the worktree.
 - **Hand-vendored skills.** A skill folder that sync did not generate stays as it is (D-020). Sync prints `kept <folder>` and does not write into it.
 
@@ -161,7 +163,7 @@ A QA agent run that ends `limited` stops the round. No review is posted, no QA f
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
 
 ## Usage limits
-A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff.
+A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.
 
 - **Part run.** The worktree is removed and the sub-issue goes back to Ready. No attempt is counted and no comment is posted.
 - **QA run.** See QA: no review and no QA failure.

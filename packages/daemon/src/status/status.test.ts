@@ -10,6 +10,7 @@ import {
   type Check,
   CODEX_MIN_VERSION,
   isBlocking,
+  locateHarness,
   runStatus,
   type StatusOptions,
 } from "./status.ts";
@@ -865,4 +866,24 @@ test("connectionsOnly runs just those connection groups (MET-33)", async () => {
     ["slack.webhook"],
   );
   assert.ok(!w.calls.some((c) => c.includes("gh")));
+});
+
+test("locateHarness finds opencode by config bin, then HARNESSD_OPENCODE_BIN, then PATH", async () => {
+  const isExecutable = async (p: string) => p.endsWith("/opencode");
+  const env = { PATH: "/usr/bin:/opt/oc", HARNESSD_OPENCODE_BIN: "/env/opencode" };
+  const config = { harnesses: { opencode: { bin: "/cfg/opencode" } } } as never;
+  assert.deepEqual(await locateHarness("opencode", { config, env, isExecutable }), {
+    path: "/cfg/opencode",
+  });
+  assert.deepEqual(await locateHarness("opencode", { config: undefined, env, isExecutable }), {
+    path: "/env/opencode",
+  });
+  assert.deepEqual(
+    await locateHarness("opencode", {
+      config: undefined,
+      env: { PATH: "/usr/bin:/opt/oc" },
+      isExecutable: async (p) => p === "/opt/oc/opencode",
+    }),
+    { path: "/opt/oc/opencode" },
+  );
 });

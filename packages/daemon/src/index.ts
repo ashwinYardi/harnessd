@@ -9,6 +9,12 @@ export {
   createCodexAdapter,
   failureReason,
 } from "./adapters/codex.ts";
+export {
+  createOpenCodeAdapter,
+  type OpenCodeOptions,
+  openCodeArgs,
+  openCodeFailureReason,
+} from "./adapters/opencode.ts";
 export * from "./config/load.ts";
 export * from "./config/merge.ts";
 export * from "./config/team.ts";

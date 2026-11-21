@@ -48,6 +48,9 @@ export function validateTeam(rows: readonly TeamRow[]): Record<string, string> {
     const model = row.model ?? "";
     if (model.length > MAX_MODEL || hasControlChar(model)) {
       errors[`${i}.model`] = `Use one line of at most ${MAX_MODEL} characters.`;
+    } else if (row.harness === "opencode" && model !== "" && !OPENCODE_MODEL.test(model)) {
+      errors[`${i}.model`] =
+        "Use <provider>/<model>, with an optional #variant, such as opencode-go/glm-5.3-flash#high.";
     }
   });
   if (rows.filter((r) => r.role === "coordinator").length !== 1) {
@@ -61,9 +64,11 @@ export const OPENCODE_PROVIDER = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 
 /**
  * An OpenCode model id, `<provider>/<model>`, such as `deepseek/deepseek-chat` or
- * `openrouter/qwen/qwen3-coder`. The model part may hold `/`, `:`, `.`, `@` and `+`.
+ * `openrouter/qwen/qwen3-coder`. The model part may hold `/`, `:`, `.`, `@` and `+`. An
+ * optional `#variant`, such as `#high`, picks the reasoning effort (D-036).
  */
-export const OPENCODE_MODEL = /^[a-z0-9][a-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:@+/-]*$/;
+export const OPENCODE_MODEL =
+  /^[a-z0-9][a-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:@+/-]*(?:#[\w.-]+)?$/;
 
 /** The provider of an OpenCode model id, or undefined when the id is not valid. */
 export function opencodeProvider(model: string): string | undefined {

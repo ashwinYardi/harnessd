@@ -472,6 +472,12 @@ export function harnessSetupSpec(harness: HarnessId): HarnessSetupSpec | undefin
  * Finds a harness CLI the way the status engine does: `[harnesses.<id>] bin`, then the
  * `HARNESSD_*_BIN` variable, then PATH (D-026). Sign-in runs this same file (D-031).
  */
+/** Where to look for each harness CLI. OpenCode has the lookup before its checks (MET-71). */
+const HARNESS_LOOKUP: Partial<Record<HarnessId, { bin: string; envBin: string }>> = {
+  ...HARNESS_SPECS,
+  opencode: { bin: "opencode", envBin: "HARNESSD_OPENCODE_BIN" },
+};
+
 export async function locateHarness(
   harness: HarnessId,
   o: {
@@ -480,7 +486,7 @@ export async function locateHarness(
     isExecutable?: (path: string) => Promise<boolean>;
   },
 ): Promise<{ path: string } | { absent: string }> {
-  const spec = HARNESS_SPECS[harness];
+  const spec = HARNESS_LOOKUP[harness];
   if (!spec) return { absent: `harnessd has no checks for ${harness} yet` };
   const ctx = { config: o.config, env: o.env, isExec: o.isExecutable ?? isExecutableFile };
   return locate(ctx, spec.bin, spec.envBin, harness);

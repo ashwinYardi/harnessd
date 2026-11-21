@@ -145,6 +145,21 @@ model = "gpt-5"             # optional, passed as --model
   3. else `codex` on PATH.
 - docs/INSTALL.md "Codex" has the install and sign-in steps.
 
+## OpenCode agents
+Set `harness = "opencode"` to run an agent on OpenCode (D-036).
+```toml
+[agents.backend]
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash#high"   # optional, passed as -m
+```
+- `model` is `<provider>/<model>`, with an optional `#variant`. The variant sets the thinking level, such as `#high`. `opencode models` lists the models you can use.
+- Without `model`, OpenCode uses its default model. The run ignores your OpenCode user config (D-036), so a model set there does not apply.
+- harnessd finds the `opencode` binary in this order:
+  1. `[harnesses.opencode] bin` in the config;
+  2. else `$HARNESSD_OPENCODE_BIN`;
+  3. else `opencode` on PATH.
+- Sign in to each provider with `opencode auth login`. The minimum tested version is 2.0.20.
+
 ## skills/<folder>/SKILL.md
 Optional frontmatter with `name` (defaults to the folder name) and `description`. Sync copies other frontmatter keys (such as `disable-model-invocation`) as they are. The frontmatter is flat `key: value` lines; indented lines continue the previous value. Sync copies every other file in the folder too.
 
