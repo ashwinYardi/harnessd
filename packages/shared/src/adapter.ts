@@ -21,7 +21,8 @@ export interface TokenUsage {
   cacheWrite: number;
 }
 
-export type RunStatus = "ok" | "error" | "timeout" | "cancelled";
+/** `limited`: the harness hit a usage or rate limit; the task itself did not fail (MET-70). */
+export type RunStatus = "ok" | "error" | "timeout" | "cancelled" | "limited";
 
 export interface RunResult {
   status: RunStatus;
@@ -38,6 +39,8 @@ export interface RunResult {
   error?: string;
   /** Why an `error` run failed, when the harness said it was out of quota or not signed in. */
   reason?: RunFailureReason;
+  /** ISO time the limit resets, when status is `limited` and the harness said when. */
+  resetAt?: string;
 }
 
 /** A failure the human fixes outside the run: a usage limit, or a harness that is not signed in. */

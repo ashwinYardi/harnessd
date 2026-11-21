@@ -698,6 +698,24 @@ test("a failed run goes back to Ready once; the second failure goes to Needs inp
   assert.equal(t.adapter.runs().length, 2, "Needs input is not picked up again");
 });
 
+test("a limited run goes back to Ready and uses no attempt (MET-70)", async () => {
+  const t = setup();
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const part = t.linear.add({
+    title: "Limited",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish("limited", "usage limit reached");
+  await t.loop.idle();
+  assert.equal(part.state, "Ready");
+  assert.equal(t.memory.state.attempts[part.id], undefined);
+  assert.equal(t.pings.length, 0);
+  assert.ok(!t.linear.comments.some((c) => /failed/.test(c.body)), "no failure comment");
+});
+
 /** A parent with one backend part and its QA sub-issue, as a split leaves them. */
 function qaFixture(t: ReturnType<typeof setup>, partState = "In Review") {
   const parent = t.linear.add({ title: "P", state: "In Progress", description: BODY("M") });

@@ -13,9 +13,11 @@ import { after, test } from "node:test";
 import type { AdapterEvent, AdapterRun, Task } from "@harnessd/shared";
 import {
   type ClaudeCodeOptions,
+  classifyLimit,
   claudeArgs,
   createClaudeCodeAdapter,
   NO_MCP_SERVERS,
+  parseResetAt,
   summarizeInput,
 } from "./claude-code.ts";
 
@@ -308,4 +310,159 @@ test("a task's env reaches the child over the adapter's env", async () => {
   });
   assert.equal((await r.result).status, "ok");
   assert.equal(readRecord(record).probe, "from-task");
+});
+
+/** No failed run may report the bare subtype: that is how "failed (error: success)" happened. */
+function assertRealReason(error: string | undefined): void {
+  assert.ok(error !== undefined && error.trim() !== "", "a failed run needs a reason");
+  assert.notEqual(error, "success");
+  assert.doesNotMatch(error, /^(error: )?success$/);
+}
+
+// Recorded lines Claude Code prints when a limit stops a run, from the result event or stderr.
+const LIMIT_FIXTURES = [
+  "Claude AI usage limit reached|1763660400",
+  "You've hit your limit · resets 7pm (America/New_York)",
+  "5-hour limit reached ∙ resets 3am",
+  'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}',
+  "Request rejected (429) · rate limit exceeded",
+  "HTTP 429 Too Many Requests",
+  'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}',
+  'API Error (api_error): {"message":"Overloaded"}',
+];
+
+test("classifyLimit matches every recorded limit message", () => {
+  for (const line of LIMIT_FIXTURES) assert.ok(classifyLimit(line), line);
+});
+
+test("classifyLimit ignores ordinary failures", () => {
+  for (const line of [
+    "error_during_execution",
+    "API Error: 500 internal server error",
+    "Error: invalid model name",
+    "Tests failed: 429 passed, 3 failed",
+    "Added rate limit handling to the API client",
+    "The rate limiter test failed",
+    "",
+  ]) {
+    assert.equal(classifyLimit(line), undefined, line);
+  }
+});
+
+test("parseResetAt reads a unix epoch after a pipe", () => {
+  const now = new Date("2026-11-20T17:37:00Z");
+  assert.equal(
+    parseResetAt("Claude AI usage limit reached|1763660400", now),
+    new Date(1763660400 * 1000).toISOString(),
+  );
+});
+
+test("parseResetAt reads a millisecond epoch too", () => {
+  const now = new Date("2026-11-20T17:37:00Z");
+  assert.equal(parseResetAt("limit|1763660400000", now), new Date(1763660400000).toISOString());
+});
+
+test("parseResetAt reads a clock time as the next one after now", () => {
+  const now = new Date("2026-11-20T17:37:00Z");
+  assert.equal(parseResetAt("resets 7pm (UTC)", now), "2026-11-20T19:00:00.000Z");
+  assert.equal(parseResetAt("resets 19:00", now), "2026-11-20T19:00:00.000Z");
+  // Already past today, so tomorrow.
+  assert.equal(parseResetAt("5-hour limit reached ∙ resets 3am", now), "2026-11-21T03:00:00.000Z");
+  assert.equal(parseResetAt("resets 5:30pm", now), "2026-11-21T17:30:00.000Z");
+  assert.equal(parseResetAt("resets 12am (UTC)", now), "2026-11-21T00:00:00.000Z");
+  // New York is UTC-5 in November: 7pm there is 00:00 UTC the next day.
+  assert.equal(
+    parseResetAt("You've hit your limit · resets 7pm (America/New_York)", now),
+    "2026-11-21T00:00:00.000Z",
+  );
+  // 1pm New York (18:00 UTC) is still ahead of now.
+  assert.equal(parseResetAt("resets 1pm (America/New_York)", now), "2026-11-20T18:00:00.000Z");
+});
+
+test("parseResetAt leaves the time unset when nothing parses", () => {
+  const now = new Date("2026-11-20T17:37:00Z");
+  assert.equal(parseResetAt("usage limit reached", now), undefined);
+  assert.equal(parseResetAt("resets 7pm (Nowhere/Atlantis)", now), undefined);
+  assert.equal(parseResetAt("resets 25:00", now), undefined);
+  assert.equal(parseResetAt("rate limit|abc", now), undefined);
+});
+
+test("a limit in the result event ends the run as limited with the reset time", async () => {
+  const { run: r } = run("limit-result");
+  const result = await r.result;
+  assert.equal(result.status, "limited");
+  assert.equal(result.resetAt, new Date(1763660400 * 1000).toISOString());
+  assert.equal(result.error, "Claude AI usage limit reached|1763660400");
+});
+
+test("a reset time beyond the error summary survives a long limit message", async () => {
+  const { run: r } = run("limit-result-long");
+  const result = await r.result;
+  assert.equal(result.status, "limited");
+  assert.equal(result.resetAt, "2025-11-20T17:40:00.000Z");
+  assert.match(result.error ?? "", /…$/);
+});
+
+test("a limit on stderr ends the run as limited", async () => {
+  const { run: r } = run("limit-stderr");
+  const result = await r.result;
+  assert.equal(result.status, "limited");
+  assert.equal(result.resetAt, undefined);
+  assert.match(result.error ?? "", /rate_limit_error/);
+});
+
+test("a retried rate limit in a run that succeeds stays ok", async () => {
+  const { run: r } = run("rate-limit-ok");
+  const result = await r.result;
+  assert.equal(result.status, "ok");
+  assert.equal(result.error, undefined);
+});
+
+test("an earlier retried 429 on stderr does not hide a real failure", async () => {
+  const { run: r } = run("rate-limit-then-error");
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "Error: invalid model name");
+});
+
+test("a budget timeout beats a limit", async () => {
+  const { run: r } = run("limit-hang", task({ budgetMs: 500 }), { killGraceMs: 300 });
+  const result = await r.result;
+  assert.equal(result.status, "timeout");
+  assert.equal(result.resetAt, undefined);
+});
+
+test("cancel beats a limit", async () => {
+  const { run: r } = run("limit-hang", task({ budgetMs: 30_000 }));
+  for await (const event of r.events) {
+    if (event.type === "text") await r.cancel();
+  }
+  const result = await r.result;
+  assert.equal(result.status, "cancelled");
+  assert.equal(result.resetAt, undefined);
+});
+
+test("is_error with subtype success reports the result text, never 'success'", async () => {
+  const { run: r } = run("error-success");
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "API Error: 500 internal server error");
+  assertRealReason(result.error);
+});
+
+test("stderr explains an empty error result with a generic failure subtype", async () => {
+  const { run: r } = run("error-stderr");
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "Error: invalid model name");
+});
+
+test("no failed run reports 'success' or 'error: success' as its reason", async () => {
+  for (const mode of ["error", "error-success", "error-stderr", "limit-result", "limit-stderr"]) {
+    const { run: r } = run(mode);
+    const result = await r.result;
+    assert.notEqual(result.status, "ok", mode);
+    assertRealReason(result.error);
+    assert.doesNotMatch(`${result.status}: ${result.error}`, /^error: success$/, mode);
+  }
 });
