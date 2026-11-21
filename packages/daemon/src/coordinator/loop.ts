@@ -289,6 +289,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   const coordinatorRuns = new Set<AdapterRun>();
   /** The last known pause flag. */
   let pausedNow = false;
+  /** A failed self-update pause write needs an explicit resume. */
+  let pauseInMemory = false;
   let watch: unknown;
   let checking = false;
   /** A self-update check to run on the next unpaused tick. The first one is the start check. */
@@ -354,19 +356,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
 
   // --- re-queue -----------------------------------------------------------
 
-  /** In-flight entries no live run owns: a previous process died with them. No attempt counted. */
+  /** Re-queues entries with no live run, including stopped runs whose Ready move failed. */
   async function requeue(s: LoopState, report: TickReport): Promise<void> {
     for (const entry of [...s.inFlight]) {
       if (live.has(entry.issueId)) continue;
       if (entry.pausedAt !== undefined) {
-        // A pause cancelled it, then the process stopped before it was recorded. Keep the worktree.
-        const moved = await safely(`re-queue ${entry.issueKey}`, () =>
-          linear.moveTo(entry.issueId, "Ready"),
-        );
-        if (!moved) continue;
-        s.inFlight = s.inFlight.filter((e) => e !== entry);
-        await keepInterrupted(s, entry);
-        report.requeued.push(entry.issueKey);
+        if (await requeueStopped(s, entry)) report.requeued.push(entry.issueKey);
         continue;
       }
       if (entry.worktree !== "") {
@@ -431,17 +426,26 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     log(`${entry.issueKey}: ${entry.stopReason ?? "paused"}, re-queued, ${where}`);
   }
 
+  /** Keep the run in flight until Linear confirms that it is Ready. */
+  async function requeueStopped(s: LoopState, entry: InFlightRun): Promise<boolean> {
+    const moved = await safely(`re-queue ${entry.issueKey}`, () =>
+      linear.moveTo(entry.issueId, "Ready"),
+    );
+    if (!moved) return false;
+    await keepInterrupted(s, entry);
+    s.inFlight = s.inFlight.filter((e) => e !== entry);
+    await save();
+    return true;
+  }
+
   async function finish(s: LoopState, entry: InFlightRun, result: RunResult): Promise<void> {
+    // Keep the live entry during the move so a tick cannot try to re-queue it in parallel.
+    const stopped = entry.pausedAt !== undefined && result.status !== "ok";
+    if (stopped) await requeueStopped(s, entry);
     live.delete(entry.issueId);
     syncWatch();
+    if (stopped) return;
     s.inFlight = s.inFlight.filter((e) => e !== entry);
-    if (entry.pausedAt !== undefined && result.status !== "ok") {
-      // Cancelled by a pause: keep the worktree, back to Ready, no attempt counted.
-      await keepInterrupted(s, entry);
-      await safely(`re-queue ${entry.issueKey}`, () => linear.moveTo(entry.issueId, "Ready"));
-      await save();
-      return;
-    }
     if (entry.worktree !== "") {
       await safely(`remove the worktree of ${entry.issueKey}`, () =>
         worktrees.remove(entry.worktree),
@@ -712,16 +716,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         };
         if (abort.signal.aborted) result.cancelled = true;
       }
+      if (result.cancelled === true) await requeueStopped(s, entry);
       live.delete(issue.id);
       syncWatch();
+      if (result.cancelled === true) return;
       s.inFlight = s.inFlight.filter((e) => e !== entry);
-      if (result.cancelled === true) {
-        // Cancelled by a pause: no review, no QA failure, back to Ready, worktree kept.
-        await keepInterrupted(s, entry);
-        await safely(`re-queue ${issue.key}`, () => linear.moveTo(issue.id, "Ready"));
-        await save();
-        return;
-      }
       const settled = await settleQa(s, { qa: issue, parent: qa.parent }, result, {
         linear,
         notifier,
@@ -888,6 +887,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
 
   /** Re-reads the flag; on an error the last known value stands. */
   async function readPaused(): Promise<boolean> {
+    if (pauseInMemory) return true;
     if (options.paused !== undefined) {
       try {
         pausedNow = await options.paused();
@@ -1052,10 +1052,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     u.state = blocked ? "blocked" : "failed";
     u.error = detail;
     u.at = clock.now().toISOString();
-    // pausedSeen is set by the next tick that reads the flag. When the write fails, no
-    // tick sees a resume, so the same build is not retried every tick.
     pausedNow = true;
-    await safely("pause the loop", () => up.pause(reason));
+    pausedSeen = true;
+    pauseInMemory = !(await safely("pause the loop", () => up.pause(reason)));
     log(`${oneLine(reason)}; the old build keeps running, the loop is paused`);
     if (s.selfUpdateNotices[u.to] !== undefined) {
       // The same target failed before: the owner already knows.
@@ -1255,6 +1254,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       return out;
     },
     resume() {
+      pauseInMemory = false;
       pausedNow = false;
       if (timer === undefined) return;
       // A tick already under way may have stopped at the pause check: tick again after it.

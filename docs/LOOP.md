@@ -200,7 +200,7 @@ daemon start ────────────────┴─► check ─
 
 - **Check.** The loop asks the updater for a target after each tick where the merge gate saw a PR merged, by harnessd or by a human. A pause in the same pass keeps the check for the first tick after resume. The merged part's parent is the **trigger issue**. One check also runs at daemon start, with no trigger issue. The updater finds no target when the repo is not the install clone, or the install already runs the default branch head. A `pending` record with no target left is dropped.
 - **Pending.** A target is recorded as `selfUpdate` in `loop.json` with the state `pending`. While it is pending, a tick dispatches nothing and skips grills, splits and merges. Runs in flight, grill and plan runs included, finish normally.
-- **Safe point.** The first tick with `inFlight` empty. A run that has run longer than its size budget (D-014: S 30 min, M 2 h) while the update waits is stopped like a paused run: its worktree is kept, it is listed under `interrupted` with the reason `self-update`, it goes back to Ready, and it counts no attempt. It runs again after the restart, in the kept worktree.
+- **Safe point.** The first tick with `inFlight` empty. A run that has run longer than its size budget (D-014: S 30 min, M 2 h) while the update waits is stopped like a paused run: its worktree is kept, it is listed under `interrupted` with the reason `self-update`, it goes back to Ready, and it counts no attempt. If the move to Ready fails, the run stays in `inFlight` and the next tick tries the move again. The run starts again in the same worktree after the restart.
 - **Apply.** The state becomes `applying` and is saved. The updater fast-forwards the install clone, runs `pnpm install --frozen-lockfile` and `pnpm build` with the service's Node, and restarts through launchd. Until the restart, the old process dispatches nothing. The new process reads the `applying` record, logs `self-update: <from7> -> <to7>` and sets the state to `done`.
 - **Blocked or failed.** A local change in the install clone blocks the update; harnessd never discards it. A failed pull, install or build keeps the old build; harnessd never restarts into a broken build. Either way:
   - paused.json gets the reason `self-update blocked: <reason>` or `self-update failed: <step>: <last error lines>`;
@@ -208,7 +208,7 @@ daemon start ────────────────┴─► check ─
   - the trigger issue, if any, gets a comment with the error and moves to Needs input. A start-time failure makes no Linear call.
 
   The target commit is recorded under `selfUpdateNotices` before the notice, as `humanPings` is for a PR. So a repeat failure for the same target pauses again but sends no second notice or comment.
-- **Resume.** After `harnessd resume`, the next tick checks again.
+- **Resume.** After `harnessd resume`, the next tick checks again. If the pause flag write fails, the loop logs the error and stays paused in memory until the daemon receives the resume request.
 - **The app.** GET /api/loop returns the record as `selfUpdate` (docs/API.md).
 
 ## State file

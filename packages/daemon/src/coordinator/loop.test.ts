@@ -1996,6 +1996,46 @@ test("a run over its size budget while an update waits is stopped, kept and run 
   });
 });
 
+test("an update waits when a stopped part cannot move back to Ready", async () => {
+  const clock = testClock();
+  const f = fakeUpdater();
+  const t = setup({ extra: { ...f.extra, clock } });
+  const slow = t.linear.add({
+    title: "Slow",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  seededMerge(t);
+  assert.deepEqual((await t.loop.tick()).dispatched, [slow.key]);
+  f.u.target = { from: FROM, to: TO };
+  t.gh.statuses[9] = { state: "MERGED" };
+  const moveTo = t.linear.moveTo.bind(t.linear);
+  t.linear.moveTo = async (id, state) => {
+    if (id === slow.id && state === "Ready") throw new Error("Linear unavailable");
+    await moveTo(id, state);
+  };
+
+  clock.at += 31 * 60_000;
+  await t.loop.tick();
+  assert.equal(slow.state, "In Progress");
+  assert.deepEqual(f.u.applied, []);
+  assert.deepEqual(
+    t.memory.state.inFlight.map((run) => run.issueKey),
+    [slow.key],
+  );
+
+  t.linear.moveTo = moveTo;
+  const next = await t.loop.tick();
+  assert.deepEqual(next.requeued, [slow.key]);
+  assert.deepEqual(next.dispatched, []);
+  assert.equal(slow.state, "Ready");
+  assert.deepEqual(
+    t.memory.state.interrupted.map((run) => run.issueKey),
+    [slow.key],
+  );
+  assert.deepEqual(t.memory.state.inFlight, []);
+  assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }]);
+});
+
 test("a failed build keeps the old build, pauses, comments and moves the trigger to Needs input, once", async () => {
   const f = fakeUpdater({
     status: "failed",
@@ -2095,9 +2135,8 @@ test("a pending record with no update left is dropped at start, not applied", as
   assert.equal(store.state.selfUpdate, undefined);
 });
 
-test("a failed pause write does not rebuild on every tick", async () => {
+test("a failed pause write stops dispatch and raises Needs input until explicit resume", async () => {
   const f = fakeUpdater({ status: "failed", step: "build", error: "boom" });
-  f.u.target = { from: FROM, to: TO };
   const t = setup({
     extra: {
       ...f.extra,
@@ -2109,11 +2148,28 @@ test("a failed pause write does not rebuild on every tick", async () => {
       },
     },
   });
+  const fx = seededMerge(t);
   await t.loop.tick();
-  await t.loop.tick();
-  await t.loop.tick();
+  f.u.target = { from: FROM, to: TO };
+  t.gh.statuses[9] = { state: "MERGED" };
+  assert.equal((await t.loop.tick()).paused, true);
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(selfPings(t).length, 1);
+
+  const ready = t.linear.add({
+    title: "Later",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const paused = await t.loop.tick();
+  assert.equal(paused.paused, true);
+  assert.deepEqual(paused.dispatched, []);
+  assert.equal(ready.state, "Ready");
   assert.equal(f.u.applied.length, 1);
-  assert.equal(t.memory.state.selfUpdate?.state, "failed");
+
+  f.u.target = undefined;
+  t.loop.resume();
+  assert.deepEqual((await t.loop.tick()).dispatched, [ready.key]);
+  assert.equal(f.u.checks, 3);
 });
 
 test("a merge in a pass the pause flag stops is checked after resume, with its trigger", async () => {
