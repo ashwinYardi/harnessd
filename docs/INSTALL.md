@@ -64,9 +64,9 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 |---|---|---|
 | `node` | the running Node, and on macOS the Node the launchd service runs when it differs | `fail` below 24. Fix: `nvm install 24 && nvm alias default 24`, or `brew install node@24`. The service Node below 24, missing or broken: `fail`. Fix: run the Install block with Node 24 active, then `harnessd init` |
 | `config` | loads global and workspace config.toml | `fail` with the file and key |
-| `harness.<id>.cli` | `[harnesses.<id>] bin` in the config, else `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, on PATH; then `--version` | `missing` when not found |
-| `harness.<id>.auth` | `claude auth status --json`; `codex login status` | `fail` when signed out; `warn` when the status cannot be read |
-| `harness.<id>.version` | the version against a list of known-bad releases; for Codex, also against the minimum tested version (`CODEX_MIN_VERSION`, 0.171.0, D-032) | `warn` |
+| `harness.<id>.cli` | `[harnesses.<id>] bin` in the config, else `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, `$HARNESSD_OPENCODE_BIN` or `opencode`, on PATH; then `--version` | `missing` when not found |
+| `harness.<id>.auth` | `claude auth status --json`; `codex login status`; `opencode auth list --format json --standalone` (provider ids only) | `fail` when signed out, or for OpenCode when a provider an agent names is not signed in; `warn` when the status cannot be read, or no provider is named or signed in |
+| `harness.<id>.version` | the version against a list of known-bad releases; for Codex and OpenCode, also against the minimum tested version (Codex 0.171.0, D-032; OpenCode 2.0.20) | `warn` |
 | `github.cli` | `$HARNESSD_GH_BIN` or `gh` on PATH | `missing` |
 | `github.auth` | `gh auth status --active` | `fail`: run `gh auth login` |
 | `github.push` | `gh repo view --json viewerPermission` | `fail` below WRITE, or with no GitHub remote |
@@ -88,6 +88,19 @@ An agent with `harness = "codex"` runs on the Codex CLI (D-032, docs/CONFIG.md "
 3. Check the sign-in: `codex login status`. `harnessd doctor` runs the same check as `harness.codex.auth`.
 
 The minimum tested version is 0.171.0. Below it, `harness.codex.version` is `warn`. The loop still runs. Update with `npm install -g @openai/codex@latest`.
+
+## OpenCode
+An agent with `harness = "opencode"` and `model = "<provider>/<model>"` runs on OpenCode 2.x, for example `model = "deepseek/deepseek-chat"`. Settings, Team lists the models that `opencode models` reports.
+1. Install it with the official installer: `curl -fsSL https://opencode.ai/install | bash`. npm still has 1.x, so harnessd does not install OpenCode through npm. The installer puts the binary in `~/.opencode/bin`. Add that folder to PATH, or set it in `~/.harnessd/config.toml`:
+
+   ```toml
+   [harnesses.opencode]
+   bin = "/Users/you/.opencode/bin/opencode"
+   ```
+2. Sign in each provider the agents use. In Settings, Harnesses, OpenCode, click Sign in next to the provider. The daemon runs `opencode auth login <provider>` as a child process. When the provider asks for a typed API key, the card shows the command to run in a terminal instead. harnessd never reads or passes the key.
+3. Check it: `harnessd doctor`. `harness.opencode.auth` fails and names each provider an agent uses that is not signed in.
+
+The minimum tested version is 2.0.20. Below it, `harness.opencode.version` is `warn`. Update with `opencode upgrade`; Settings runs the same command.
 
 ## The launchd service
 | | |

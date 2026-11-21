@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "harnessd-memory": {
+      "type": "local",
+      "command": [
+        "harnessd",
+        "mcp",
+        "memory"
+      ],
+      "enabled": true
+    }
+  }
+}

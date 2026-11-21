@@ -9,10 +9,17 @@ export interface ApiRequest {
   path: string;
   /** Parsed JSON body; undefined when there is none. */
   body: unknown;
+  /** The `:name` segments of the route's path, as sent: not decoded. Empty when none. */
+  params?: Record<string, string>;
 }
 
 export interface Route {
   method: HttpMethod;
+  /**
+   * The exact path, or a pattern with `:name` segments, such as
+   * `/api/setup/opencode/providers/:provider/signin`. A `:name` segment matches one
+   * non-empty segment; the handler must check its value before it uses it.
+   */
   path: string;
   /**
    * Returns the JSON body of a 200, a RawBody or an EventStream; throws HttpError for
@@ -84,16 +91,36 @@ export const MAX_BODY_BYTES = 64 * 1024;
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
+/** The `:name` values when `pattern` matches `path`, else undefined. */
+export function matchPath(pattern: string, path: string): Record<string, string> | undefined {
+  if (pattern === path) return {};
+  if (!pattern.includes("/:")) return undefined;
+  const want = pattern.split("/");
+  const got = path.split("/");
+  if (want.length !== got.length) return undefined;
+  const params: Record<string, string> = {};
+  for (let i = 0; i < want.length; i++) {
+    const w = want[i] ?? "";
+    const g = got[i] ?? "";
+    if (w.startsWith(":")) {
+      if (g === "") return undefined;
+      params[w.slice(1)] = g;
+    } else if (w !== g) return undefined;
+  }
+  return params;
+}
+
 /**
  * The route for a method and path. A path with no route is 404; a known path with
- * another method is 405, with the allowed methods.
+ * another method is 405, with the allowed methods. An exact path wins over a pattern.
  */
 export function matchRoute(
   routes: readonly Route[],
   method: string,
   path: string,
 ): Route | HttpError {
-  const onPath = routes.filter((r) => r.path === path);
+  const exact = routes.filter((r) => r.path === path);
+  const onPath = exact.length > 0 ? exact : routes.filter((r) => matchPath(r.path, path));
   if (onPath.length === 0) return new HttpError(404, "not_found", `no route for ${path}`);
   const route = onPath.find((r) => r.method === method);
   if (route) return route;
@@ -191,7 +218,7 @@ export function createRouter(
       const route = matchRoute(routes, req.method ?? "GET", path);
       if (route instanceof HttpError) {
         if (route.status === 405) {
-          const allow = routes.filter((r) => r.path === path).map((r) => r.method);
+          const allow = routes.filter((r) => matchPath(r.path, path)).map((r) => r.method);
           res.setHeader("allow", allow.join(", "));
         }
         throw route;
@@ -204,7 +231,8 @@ export function createRouter(
         }
         body = await readBody(req);
       }
-      const result = await route.handler({ method: route.method, path, body });
+      const params = matchPath(route.path, path) ?? {};
+      const result = await route.handler({ method: route.method, path, body, params });
       if (result instanceof EventStream) {
         openStream(req, res, result, options.streams);
       } else if (result instanceof RawBody) {

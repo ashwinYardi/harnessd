@@ -272,7 +272,7 @@ test("workspaceDir reads the layer from one folder and writes into another", asy
   const main = await snapshot(s.repoDir);
   assert.deepEqual([...wt.keys()], [...main.keys()]);
   for (const [path, entry] of main) {
-    if (path === ".mcp.json" || path === ".codex/config.toml") continue;
+    if ([".mcp.json", ".codex/config.toml", "opencode.json"].includes(path)) continue;
     assert.deepEqual(wt.get(path), entry, path);
   }
   assert.ok(!(await exists(join(s.worktree, ".harnessd"))), "the worktree needs no .harnessd/");
@@ -290,6 +290,14 @@ test("into a worktree, the memory server reads the main repo's vault", async () 
   assert.ok(
     codex.includes(`args = ["mcp", "memory", "--workspace", ${JSON.stringify(s.repoDir)}]`),
   );
+  const opencode = JSON.parse(await readFile(join(s.worktree, "opencode.json"), "utf8"));
+  assert.deepEqual(opencode.mcp["harnessd-memory"].command, [
+    "harnessd",
+    "mcp",
+    "memory",
+    "--workspace",
+    s.repoDir,
+  ]);
   // A plain sync keeps the bare command: the server finds the repo from its cwd.
   await syncRepo({ repoDir: s.repoDir, globalDir: s.globalDir });
   const plain = JSON.parse(await readFile(join(s.repoDir, ".mcp.json"), "utf8"));

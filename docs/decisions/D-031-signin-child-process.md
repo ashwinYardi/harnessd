@@ -1,5 +1,5 @@
 # D-031 Sign-in runs the harness CLI's own login as a daemon child process
-Status: accepted 2026-11-20. Amends D-026 (sign-in opened Terminal on macOS only). Issue: MET-58, part of MET-48.
+Status: accepted 2026-11-20. Amended by D-037 (draft): OpenCode provider sign-in. Amends D-026 (sign-in opened Terminal on macOS only). Issue: MET-58, part of MET-48.
 
 - Settings, Harnesses, Sign in runs the CLI's own login as a child process of the daemon, on every platform: `claude auth login` or `codex login`. No other app is started or automated. No `osascript`.
 - The binary is the one the status engine checks: `[harnesses.<id>] bin`, then `HARNESSD_*_BIN`, then PATH. When none is found, the route answers 400 `not_installed` and runs nothing.

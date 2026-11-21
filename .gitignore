@@ -159,3 +159,4 @@ vite.config.ts.timestamp-*
 # harnessd sync output that holds local paths or secrets (docs/SYNC.md)
 .mcp.json
 .codex/
+opencode.json

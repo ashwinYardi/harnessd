@@ -28,6 +28,15 @@ import {
   parseSemver,
 } from "./detect.ts";
 import { launchdPlistPath, parseServicePlist, wrapperExecPath } from "./launchd.ts";
+import {
+  OPENCODE_AUTH_LIST,
+  OPENCODE_INSTALL,
+  OPENCODE_MIN_VERSION,
+  OPENCODE_UPGRADE,
+  opencodeSigninCommand,
+  parseAuthProviders,
+  requiredProviders,
+} from "./opencode.ts";
 
 /**
  * ok: works. warn: works, but something is off; never blocks. fail: present but
@@ -297,22 +306,69 @@ function nodeGroup(ctx: Ctx): Group {
 interface HarnessSpec {
   bin: string;
   envBin: string;
-  pkg: string;
+  /** How the CLI installs and updates: an npm package, or a command to copy and its own upgrade. */
+  setup:
+    | { kind: "npm"; pkg: string }
+    | {
+        kind: "self";
+        /** The official installer, to copy into a terminal. */
+        install: string;
+        /** The fix when the CLI is not found. */
+        missing: string;
+        /** argv after the binary that updates it. */
+        updateArgs: readonly string[];
+      };
   /** argv that reports sign-in without spending tokens. */
-  status: string[];
-  signedIn: (stdout: string, code: number) => { state: "ok" | "fail" | "warn"; detail: string };
+  status: readonly string[];
+  signedIn: (
+    stdout: string,
+    code: number,
+    config: MergedConfig | undefined,
+  ) => { state: "ok" | "fail" | "warn"; detail: string; fix?: string };
   login: string;
   /** The oldest tested version. Below it, or when unreadable, the version check warns. */
   minVersion?: string;
-  /** argv of the CLI's own login, run by Settings sign-in (D-031). */
-  loginArgs: string[];
+  /** argv of the CLI's own login, run by Settings sign-in (D-031). Undefined: no app sign-in. */
+  loginArgs?: string[];
+}
+
+/** The OpenCode sign-in check: every provider an opencode agent names must be signed in. */
+function opencodeSignedIn(
+  stdout: string,
+  code: number,
+  config: MergedConfig | undefined,
+): { state: "ok" | "fail" | "warn"; detail: string; fix?: string } {
+  const signed = code === 0 ? parseAuthProviders(stdout) : undefined;
+  if (signed === undefined) {
+    return {
+      state: "warn",
+      detail: "could not read the signed-in providers",
+      fix: "Run: opencode auth list",
+    };
+  }
+  const required = requiredProviders(config);
+  const missing = required.filter((p) => !signed.includes(p));
+  if (missing.length > 0) {
+    return {
+      state: "fail",
+      detail: `not signed in: ${missing.join(", ")}`,
+      fix: `Sign in each in Settings, Harnesses, OpenCode, or run: ${opencodeSigninCommand(missing[0] ?? "")}`,
+    };
+  }
+  if (required.length > 0) return { state: "ok", detail: `signed in: ${required.join(", ")}` };
+  if (signed.length > 0) return { state: "ok", detail: `signed in: ${signed.join(", ")}` };
+  return {
+    state: "warn",
+    detail: "no provider is signed in, and no opencode agent names one",
+    fix: 'Set model = "<provider>/<model>" on the agent, then sign that provider in.',
+  };
 }
 
 const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
   "claude-code": {
     bin: "claude",
     envBin: "HARNESSD_CLAUDE_BIN",
-    pkg: "@anthropic-ai/claude-code",
+    setup: { kind: "npm", pkg: "@anthropic-ai/claude-code" },
     status: ["auth", "status", "--json"],
     signedIn: (stdout) => {
       let parsed: { loggedIn?: unknown; authMethod?: unknown };
@@ -331,7 +387,7 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
   codex: {
     bin: "codex",
     envBin: "HARNESSD_CODEX_BIN",
-    pkg: "@openai/codex",
+    setup: { kind: "npm", pkg: "@openai/codex" },
     status: ["login", "status"],
     // Its output can name a masked key, so only the exit code is read.
     signedIn: (_stdout, code) =>
@@ -342,19 +398,74 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
     minVersion: CODEX_MIN_VERSION,
     loginArgs: ["login"],
   },
+  opencode: {
+    bin: "opencode",
+    envBin: "HARNESSD_OPENCODE_BIN",
+    setup: {
+      kind: "self",
+      install: OPENCODE_INSTALL,
+      missing: `Install it: ${OPENCODE_INSTALL}. It goes in ~/.opencode/bin; add that to PATH or set [harnesses.opencode] bin.`,
+      updateArgs: OPENCODE_UPGRADE,
+    },
+    // Only provider ids are read from this list; never a credential field.
+    status: OPENCODE_AUTH_LIST,
+    signedIn: opencodeSignedIn,
+    login: "Run: opencode auth login <provider>",
+    minVersion: OPENCODE_MIN_VERSION,
+  },
 };
 
+/** One setup command: the argv the daemon runs, and the text a person would type. */
+export interface SetupCommand {
+  /** "npm", or undefined for the harness's own binary. */
+  cmd?: "npm";
+  args: string[];
+  text: string;
+}
+
+export interface HarnessSetupSpec {
+  bin: string;
+  /** Undefined when the app does not run the install: the person copies `installText`. */
+  install?: SetupCommand;
+  installText: string;
+  update: SetupCommand;
+  login: string;
+  /** Undefined when sign-in is not one fixed command, as for OpenCode providers. */
+  loginArgs?: string[];
+}
+
 /**
- * The npm package and the sign-in command of a harness, for the fixed setup commands the
- * app runs (MET-28). Undefined for a harness harnessd has no checks for yet.
+ * The fixed setup commands of a harness, for the commands the app runs (MET-28). Undefined
+ * for a harness harnessd has no checks for yet.
  */
-export function harnessSetupSpec(
-  harness: HarnessId,
-): { pkg: string; login: string; loginArgs: string[]; bin: string } | undefined {
+export function harnessSetupSpec(harness: HarnessId): HarnessSetupSpec | undefined {
   const spec = HARNESS_SPECS[harness];
   if (!spec) return undefined;
   const login = spec.login.replace(/^Run: /, "");
-  return { pkg: spec.pkg, login, loginArgs: [...spec.loginArgs], bin: spec.bin };
+  const loginArgs = spec.loginArgs === undefined ? {} : { loginArgs: [...spec.loginArgs] };
+  if (spec.setup.kind === "self") {
+    const args = [...spec.setup.updateArgs];
+    return {
+      bin: spec.bin,
+      installText: spec.setup.install,
+      update: { args, text: [spec.bin, ...args].join(" ") },
+      login,
+      ...loginArgs,
+    };
+  }
+  const pkg = spec.setup.pkg;
+  return {
+    bin: spec.bin,
+    install: { cmd: "npm", args: ["install", "-g", pkg], text: `npm install -g ${pkg}` },
+    installText: `npm install -g ${pkg}`,
+    update: {
+      cmd: "npm",
+      args: ["install", "-g", `${pkg}@latest`],
+      text: `npm install -g ${pkg}@latest`,
+    },
+    login,
+    ...loginArgs,
+  };
 }
 
 /**
@@ -375,6 +486,20 @@ export async function locateHarness(
   return locate(ctx, spec.bin, spec.envBin, harness);
 }
 
+/** The fix that updates a harness CLI. */
+function updateFix(spec: HarnessSpec): string {
+  return spec.setup.kind === "npm"
+    ? `Run npm install -g ${spec.setup.pkg}@latest.`
+    : `Run: ${[spec.bin, ...spec.setup.updateArgs].join(" ")}`;
+}
+
+/** The short update fix, as the auth and known-bad checks word it. */
+function updateItFix(spec: HarnessSpec): string {
+  return spec.setup.kind === "npm"
+    ? `Update it: npm i -g ${spec.setup.pkg}@latest`
+    : updateFix(spec);
+}
+
 function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
   const p = `harness.${harness}`;
   const ids = [`${p}.cli`, `${p}.auth`, `${p}.version`];
@@ -387,12 +512,13 @@ function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
           `${p}.cli`,
           "warn",
           "harnessd has no checks for this harness yet",
-          "Use claude-code or codex.",
+          "Use claude-code, codex or opencode.",
         ),
       ],
     };
   }
-  const install = `Install it: npm i -g ${spec.pkg}`;
+  const install =
+    spec.setup.kind === "npm" ? `Install it: npm i -g ${spec.setup.pkg}` : spec.setup.missing;
   return {
     ids,
     run: async (deadline) => {
@@ -412,7 +538,7 @@ function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
       const signed =
         res.code === 124
           ? { state: "fail" as const, detail: `sign-in check ${timedOut(ctx.timeoutMs)}` }
-          : spec.signedIn(res.stdout, res.code);
+          : spec.signedIn(res.stdout, res.code, ctx.config);
       const auth =
         signed.state === "ok"
           ? ok(`${p}.auth`, signed.detail)
@@ -420,7 +546,8 @@ function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
               `${p}.auth`,
               signed.state,
               signed.detail,
-              signed.state === "warn" ? `Update it: npm i -g ${spec.pkg}@latest` : spec.login,
+              ("fix" in signed ? signed.fix : undefined) ??
+                (signed.state === "warn" ? updateItFix(spec) : spec.login),
             );
       return [cli, auth, versionCheck(ctx, harness, `${p}.version`, version, spec)];
     },
@@ -434,14 +561,14 @@ function versionCheck(
   line: string,
   spec: HarnessSpec,
 ): Check {
-  const pkg = spec.pkg;
   const min = spec.minVersion;
-  const update = `Run npm install -g ${pkg}@latest.`;
+  const update = updateFix(spec);
   const v = parseSemver(line);
   if (v === undefined) {
-    return min === undefined
-      ? bad(id, "warn", "version unknown", `Reinstall it: npm i -g ${pkg}`)
-      : bad(id, "warn", `version unknown; the minimum is ${min}`, update);
+    if (min !== undefined) return bad(id, "warn", `version unknown; the minimum is ${min}`, update);
+    const reinstall =
+      spec.setup.kind === "npm" ? `Reinstall it: npm i -g ${spec.setup.pkg}` : spec.setup.missing;
+    return bad(id, "warn", "version unknown", reinstall);
   }
   const text = v.join(".");
   const floor = min === undefined ? undefined : parseSemver(min);
@@ -454,12 +581,7 @@ function versionCheck(
     const hit =
       (below !== undefined && compareSemver(v, below) < 0) || (known.versions ?? []).includes(text);
     if (hit) {
-      return bad(
-        id,
-        "warn",
-        `${text} is known bad: ${known.reason}`,
-        `Update it: npm i -g ${pkg}@latest`,
-      );
+      return bad(id, "warn", `${text} is known bad: ${known.reason}`, updateItFix(spec));
     }
   }
   return ok(id, `${text} has no known problems`);

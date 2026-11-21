@@ -205,7 +205,7 @@ export function memorySection({ workspaceVault, globalVault }: AgentMemory): str
     `- Global vault: ${dir(globalVault)} ($HARNESSD_HOME/vault/)`,
     "Search the vaults before you settle a question the spec and the decisions do not answer.",
     "",
-    "harnessd synced the harness files into this worktree before the run: AGENTS.md, CLAUDE.md, .claude/, .agents/, .mcp.json and .codex/. " +
+    "harnessd synced the harness files into this worktree before the run: AGENTS.md, CLAUDE.md, .claude/, .agents/, .mcp.json, .codex/ and opencode.json. " +
       "They are not part of your change unless the issue asks, and git status does not show them. " +
       "To commit one, run `git update-index --no-skip-worktree <path>` for a tracked file, then `git add -f <path>`.",
   ].join("\n");

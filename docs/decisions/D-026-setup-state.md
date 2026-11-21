@@ -1,5 +1,5 @@
 # D-026 harnessd run serves the app in setup; Start starts the loop
-Status: accepted 2026-11-20. Amended by D-030: the app takes the Linear and Slack secrets. Amended by D-031: sign-in runs the CLI login as a daemon child process, on every platform. Amends D-023 for `harnessd run` without `--once`. Issue: MET-28.
+Status: accepted 2026-11-20. Amended by D-030: the app takes the Linear and Slack secrets. Amended by D-031: sign-in runs the CLI login as a daemon child process, on every platform. Amended by D-037 (draft): OpenCode sign-in takes a provider id from the daemon's own set. Amends D-023 for `harnessd run` without `--once`. Issue: MET-28.
 
 - Without `--once`, `harnessd run` always serves the API and the app. When a check blocks, or `LINEAR_API_KEY` or `linear.team_id` is missing, the loop does not start. The daemon is in **setup**. It prints each blocker and the Settings url.
 - `GET /api/loop` says `setup` or `running`, with the blocking check ids. `POST /api/start` runs the checks again and builds the loop. It starts the loop only when nothing blocks; else it answers 409 `setup_incomplete` and names the blockers.

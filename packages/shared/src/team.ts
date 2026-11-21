@@ -55,3 +55,18 @@ export function validateTeam(rows: readonly TeamRow[]): Record<string, string> {
   }
   return errors;
 }
+
+/** An OpenCode provider id, such as `deepseek` or `opencode-go`. */
+export const OPENCODE_PROVIDER = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+/**
+ * An OpenCode model id, `<provider>/<model>`, such as `deepseek/deepseek-chat` or
+ * `openrouter/qwen/qwen3-coder`. The model part may hold `/`, `:`, `.`, `@` and `+`.
+ */
+export const OPENCODE_MODEL = /^[a-z0-9][a-z0-9._-]{0,63}\/[A-Za-z0-9][A-Za-z0-9._:@+/-]*$/;
+
+/** The provider of an OpenCode model id, or undefined when the id is not valid. */
+export function opencodeProvider(model: string): string | undefined {
+  if (model.length > MAX_MODEL || !OPENCODE_MODEL.test(model)) return undefined;
+  return model.slice(0, model.indexOf("/"));
+}

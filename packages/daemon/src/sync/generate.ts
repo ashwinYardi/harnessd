@@ -141,6 +141,26 @@ export function agentMd(text: string): string {
   return `${note}${text}`;
 }
 
+/**
+ * `opencode.json`: one local `mcp` entry per server. Sync merges this into the file: it
+ * owns `$schema` and its own `mcp` entries by name; every other key stays the user's.
+ */
+export function opencodeSettings(
+  config: MergedConfig,
+  options: GenerateOptions = {},
+): NativeSettings {
+  const mcp: Record<string, unknown> = {};
+  for (const [name, server] of Object.entries(syncedMcpServers(config, options))) {
+    mcp[name] = {
+      type: "local",
+      command: [server.command, ...(server.args ?? [])],
+      ...(server.env === undefined ? {} : { environment: server.env }),
+      enabled: true,
+    };
+  }
+  return { keys: { $schema: "https://opencode.ai/config.json" }, hooks: {}, entries: { mcp } };
+}
+
 /** `.mcp.json`, the project MCP file Claude Code reads. */
 export function mcpJson(config: MergedConfig, options: GenerateOptions = {}): string {
   return jsonFile({ mcpServers: mcpServers(config, options) });
@@ -163,7 +183,8 @@ export function codexConfig(config: MergedConfig, options: GenerateOptions = {})
 /**
  * Every native file for a merged config, in a stable order. Pure: no I/O.
  * Codex reads AGENTS.md natively; it gets its config.toml, the skills in `.agents/skills/`
- * and, when a skill has Codex hooks, `.codex/hooks.json`.
+ * and, when a skill has Codex hooks, `.codex/hooks.json`. OpenCode 2.x reads AGENTS.md and
+ * the skills in `.claude/skills/` and `.agents/skills/`; it gets `opencode.json` for MCP.
  */
 export function generateSyncFiles(config: MergedConfig, options: GenerateOptions = {}): SyncFile[] {
   const files: SyncFile[] = [
@@ -205,6 +226,7 @@ export function generateSyncFiles(config: MergedConfig, options: GenerateOptions
   }
   files.push({ path: ".mcp.json", content: mcpJson(config, options) });
   files.push({ path: ".codex/config.toml", content: codexConfig(config, options) });
+  files.push({ path: "opencode.json", settings: opencodeSettings(config, options) });
   const codexHooks = skillHooks(config, "codex");
   if (Object.keys(codexHooks).length > 0) {
     files.push({ path: ".codex/hooks.json", settings: { keys: {}, hooks: codexHooks } });

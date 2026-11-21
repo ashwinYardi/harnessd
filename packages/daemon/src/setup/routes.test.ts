@@ -6,8 +6,9 @@ import { after, test } from "node:test";
 import { loadConfig } from "../config/load.ts";
 import { resolveAgentConfig } from "../config/merge.ts";
 import { startDaemon } from "../server/daemon.ts";
+import type { ExecResult } from "../status/detect.ts";
 import type { Check } from "../status/status.ts";
-import { type SetupOptions, setupRoutes, spawnRunner } from "./routes.ts";
+import { MODELS_CACHE_MS, type SetupOptions, setupRoutes, spawnRunner } from "./routes.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -137,8 +138,14 @@ test("GET /api/harnesses has one card per harness, from the status checks", asyn
           false,
           ["harness.codex.cli", "harness.codex.auth", "harness.codex.version"],
         ],
+        ["opencode", "OpenCode", false, []],
       ],
     );
+    assert.deepEqual(body.harnesses[2]?.commands, {
+      install: "curl -fsSL https://opencode.ai/install | bash",
+      update: "opencode upgrade",
+      signin: "opencode auth login <provider>",
+    });
     assert.deepEqual(body.harnesses[0]?.commands, {
       install: "npm install -g @anthropic-ai/claude-code",
       update: "npm install -g @anthropic-ai/claude-code@latest",
@@ -511,6 +518,219 @@ test("a broken workspace config is a 400 that names the key, not an internal err
     const body = (await s.get("/api/team")) as { error: string; message: string };
     assert.equal(body.error, "invalid_config");
     assert.match(body.message, /max_concurrent/);
+  } finally {
+    await s.close();
+  }
+});
+
+// OpenCode (MET-92). A fake `opencode` script answers with recorded output and logs argv.
+const AUTH_LIST = JSON.stringify([
+  { id: "opencode", name: "OpenCode Zen", connections: [{ type: "credential", method: "oauth" }] },
+  { id: "deepseek", name: "DeepSeek", connections: [{ type: "credential", method: "key" }] },
+  { id: "Bad Id", name: "ignored", connections: [{ type: "credential" }] },
+]);
+const MODELS = [
+  "deepseek/deepseek-chat",
+  "deepseek/deepseek-reasoner",
+  "openrouter/qwen/qwen3-coder:free",
+  "not a model",
+  "Bad/upper-provider",
+  "deepseek/deepseek-chat",
+  "",
+].join("\n");
+
+async function fakeOpencode(models = MODELS, auth = AUTH_LIST) {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-fake-opencode-"));
+  roots.push(root);
+  const bin = join(root, "opencode");
+  const log = join(root, "argv.log");
+  await writeFile(join(root, "models.txt"), models);
+  await writeFile(join(root, "auth.json"), auth);
+  await writeFile(
+    bin,
+    [
+      "#!/bin/sh",
+      `echo "$*" >> '${log}'`,
+      'case "$*" in',
+      `  "auth list --format json --standalone") cat '${join(root, "auth.json")}' ;;`,
+      `  "models --standalone") cat '${join(root, "models.txt")}' ;;`,
+      '  *) echo "bad argv: $*" >&2; exit 9 ;;',
+      "esac",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const calls = async () =>
+    (await readFile(log, "utf8").catch(() => "")).split("\n").filter((l) => l !== "");
+  return { bin, calls };
+}
+
+const OPENCODE_TEAM = `${WORKSPACE}
+[agents.builder]
+role = "backend"
+harness = "opencode"
+model = "kimi/kimi-k2"
+`;
+
+async function serveOpencode(extra: Partial<SetupOptions> = {}, models?: string) {
+  const fake = await fakeOpencode(models);
+  let clock = 1_000_000;
+  const s = await serve({
+    env: { HARNESSD_OPENCODE_BIN: fake.bin },
+    isExecutable: async (p) => p === fake.bin,
+    now: () => clock,
+    ...extra,
+  });
+  await writeFile(join(s.repoDir, ".harnessd", "config.toml"), OPENCODE_TEAM);
+  return { ...s, fake, tick: (ms: number) => (clock += ms) };
+}
+
+test("GET /api/setup/opencode/models lists valid provider/model ids once each, and caches them", async () => {
+  const s = await serveOpencode();
+  try {
+    const want = {
+      models: [
+        "deepseek/deepseek-chat",
+        "deepseek/deepseek-reasoner",
+        "openrouter/qwen/qwen3-coder:free",
+      ],
+    };
+    assert.deepEqual(await s.get("/api/setup/opencode/models"), want);
+    s.tick(MODELS_CACHE_MS - 1);
+    assert.deepEqual(await s.get("/api/setup/opencode/models"), want);
+    assert.deepEqual(await s.fake.calls(), ["models --standalone"]);
+    s.tick(1);
+    assert.deepEqual(await s.get("/api/setup/opencode/models"), want);
+    assert.deepEqual(await s.fake.calls(), ["models --standalone", "models --standalone"]);
+    assert.deepEqual(s.runs, []);
+  } finally {
+    await s.close();
+  }
+});
+
+test("the models route gives an empty list and a reason, never a 500", async () => {
+  const missing = await serve();
+  try {
+    const res = (await missing.get("/api/setup/opencode/models")) as {
+      models: string[];
+      reason: string;
+    };
+    assert.deepEqual(res.models, []);
+    assert.match(res.reason, /opencode is not on PATH/);
+  } finally {
+    await missing.close();
+  }
+  const empty = await serveOpencode({}, "\n");
+  try {
+    const res = (await empty.get("/api/setup/opencode/models")) as {
+      models: string[];
+      reason: string;
+    };
+    assert.deepEqual(res.models, []);
+    assert.match(res.reason, /no models/);
+  } finally {
+    await empty.close();
+  }
+  const replies: ExecResult[] = [
+    { code: 124, stdout: "", stderr: "" },
+    { code: 2, stdout: "", stderr: "Error: token sk-secret-value\n" },
+  ];
+  const broken = await serveOpencode({
+    env: { HARNESSD_OPENCODE_BIN: "/opt/bin/opencode", OPENAI_API_KEY: "sk-secret-value" },
+    isExecutable: async (p) => p === "/opt/bin/opencode",
+    exec: async () => replies.shift() ?? { code: 0, stdout: "", stderr: "" },
+  });
+  try {
+    const timeout = (await broken.get("/api/setup/opencode/models")) as { reason: string };
+    assert.match(timeout.reason, /timed out after 30 s/);
+    const failed = (await broken.get("/api/setup/opencode/models")) as { reason: string };
+    assert.equal(failed.reason, "opencode models --standalone exited 2");
+    assert.doesNotMatch(JSON.stringify(failed), /sk-secret-value|token/);
+  } finally {
+    await broken.close();
+  }
+});
+
+test("GET /api/setup/opencode/providers lists signed-in and required providers, ids only", async () => {
+  const s = await serveOpencode();
+  try {
+    assert.deepEqual(await s.get("/api/setup/opencode/providers"), {
+      providers: [
+        {
+          id: "deepseek",
+          signedIn: true,
+          required: false,
+          command: "opencode auth login deepseek",
+        },
+        { id: "kimi", signedIn: false, required: true, command: "opencode auth login kimi" },
+        {
+          id: "opencode",
+          signedIn: true,
+          required: false,
+          command: "opencode auth login opencode",
+        },
+      ],
+    });
+  } finally {
+    await s.close();
+  }
+});
+
+test("provider sign-in runs `opencode auth login --standalone -- <provider>` from the daemon's own set", async () => {
+  const s = await serveOpencode();
+  try {
+    const res = await s.post("/api/setup/opencode/providers/kimi/signin", {});
+    assert.equal(res.status, 200);
+    const job = (await res.json()) as { command: string; provider: string; state: string };
+    assert.equal(job.command, "opencode auth login kimi");
+    assert.equal(job.provider, "kimi");
+    assert.deepEqual(s.runs, [`${s.fake.bin} auth login --standalone -- kimi`]);
+    // stdin is closed, so a provider that waits for a typed key fails: the job gives the command.
+    s.finish(1);
+    await settle();
+    const done = await jobOf(s, "opencode");
+    assert.equal(done?.state, "failed");
+    assert.equal(done?.manual, "opencode auth login kimi");
+    const body = await s.post("/api/setup/opencode/providers/deepseek/signin", { key: "sk-x" });
+    assert.equal(body.status, 400);
+  } finally {
+    await s.close();
+  }
+});
+
+test("provider sign-in refuses an id outside the set or the regex with a 404, and runs nothing", async () => {
+  const s = await serveOpencode();
+  try {
+    for (const id of ["openai", "--help", "-x", "Kimi", "a%20b", "x".repeat(65), "..", "a;b"]) {
+      const res = await s.post(`/api/setup/opencode/providers/${id}/signin`, {});
+      assert.equal(res.status, 404, id);
+      // fetch folds ".." away, so the router answers that one before the handler.
+      const error = ((await res.json()) as { error: string }).error;
+      assert.equal(error, id === ".." ? "not_found" : "unknown_provider", id);
+    }
+    assert.deepEqual(s.runs, []);
+    // Only "openai" passes the regex, so only it reads the set.
+    assert.deepEqual(await s.fake.calls(), ["auth list --format json --standalone"]);
+  } finally {
+    await s.close();
+  }
+});
+
+test("OpenCode update runs `opencode upgrade`; install gives the installer to copy and runs nothing", async () => {
+  const s = await serveOpencode();
+  try {
+    const install = await s.post("/api/harnesses/opencode/install", {});
+    assert.equal(install.status, 200);
+    const job = (await install.json()) as Record<string, unknown>;
+    assert.equal(job.state, "failed");
+    assert.equal(job.command, "curl -fsSL https://opencode.ai/install | bash");
+    assert.equal(job.manual, "curl -fsSL https://opencode.ai/install | bash");
+    assert.deepEqual(s.runs, []);
+    assert.equal((await s.post("/api/harnesses/opencode/signin", {})).status, 404);
+    const update = await s.post("/api/harnesses/opencode/update", {});
+    assert.equal(update.status, 200);
+    assert.equal(((await update.json()) as { command: string }).command, "opencode upgrade");
+    assert.deepEqual(s.runs, [`${s.fake.bin} upgrade`]);
   } finally {
     await s.close();
   }

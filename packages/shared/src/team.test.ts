@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateTeam } from "./team.ts";
+import { OPENCODE_PROVIDER, opencodeProvider, validateTeam } from "./team.ts";
 
 const ok = { name: "backend", role: "backend", harness: "claude-code", model: "" };
 const coordinator = { name: "coordinator", role: "coordinator", harness: "claude-code" };
@@ -36,4 +36,31 @@ test("validateTeam needs exactly one coordinator", () => {
   assert.deepEqual(validateTeam([coordinator, { ...coordinator, name: "c2" }]), {
     team: "The team needs exactly one coordinator.",
   });
+});
+
+test("opencodeProvider reads the provider of a valid OpenCode model id only", () => {
+  assert.equal(opencodeProvider("deepseek/deepseek-chat"), "deepseek");
+  assert.equal(opencodeProvider("openrouter/qwen/qwen3-coder:free"), "openrouter");
+  assert.equal(opencodeProvider("opencode-go/kimi-k2.5"), "opencode-go");
+  for (const bad of [
+    "deepseek",
+    "/x",
+    "Deep/x",
+    "a/",
+    "a b/c",
+    "a/b c",
+    "a/-x",
+    `a/${"x".repeat(100)}`,
+  ]) {
+    assert.equal(opencodeProvider(bad), undefined, bad);
+  }
+});
+
+test("OPENCODE_PROVIDER takes plain lowercase ids of at most 64 characters", () => {
+  for (const good of ["deepseek", "opencode-go", "amazon-bedrock", "x.ai", "a"]) {
+    assert.ok(OPENCODE_PROVIDER.test(good), good);
+  }
+  for (const bad of ["", "-x", "Deep", "a/b", "a b", "--help", "x".repeat(65), "a\n"]) {
+    assert.ok(!OPENCODE_PROVIDER.test(bad), JSON.stringify(bad));
+  }
 });

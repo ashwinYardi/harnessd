@@ -28,3 +28,20 @@ test("isLoopbackHost accepts only this machine", () => {
     assert.equal(isLoopbackHost(host), false, String(host));
   }
 });
+
+test("matchPath reads :name segments; an exact path wins over a pattern", async () => {
+  const { matchPath } = await import("./router.ts");
+  const p = "/api/setup/opencode/providers/:provider/signin";
+  assert.deepEqual(matchPath(p, "/api/setup/opencode/providers/deepseek/signin"), {
+    provider: "deepseek",
+  });
+  assert.equal(matchPath(p, "/api/setup/opencode/providers//signin"), undefined);
+  assert.equal(matchPath(p, "/api/setup/opencode/providers/a/b/signin"), undefined);
+  assert.equal(matchPath(p, "/api/setup/opencode/providers/a/signout"), undefined);
+  const exact: Route = { method: "GET", path: "/api/x/list", handler: () => 1 };
+  const pattern: Route = { method: "POST", path: "/api/x/:id", handler: () => 2 };
+  assert.equal(matchRoute([pattern, exact], "GET", "/api/x/list"), exact);
+  assert.equal(matchRoute([pattern, exact], "POST", "/api/x/a1"), pattern);
+  const wrong = matchRoute([pattern], "GET", "/api/x/a1");
+  assert.ok(wrong instanceof HttpError && wrong.status === 405);
+});
