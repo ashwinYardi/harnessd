@@ -1,7 +1,9 @@
 // Serves the built UI with synthetic data, so the UI can be checked without Linear or a
 // harness. The data is made up. Usage, after `pnpm build`:
 //   node scripts/demo.ts [--port 4848] [--empty] [--broken] [--slow] [--setup] [--static]
+//   [--self-update pending|done|failed|blocked]
 // --setup makes the harness checks fail, as on a fresh machine.
+// --self-update <pending|done|failed|blocked> adds the last self-update to GET /api/loop (MET-67).
 // --static serves no live event stream, so a page scanner such as `impeccable detect <url>`
 // sees the network go idle. The page loads its data once and shows the stream as down.
 
@@ -383,13 +385,29 @@ const setupApi = setupRoutes({
   },
 });
 let started = !setup;
+const selfUpdateState = args.includes("--self-update")
+  ? args[args.indexOf("--self-update") + 1]
+  : undefined;
+const selfUpdate = selfUpdateState
+  ? {
+      from: "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+      to: "5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e",
+      at: new Date(Date.now() - 20 * 60_000).toISOString(),
+      state: selfUpdateState,
+      ...(selfUpdateState === "failed" ? { error: "pnpm build exited 1" } : {}),
+    }
+  : undefined;
 const loopRoutes: Route[] = [
   {
     method: "GET",
     path: "/api/loop",
     handler: async () => {
       await fresh();
-      return { state: started ? "running" : "setup", blocking: started ? [] : blocking() };
+      return {
+        state: started ? "running" : "setup",
+        blocking: started ? [] : blocking(),
+        ...(selfUpdate ? { selfUpdate } : {}),
+      };
     },
   },
   {

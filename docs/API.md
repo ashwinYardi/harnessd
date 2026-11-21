@@ -70,7 +70,7 @@ The Settings pages use these routes (code: `packages/daemon/src/setup/routes.ts`
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/loop` | | `{ "state": "setup" \| "running", "blocking": string[] }`; in setup, each read runs the checks again, so `blocking` lists the ids that block now |
+| GET | `/api/loop` | | `{ "state": "setup" \| "running", "blocking": string[] }`; in setup, each read runs the checks again, so `blocking` lists the ids that block now. An optional `selfUpdate` is `{ from, to, at, state, error? }` for the last self-update (MET-63), with `state` `pending`, `done`, `failed` or `blocked`; the Settings banner shows its commits |
 | POST | `/api/start` | `{}` | the same, once the loop runs; 409 `setup_incomplete` names the blockers |
 | GET | `/api/harnesses` | | `{ "harnesses": HarnessCard[] }` for `claude-code` and `codex` |
 | POST | `/api/harnesses/<id>/install` | `{}` | `Job` |
