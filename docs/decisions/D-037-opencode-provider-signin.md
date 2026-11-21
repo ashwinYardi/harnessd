@@ -1,4 +1,4 @@
-# D-036 OpenCode sign-in takes a provider id from the daemon's own set
+# D-037 OpenCode sign-in takes a provider id from the daemon's own set
 Status: draft 2026-11-21. Amends D-026 and D-031. Issue: MET-71 (part 2, MET-92).
 
 - OpenCode signs in per model provider, not once per harness. So the OpenCode card has no `/api/harnesses/opencode/signin` route. It has `POST /api/setup/opencode/providers/<provider>/signin` instead.

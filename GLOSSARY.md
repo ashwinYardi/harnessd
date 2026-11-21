@@ -82,4 +82,4 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Fallback harness**: the harness and model an agent runs on while a hold is on its own harness, set by `fallback_harness` and `fallback_model`. A held fallback is not used (MET-81). _Avoid_: backup harness, secondary.
 
-**Provider**: a model vendor that OpenCode reaches, such as `deepseek`, named as the first part of an OpenCode model id `<provider>/<model>`. Each provider has its own sign-in (D-036). _Avoid_: vendor, backend.
+**Provider**: a model vendor that OpenCode reaches, such as `deepseek`, named as the first part of an OpenCode model id `<provider>/<model>`. Each provider has its own sign-in (D-037). _Avoid_: vendor, backend.

@@ -93,7 +93,7 @@ export interface JobView {
   provider?: string;
   /**
    * The one command to run in a terminal, when the daemon does not or could not run it:
-   * the OpenCode installer, or a provider sign-in that waits for a typed key (D-036).
+   * the OpenCode installer, or a provider sign-in that waits for a typed key (D-037).
    */
   manual?: string;
 }
@@ -430,7 +430,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
   }
 
   /**
-   * POST /api/setup/opencode/providers/:provider/signin (D-036). The path value must match
+   * POST /api/setup/opencode/providers/:provider/signin (D-037). The path value must match
    * the provider regex and be in the daemon's own set; the argv takes the set's value.
    * Anything else is a 404 and runs nothing.
    */
