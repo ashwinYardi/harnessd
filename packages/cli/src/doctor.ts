@@ -25,7 +25,14 @@ export interface DoctorIO {
 
 /** The status options for one workspace, as doctor and run use them. */
 export function statusOptions(repoDir: string, env: NodeJS.ProcessEnv): StatusOptions {
-  return { repoDir, globalDir: defaultGlobalDir(env), env, packSkills: PACK.map((s) => s.name) };
+  return {
+    repoDir,
+    globalDir: defaultGlobalDir(env),
+    env,
+    packSkills: PACK.map((s) => s.name),
+    // Doctor and Start check each harness sandbox afresh; GET /api/status may cache (MET-115).
+    freshWorktreeWrite: true,
+  };
 }
 
 const DETAIL_WIDTH = 60;

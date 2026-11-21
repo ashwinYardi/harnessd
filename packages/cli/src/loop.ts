@@ -404,8 +404,11 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   });
 
   // The blocking ids from the checks as they are now, the loop's own blocker first.
-  const currentBlocking = async (): Promise<{ blocking: string[]; blocker?: Blocker }> => {
-    const now = await checks({ ...options, servingPort: true });
+  // `fresh` re-checks each harness sandbox; Start uses it, GET /api/loop may cache (MET-115).
+  const currentBlocking = async (
+    fresh = false,
+  ): Promise<{ blocking: string[]; blocker?: Blocker }> => {
+    const now = await checks({ ...options, servingPort: true, freshWorktreeWrite: fresh });
     const ready = await findBlocker(deps);
     const ids = now.filter(isBlocking).map((c) => c.id);
     if (!isBlocker(ready)) return { blocking: ids };
@@ -437,7 +440,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       path: "/api/start",
       handler: async (): Promise<LoopView> => {
         if (active) return runningView(active);
-        const now = await currentBlocking();
+        const now = await currentBlocking(true);
         if (now.blocking.length > 0) {
           throw new HttpError(
             409,
@@ -482,7 +485,10 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   let page: Awaited<ReturnType<typeof staticRoutes>>;
   try {
     page = await staticRoutes(io.uiDir ?? UI_DIR);
-    const status = statusRoutes(() => checks({ ...options, servingPort: true }));
+    // GET /api/status polls often, so it reuses the worktree-write result for ten minutes.
+    const status = statusRoutes(() =>
+      checks({ ...options, servingPort: true, freshWorktreeWrite: false }),
+    );
     const setup = setupRoutes({
       repoDir,
       globalDir,

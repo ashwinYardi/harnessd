@@ -5,7 +5,7 @@
 
 import { access, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { ConfigError, DEFAULT_SETTINGS, type HarnessId, type MergedConfig } from "@harnessd/shared";
 import { loadConfig } from "../config/load.ts";
 import { LinearClient, LinearError } from "../linear/client.ts";
@@ -24,8 +24,10 @@ import {
   type ExecResult,
   execFile,
   findOnPath,
+  firstLine,
   isExecutableFile,
   parseSemver,
+  timedOut,
 } from "./detect.ts";
 import { launchdPlistPath, parseServicePlist, wrapperExecPath } from "./launchd.ts";
 import {
@@ -37,6 +39,7 @@ import {
   parseAuthProviders,
   requiredProviders,
 } from "./opencode.ts";
+import { codexSandboxMode, worktreeWriteCheck } from "./worktree-write.ts";
 
 /**
  * ok: works. warn: works, but something is off; never blocks. fail: present but
@@ -115,6 +118,12 @@ export interface StatusOptions {
   connectionsOnly?: readonly ("linear" | "slack")[];
   /** Where the Linear key and the Slack webhook come from. Default: the store in globalDir. */
   secrets?: SecretStore;
+  /** The worktrees root to check. Default `<globalDir>/worktrees`, as the loop uses. */
+  worktreesRoot?: string;
+  /** False: reuse a cached worktree-write result for ten minutes. Default true (D-023). */
+  freshWorktreeWrite?: boolean;
+  /** Default Date.now. Tests use it to reach the end of the worktree-write cache. */
+  now?: () => number;
 }
 
 export function isBlocking(check: Check): boolean {
@@ -130,16 +139,6 @@ const bad = (id: string, state: Exclude<CheckState, "ok">, detail: string, fix: 
 });
 const notChecked = (id: string, first: string): Check =>
   bad(id, "missing", "not checked", `Fix ${first} first.`);
-
-/** The first line of a command's error output, for a detail. */
-function firstLine(text: string): string {
-  return (
-    text
-      .split("\n")
-      .map((l) => l.trim())
-      .find((l) => l !== "") ?? ""
-  );
-}
 
 interface Ctx {
   o: StatusOptions;
@@ -178,8 +177,6 @@ interface Group {
   ids: string[];
   run: (deadline: number) => Promise<Check[]>;
 }
-
-const timedOut = (ms: number) => `timed out after ${ms / 1000} s`;
 
 /** Runs one command, killed at the deadline. Past the deadline it returns code 124. */
 function run(
@@ -502,7 +499,7 @@ function updateItFix(spec: HarnessSpec): string {
 
 function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
   const p = `harness.${harness}`;
-  const ids = [`${p}.cli`, `${p}.auth`, `${p}.version`];
+  const ids = [`${p}.cli`, `${p}.auth`, `${p}.version`, `${p}.worktree_write`];
   const spec = HARNESS_SPECS[harness];
   if (spec === undefined) {
     return {
@@ -528,13 +525,18 @@ function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
           bad(`${p}.cli`, "missing", found.absent, install),
           notChecked(`${p}.auth`, `${p}.cli`),
           notChecked(`${p}.version`, `${p}.cli`),
+          notChecked(`${p}.worktree_write`, `${p}.cli`),
         ];
       }
       const path = found.path;
       const version = await versionOf(ctx, deadline, path);
       const cli = ok(`${p}.cli`, `${version} (${path})`);
 
-      const res = await run(ctx, deadline, path, spec.status);
+      // Sign-in and the worktree write are independent, so one slow one does not starve the other.
+      const [res, write] = await Promise.all([
+        run(ctx, deadline, path, spec.status),
+        worktreeWrite(ctx, harness, path, version, deadline),
+      ]);
       const signed =
         res.code === 124
           ? { state: "fail" as const, detail: `sign-in check ${timedOut(ctx.timeoutMs)}` }
@@ -549,9 +551,34 @@ function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
               ("fix" in signed ? signed.fix : undefined) ??
                 (signed.state === "warn" ? updateItFix(spec) : spec.login),
             );
-      return [cli, auth, versionCheck(ctx, harness, `${p}.version`, version, spec)];
+      return [cli, auth, versionCheck(ctx, harness, `${p}.version`, version, spec), write];
     },
   };
+}
+
+/** The harness worktree-write check: one scratch folder, one file, the harness's sandbox. */
+async function worktreeWrite(
+  ctx: Ctx,
+  harness: HarnessId,
+  bin: string,
+  version: string,
+  deadline: number,
+): Promise<Check> {
+  const root = ctx.o.worktreesRoot ?? join(ctx.o.globalDir, "worktrees");
+  return worktreeWriteCheck({
+    id: `harness.${harness}.worktree_write`,
+    harness,
+    bin,
+    version,
+    root,
+    name: basename(ctx.o.repoDir),
+    exec: ctx.exec,
+    env: ctx.env,
+    timeoutMs: Math.max(1, deadline - Date.now()),
+    ...(harness === "codex" ? { sandboxMode: codexSandboxMode() } : {}),
+    ...(ctx.o.freshWorktreeWrite !== undefined ? { fresh: ctx.o.freshWorktreeWrite } : {}),
+    ...(ctx.o.now !== undefined ? { now: ctx.o.now } : {}),
+  });
 }
 
 function versionCheck(
@@ -1114,7 +1141,11 @@ export async function runStatus(options: StatusOptions): Promise<Check[]> {
         exec: options.exec ?? execFile,
       }),
   };
-  const harnesses = [...new Set(Object.values(config?.agents ?? {}).map((a) => a.harness))];
+  // A harness an agent names as main or fallback gets the checks, including the worktree write.
+  const used = Object.values(config?.agents ?? {}).flatMap((a) =>
+    a.fallback_harness === undefined ? [a.harness] : [a.harness, a.fallback_harness],
+  );
+  const harnesses = [...new Set(used)];
   if (harnesses.length === 0) harnesses.push("claude-code");
   harnesses.sort((a, b) =>
     a === "claude-code" ? -1 : b === "claude-code" ? 1 : a.localeCompare(b),

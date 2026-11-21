@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
   runStatus,
   type StatusOptions,
 } from "./status.ts";
+import { codexSandboxMode, WORKTREE_WRITE_CACHE_MS, worktreeWriteCheck } from "./worktree-write.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -145,6 +146,7 @@ test("a working machine reports every check ok, with a one-line detail each", as
       "harness.claude-code.cli",
       "harness.claude-code.auth",
       "harness.claude-code.version",
+      "harness.claude-code.worktree_write",
       "github.cli",
       "github.auth",
       "github.push",
@@ -169,6 +171,10 @@ test("a working machine reports every check ok, with a one-line detail each", as
     "2.1.329 (Claude Code) (/bin/claude)",
   );
   assert.equal(byId(checks, "harness.claude-code.auth").detail, "signed in (oauth_token)");
+  assert.equal(
+    byId(checks, "harness.claude-code.worktree_write").detail,
+    `wrote and deleted a file in ${join(w.globalDir, "worktrees")}`,
+  );
   assert.equal(byId(checks, "github.push").detail, "WRITE on acme/app");
   assert.equal(byId(checks, "github.ci").detail, "main requires: ci");
   assert.equal(byId(checks, "linear.team").detail, "MET");
@@ -799,9 +805,11 @@ test("harnessesOnly runs just those harness checks, used by an agent or not", as
       "harness.claude-code.cli",
       "harness.claude-code.auth",
       "harness.claude-code.version",
+      "harness.claude-code.worktree_write",
       "harness.codex.cli",
       "harness.codex.auth",
       "harness.codex.version",
+      "harness.codex.worktree_write",
     ],
   );
   assert.ok(!w.calls.some((c) => c.startsWith("/bin/gh")), "no GitHub call");
@@ -886,4 +894,230 @@ test("locateHarness finds opencode by config bin, then HARNESSD_OPENCODE_BIN, th
     }),
     { path: "/opt/oc/opencode" },
   );
+});
+
+// --- worktree write (MET-115) ---------------------------------------------
+
+/** A root that exists but cannot be written. Restored so cleanup can delete it. */
+async function unwritable(path: string): Promise<void> {
+  await chmod(path, 0o555);
+}
+
+async function writable(path: string): Promise<void> {
+  await chmod(path, 0o755).catch(() => undefined);
+}
+
+test("the worktree-write check is ok for Codex and OpenCode, and removes its scratch folder", async () => {
+  const w = await world(
+    '[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "codex"\n\n[agents.qa]\nharness = "opencode"\n',
+  );
+  w.bins.add("/bin/opencode");
+  w.replies.set("/bin/opencode --version", ok("opencode v2.0.20\n"));
+  w.replies.set(
+    "/bin/opencode auth list --format json --standalone",
+    ok(JSON.stringify([{ id: "opencode", connections: [] }])),
+  );
+  const checks = await runStatus(w.options);
+  for (const id of ["harness.codex.worktree_write", "harness.opencode.worktree_write"]) {
+    const check = byId(checks, id);
+    assert.equal(check.state, "ok", `${id}: ${check.detail}`);
+    assert.equal(check.fix, "");
+  }
+  // Every scratch worktree is gone; only the root remains.
+  assert.deepEqual(await readdir(join(w.globalDir, "worktrees")), []);
+});
+
+test("a worktrees root the daemon cannot write fails with the reason and the fix", async () => {
+  const w = await world();
+  const root = join(w.globalDir, "worktrees");
+  await runStatus(w.options); // Creates the root.
+  await unwritable(root);
+  try {
+    const check = byId(
+      await runStatus({ ...w.options, freshWorktreeWrite: true }),
+      "harness.claude-code.worktree_write",
+    );
+    assert.equal(check.state, "fail");
+    assert.match(check.detail, /EACCES|permission denied/i);
+    assert.equal(check.fix, `Make ${root} writable by the daemon user.`);
+    assert.ok(isBlocking(check));
+  } finally {
+    await writable(root);
+  }
+});
+
+test("the worktree-write check is missing, not checked, when the harness is not installed", async () => {
+  const w = await world();
+  w.bins.delete("/bin/claude");
+  const check = byId(await runStatus(w.options), "harness.claude-code.worktree_write");
+  assert.deepEqual(check, {
+    id: "harness.claude-code.worktree_write",
+    state: "missing",
+    detail: "not checked",
+    fix: "Fix harness.claude-code.cli first.",
+  });
+});
+
+test("no worktree-write check runs for a harness no agent uses", async () => {
+  const w = await world('[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "claude-code"\n');
+  const checks = await runStatus(w.options);
+  assert.ok(checks.some((c) => c.id === "harness.claude-code.worktree_write"));
+  assert.ok(!checks.some((c) => c.id === "harness.codex.worktree_write"));
+  assert.ok(!checks.some((c) => c.id === "harness.opencode.worktree_write"));
+});
+
+test("a harness an agent names only as fallback gets the worktree-write check", async () => {
+  const w = await world(
+    '[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "claude-code"\nfallback_harness = "codex"\n',
+  );
+  const check = byId(await runStatus(w.options), "harness.codex.worktree_write");
+  assert.equal(check.state, "ok", check.detail);
+});
+
+test("GET /api/status reuses the worktree-write result for ten minutes; doctor and start run fresh", async () => {
+  const w = await world();
+  const root = join(w.globalDir, "worktrees");
+  assert.equal(byId(await runStatus(w.options), "harness.claude-code.worktree_write").state, "ok");
+  await unwritable(root);
+  try {
+    // The cached result stands: a poll makes no worktree.
+    assert.equal(
+      byId(
+        await runStatus({ ...w.options, freshWorktreeWrite: false }),
+        "harness.claude-code.worktree_write",
+      ).state,
+      "ok",
+    );
+    // Doctor and Start ask for a fresh check, so the broken root shows at once.
+    const fresh = byId(
+      await runStatus({ ...w.options, freshWorktreeWrite: true }),
+      "harness.claude-code.worktree_write",
+    );
+    assert.equal(fresh.state, "fail");
+    // After the cache ends, the poll checks again too.
+    const late = byId(
+      await runStatus({
+        ...w.options,
+        freshWorktreeWrite: false,
+        now: () => Date.now() + WORKTREE_WRITE_CACHE_MS + 1,
+      }),
+      "harness.claude-code.worktree_write",
+    );
+    assert.equal(late.state, "fail");
+  } finally {
+    await writable(root);
+  }
+});
+
+test("Codex in a sandboxed mode writes through `codex sandbox`, with a fixed argv and no shell", async () => {
+  const w = await world();
+  const root = join(w.globalDir, "worktrees");
+  const calls: { cmd: string; args: readonly string[] }[] = [];
+  const result = await worktreeWriteCheck({
+    id: "harness.codex.worktree_write",
+    harness: "codex",
+    bin: "/bin/codex",
+    version: "0.171.0",
+    root,
+    name: "repo",
+    sandboxMode: "workspace-write",
+    timeoutMs: 2000,
+    exec: async (cmd, args) => {
+      calls.push({ cmd, args });
+      // A sandboxed command writes the file the argv names.
+      await writeFile(args[args.length - 1] ?? "", "harnessd\n");
+      return ok();
+    },
+  });
+  assert.equal(result.state, "ok", result.detail);
+  assert.equal(calls.length, 1);
+  const { cmd, args } = calls[0] ?? { cmd: "", args: [] };
+  assert.equal(cmd, "/bin/codex");
+  assert.deepEqual(args.slice(0, 3), ["sandbox", "--permission-profile", ":workspace"]);
+  assert.equal(args[args.indexOf("-C") + 1], args[args.indexOf("--") - 1]);
+  assert.equal(args[args.indexOf("--") + 1], "/usr/bin/touch", "no shell runs the write");
+  assert.ok(!args.includes("-c"), "the built-in profile needs no config overrides");
+  assert.deepEqual(await readdir(root), [], "the scratch worktree is removed");
+});
+
+test("Codex read-only mode runs through the read-only sandbox profile", async () => {
+  const w = await world();
+  const calls: { cmd: string; args: readonly string[] }[] = [];
+  const result = await worktreeWriteCheck({
+    id: "harness.codex.worktree_write",
+    harness: "codex",
+    bin: "/bin/codex",
+    version: "0.171.0",
+    root: join(w.globalDir, "worktrees"),
+    name: "repo",
+    sandboxMode: "read-only",
+    timeoutMs: 2000,
+    exec: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return failed("Operation not permitted");
+    },
+  });
+  assert.equal(result.state, "fail");
+  assert.equal(result.detail, "Operation not permitted");
+  assert.equal(calls[0]?.args[2], ":read-only");
+});
+
+test("Codex in a sandboxed mode fails with the sandbox reason and names the setting", async () => {
+  const w = await world();
+  const root = join(w.globalDir, "worktrees");
+  const result = await worktreeWriteCheck({
+    id: "harness.codex.worktree_write",
+    harness: "codex",
+    bin: "/bin/codex",
+    version: "0.171.0",
+    root,
+    name: "repo",
+    sandboxMode: "workspace-write",
+    timeoutMs: 2000,
+    exec: async () => failed("Operation not permitted"),
+  });
+  assert.equal(result.state, "fail");
+  assert.equal(result.detail, "Operation not permitted");
+  assert.match(result.fix, /--sandbox danger-full-access/);
+  assert.match(result.fix, /workspace-write/);
+});
+
+test("Codex with danger-full-access writes as the daemon user, with no sandbox command", async () => {
+  const w = await world();
+  const result = await worktreeWriteCheck({
+    id: "harness.codex.worktree_write",
+    harness: "codex",
+    bin: "/bin/codex",
+    version: "0.171.0",
+    root: join(w.globalDir, "worktrees"),
+    name: "repo",
+    sandboxMode: "danger-full-access",
+    timeoutMs: 2000,
+    exec: async () => {
+      throw new Error("the check must not run a sandbox command");
+    },
+  });
+  assert.equal(result.state, "ok", result.detail);
+});
+
+test("codexSandboxMode reads the mode from the adapter's argv", () => {
+  assert.equal(codexSandboxMode(), "danger-full-access");
+});
+
+test("Codex in a sandboxed mode fails when the command exits ok but writes nothing", async () => {
+  const w = await world();
+  const result = await worktreeWriteCheck({
+    id: "harness.codex.worktree_write",
+    harness: "codex",
+    bin: "/bin/codex",
+    version: "0.171.0",
+    root: join(w.globalDir, "worktrees"),
+    name: "repo",
+    sandboxMode: "workspace-write",
+    timeoutMs: 2000,
+    exec: async () => ok(),
+  });
+  assert.equal(result.state, "fail");
+  assert.match(result.detail, /ENOENT|no such file/);
+  assert.match(result.fix, /danger-full-access/);
 });

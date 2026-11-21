@@ -158,3 +158,23 @@ test("formatChecks pads columns and counts each state", () => {
     ],
   );
 });
+
+test("doctor checks the worktree write afresh, so a root that became unwritable fails", async () => {
+  const m = await machine();
+  const home = String(m.io.env.HARNESSD_HOME);
+  const root = join(home, "worktrees");
+  assert.equal(await run(["doctor"], m.io), 0, m.out.join("\n"));
+  assert.match(m.out.join("\n"), /^ok {6}harness\.claude-code\.worktree_write /m);
+
+  await chmod(root, 0o555);
+  try {
+    assert.equal(await run(["doctor"], m.io), 1);
+    assert.match(
+      m.out.join("\n"),
+      /^fail {4}harness\.claude-code\.worktree_write .*permission denied/m,
+    );
+    assert.match(m.out.join("\n"), new RegExp(`Make ${root} writable`));
+  } finally {
+    await chmod(root, 0o755);
+  }
+});
