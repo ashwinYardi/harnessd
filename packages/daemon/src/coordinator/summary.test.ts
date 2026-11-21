@@ -9,6 +9,7 @@ import {
   createFileSummaryStore,
   type DailySummaryOptions,
   lastSummarySlot,
+  limitedTime,
   type SummaryState,
   type SummaryStore,
 } from "./summary.ts";
@@ -210,4 +211,109 @@ test("the file store keeps summary.json next to loop.json", async () => {
   assert.deepEqual(await store.load(), state);
   const file = join(repo, ".harnessd", "state", "summary.json");
   assert.deepEqual(JSON.parse(await readFile(file, "utf8")), state);
+});
+
+test("a closed hold adds one limited-time line per harness", async () => {
+  const h = harness("2026-11-20T10:00:00Z", { lastSentAt: "2026-11-19T15:30:00.000Z" });
+  await h.summary.hold({ harness: "claude-code", kind: "start", at: "2026-11-20T11:00:00.000Z" });
+  await h.summary.hold({ harness: "claude-code", kind: "end", at: "2026-11-20T13:10:00.000Z" });
+  await h.summary.hold({ harness: "codex", kind: "start", at: "2026-11-20T13:00:00.000Z" });
+  await h.summary.hold({ harness: "codex", kind: "end", at: "2026-11-20T13:45:00.000Z" });
+  h.at("2026-11-20T15:30:00Z");
+  assert.equal(await h.summary.check(), true);
+  const lines = (h.posts[0] ?? "").split("\n");
+  assert.deepEqual(lines.slice(-3), [
+    "Claude Code limited 2h 10m",
+    "Codex limited 45m",
+    "*In progress (1)*: MET-8",
+  ]);
+  assert.deepEqual(h.box.state.holdEvents, [], "closed holds are not carried over");
+});
+
+test("an open hold counts up to the summary time and carries over to the next", async () => {
+  const h = harness("2026-11-20T10:00:00Z", { lastSentAt: "2026-11-19T15:30:00.000Z" });
+  await h.summary.hold({ harness: "claude-code", kind: "start", at: "2026-11-20T14:00:00.000Z" });
+  h.at("2026-11-20T15:30:00Z");
+  assert.equal(await h.summary.check(), true);
+  assert.match(h.posts[0] ?? "", /\nClaude Code limited 1h 30m\n/);
+  assert.deepEqual(h.box.state.holdEvents, [
+    { harness: "claude-code", kind: "start", at: "2026-11-20T15:30:00.000Z" },
+  ]);
+
+  await h.summary.hold({ harness: "claude-code", kind: "end", at: "2026-11-20T16:00:00.000Z" });
+  h.at("2026-11-21T15:30:00Z");
+  assert.equal(await h.summary.check(), true);
+  assert.match(h.posts[1] ?? "", /\nClaude Code limited 30m\n/);
+});
+
+test("an end with no start event counts from the hold's own start", async () => {
+  // The loop records only the end when the hold started before the summary store saw it.
+  const h = harness("2026-11-20T14:00:00Z", { lastSentAt: "2026-11-20T09:00:00.000Z" });
+  await h.summary.hold({
+    harness: "claude-code",
+    kind: "end",
+    at: "2026-11-20T13:00:00.000Z",
+    since: "2026-11-20T12:00:00.000Z",
+  });
+  h.at("2026-11-20T15:30:00Z");
+  assert.equal(await h.summary.check(), true);
+  assert.match(h.posts[0] ?? "", /\nClaude Code limited 1h\n/);
+});
+
+test("a hold that began before the last summary counts only from the summary", () => {
+  const { held } = limitedTime(
+    [
+      {
+        harness: "codex",
+        kind: "end",
+        at: "2026-11-20T10:00:00.000Z",
+        since: "2026-11-20T08:00:00.000Z",
+      },
+    ],
+    "2026-11-20T09:00:00.000Z",
+    "2026-11-20T15:30:00.000Z",
+  );
+  assert.equal(held.get("codex"), 60 * 60_000);
+});
+
+test("no hold since the last summary: no limited line", async () => {
+  const h = harness("2026-11-20T15:30:00Z", { lastSentAt: "2026-11-19T15:30:00.000Z" });
+  assert.equal(await h.summary.check(), true);
+  assert.doesNotMatch(h.posts[0] ?? "", /limited/);
+});
+
+test("hold entries survive a restart through the file store", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-summary-holds-"));
+  after(() => rm(dir, { recursive: true, force: true }));
+  const store = createFileSummaryStore(dir);
+  await store.save({
+    version: 1,
+    lastSentAt: "2026-11-19T15:30:00.000Z",
+    notices: [],
+    holdEvents: [
+      { harness: "claude-code", kind: "start", at: "2026-11-20T11:00:00.000Z" },
+      { harness: "nope", kind: "start", at: "2026-11-20T11:00:00.000Z" },
+    ] as NonNullable<SummaryState["holdEvents"]>,
+  });
+  assert.deepEqual((await store.load()).holdEvents, [
+    { harness: "claude-code", kind: "start", at: "2026-11-20T11:00:00.000Z" },
+  ]);
+});
+
+test("an end recorded after a carried-over start closes it, even with an earlier time", async () => {
+  // The hold expired at 15:20; the summary ran at 15:30, before the loop released it.
+  const h = harness("2026-11-20T15:30:00Z", {
+    lastSentAt: "2026-11-19T15:30:00.000Z",
+    holdEvents: [{ harness: "claude-code", kind: "start", at: "2026-11-20T14:00:00.000Z" }],
+  });
+  assert.equal(await h.summary.check(), true);
+  await h.summary.hold({ harness: "claude-code", kind: "end", at: "2026-11-20T15:20:00.000Z" });
+  assert.deepEqual(h.box.state.holdEvents, [
+    { harness: "claude-code", kind: "start", at: "2026-11-20T15:30:00.000Z" },
+    { harness: "claude-code", kind: "end", at: "2026-11-20T15:20:00.000Z" },
+  ]);
+  h.at("2026-11-21T15:30:00Z");
+  assert.equal(await h.summary.check(), true);
+  assert.doesNotMatch(h.posts[1] ?? "", /limited/, "the hold is closed, not counted all day");
+  assert.deepEqual(h.box.state.holdEvents, []);
 });

@@ -248,9 +248,20 @@ test("run sends a missed daily summary once at start, through the webhook", asyn
   );
   await createFilePauseStore(s.home).pause();
   await mkdir(join(s.repo, ".harnessd", "state"), { recursive: true });
+  const since = "2026-01-01T01:00:00.000Z";
+  const until = "2026-01-01T02:00:00.000Z";
+  await writeFile(
+    join(s.repo, ".harnessd", "state", "loop.json"),
+    JSON.stringify({ version: 1, inFlight: [], limits: { "claude-code": { since, until } } }),
+  );
   await writeFile(
     join(s.repo, ".harnessd", "state", "summary.json"),
-    JSON.stringify({ version: 1, lastSentAt: "2026-01-01T00:00:00.000Z", notices: [] }),
+    JSON.stringify({
+      version: 1,
+      lastSentAt: "2026-01-01T00:00:00.000Z",
+      notices: [],
+      holdEvents: [{ harness: "claude-code", kind: "start", at: since }],
+    }),
   );
   const posts: { url: string; text: string }[] = [];
   const io = {
@@ -269,6 +280,7 @@ test("run sends a missed daily summary once at start, through the webhook", asyn
     /^\*harnessd daily summary\* since 1 Jan 05:30 \(Asia\/Kolkata\)/,
   );
   assert.doesNotMatch([...s.out, ...s.err].join("\n"), /fake-token/);
+  assert.match(posts[0]?.text ?? "", /\nClaude Code limited 1h\n/);
 });
 
 test("run refuses to start on a failing check and prints its fix", async () => {
@@ -370,8 +382,45 @@ test("POST /api/start refuses while a check blocks, then starts the loop once al
   assert.equal((answers[1] as { error: string }).error, "setup_incomplete");
   assert.match((answers[1] as { message: string }).message, /harness\.claude-code\.cli/);
   assert.equal(answers[2], 200);
-  assert.deepEqual(answers[3], { state: "running", blocking: [] });
-  assert.deepEqual(answers[4], { state: "running", blocking: [] });
+  assert.deepEqual(answers[3], { state: "running", blocking: [], limits: [] });
+  assert.deepEqual(answers[4], { state: "running", blocking: [], limits: [] });
+});
+
+test("GET /api/loop lists the harness holds in force and leaves an expired one out (MET-82)", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  await mkdir(join(s.repo, ".harnessd", "state"), { recursive: true });
+  const held = { until: "2099-01-01T00:00:00.000Z", since: "2026-11-20T17:37:00.000Z" };
+  const expired = {
+    until: "2026-01-01T00:15:00.000Z",
+    since: "2026-01-01T00:00:00.000Z",
+    backoffMs: 900_000,
+  };
+  await writeFile(
+    join(s.repo, ".harnessd", "state", "loop.json"),
+    JSON.stringify({ version: 1, inFlight: [], limits: { "claude-code": held, codex: expired } }),
+  );
+  let loop: unknown;
+  const code = await runLoop([], {
+    ...s.io,
+    checks: async () => [],
+    stopSignal: async () => {
+      const url = (await readDaemonInfo(s.home))?.url ?? "";
+      // The first tick reads loop.json; until then the loop knows no hold.
+      for (let i = 0; i < 100; i++) {
+        loop = await (await fetch(`${url}/api/loop`)).json();
+        if ((loop as { limits?: unknown[] }).limits?.length) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(loop, {
+    state: "running",
+    blocking: [],
+    limits: [{ harness: "claude-code", until: held.until, backoff: false }],
+  });
 });
 
 test("run without LINEAR_API_KEY serves setup and names the variable, never a value", async () => {
@@ -457,7 +506,7 @@ test("first launch: a key saved in Settings starts the loop with no restart, and
       { id: "slack.webhook_url", set: true, source: "saved", stored: true },
     ],
   });
-  assert.deepEqual(answers.start, { state: "running", blocking: [] });
+  assert.deepEqual(answers.start, { state: "running", blocking: [], limits: [] });
   assert.match(s.out.join("\n"), /settings: saved linear\.api_key \(saved\)/);
   const everything = [...seen, ...s.out, ...s.err].join("\n");
   assert.doesNotMatch(everything, /FIRSTLAUNCH|FIRSTHOOK/);
@@ -492,8 +541,8 @@ test("GET /api/loop reads the current checks, so a saved key clears linear.key w
   assert.equal(code, 0);
   assert.deepEqual(answers.before, { state: "setup", blocking: ["linear.key"] });
   assert.deepEqual(answers.after, { state: "setup", blocking: [] });
-  assert.deepEqual(answers.start, { state: "running", blocking: [] });
-  assert.deepEqual(answers.running, { state: "running", blocking: [] });
+  assert.deepEqual(answers.start, { state: "running", blocking: [], limits: [] });
+  assert.deepEqual(answers.running, { state: "running", blocking: [], limits: [] });
 });
 
 test('[agents.backend] harness = "codex" dispatches to the codex adapter with the set bin', async () => {

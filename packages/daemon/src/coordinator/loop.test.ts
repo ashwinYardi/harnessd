@@ -34,6 +34,7 @@ import type { CreateSubIssueInput, ListReadyOptions } from "../linear/client.ts"
 import { parseLinkedIssue, type RawIssue } from "../linear/parse.ts";
 import type { SelfUpdateResult, SelfUpdateTarget } from "../selfupdate/index.ts";
 import { createGitWorktrees, type TaskWorktrees, type Worktree } from "../worktrees/index.ts";
+import type { HoldEvent } from "./limits.ts";
 import {
   type CoordinatorLoopOptions,
   createCoordinatorLoop,
@@ -872,6 +873,69 @@ test("a limited run holds its harness until the reset while another harness keep
   assert.equal(a.state, "In Review");
 });
 
+test("a hold shows in the snapshot and reports its start and end once (MET-82)", async () => {
+  const time = manualClock();
+  const holds: HoldEvent[] = [];
+  const t = setup({ extra: { clock: time.clock, onHold: (e) => holds.push(e) } });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  part(t, parent.id, "backend", "A");
+  part(t, parent.id, "backend", "B");
+  assert.deepEqual(t.loop.snapshot().limits, []);
+
+  await t.loop.tick();
+  const resetAt = time.at(60 * MINUTE);
+  for (const run of [...t.adapter.pending])
+    run.finish("limited", "usage limit reached", undefined, resetAt);
+  await t.loop.idle();
+  assert.deepEqual(t.loop.snapshot().limits, [
+    { harness: "claude-code", until: resetAt, backoff: false },
+  ]);
+  assert.deepEqual(
+    holds,
+    [{ harness: "claude-code", kind: "start", at: time.at(0) }],
+    "one start for two runs",
+  );
+
+  time.advance(60 * MINUTE);
+  assert.deepEqual(t.loop.snapshot().limits, [], "an expired hold is left out before release");
+  time.advance(MINUTE);
+  await t.loop.tick();
+  assert.deepEqual(
+    holds.at(-1),
+    { harness: "claude-code", kind: "end", at: resetAt, since: time.at(-61 * MINUTE) },
+    "ends at its reset time, with its own start",
+  );
+  assert.equal(holds.length, 2);
+  for (const run of [...t.adapter.pending]) run.finish("ok");
+  await t.loop.idle();
+});
+
+test("a new limit after an expired hold that was not released yet ends the old hold first", async () => {
+  const time = manualClock();
+  const holds: HoldEvent[] = [];
+  const t = setup({ extra: { clock: time.clock, onHold: (e) => holds.push(e) } });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  part(t, parent.id, "backend", "A");
+  part(t, parent.id, "backend", "B");
+  await t.loop.tick();
+  const [first, second] = [...t.adapter.pending];
+  first?.finish("limited", "usage limit reached", undefined, time.at(10 * MINUTE));
+  await settle();
+  time.advance(20 * MINUTE);
+  second?.finish("limited", "usage limit reached", undefined, time.at(60 * MINUTE));
+  await t.loop.idle();
+  assert.deepEqual(holds, [
+    { harness: "claude-code", kind: "start", at: time.at(-20 * MINUTE) },
+    {
+      harness: "claude-code",
+      kind: "end",
+      at: time.at(-10 * MINUTE),
+      since: time.at(-20 * MINUTE),
+    },
+    { harness: "claude-code", kind: "start", at: time.at(0) },
+  ]);
+});
+
 test("no reset time: a 15 minute backoff that doubles, and an ok run clears it", async () => {
   const time = manualClock();
   const t = setup({ extra: { clock: time.clock } });
@@ -900,6 +964,25 @@ test("no reset time: a 15 minute backoff that doubles, and an ok run clears it",
   assert.deepEqual(t.memory.state.limits, {}, "an ok run clears the backoff");
   assert.equal(a.state, "In Review");
   assert.equal(t.memory.state.attempts[a.id], undefined);
+});
+
+test("an in-flight run that ends ok during a backoff hold leaves the hold as it is", async () => {
+  const time = manualClock();
+  const t = setup({ extra: { clock: time.clock } });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  part(t, parent.id, "backend", "A");
+  part(t, parent.id, "backend", "B");
+  await t.loop.tick();
+  const [first, second] = [...t.adapter.pending];
+  first?.finish("limited", "rate limit");
+  await settle();
+  const hold = t.memory.state.limits["claude-code"];
+  second?.finish("ok");
+  await t.loop.idle();
+  assert.deepEqual(t.memory.state.limits["claude-code"], hold);
+  assert.deepEqual(t.loop.snapshot().limits, [
+    { harness: "claude-code", until: time.at(15 * MINUTE), backoff: true },
+  ]);
 });
 
 test("a hold that starts during QA checkout prevents the reviewer from starting", async () => {

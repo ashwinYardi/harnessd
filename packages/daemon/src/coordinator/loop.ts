@@ -12,6 +12,7 @@ import {
   emptyTokenUsage,
   type HarnessAdapter,
   type HarnessId,
+  type HarnessLimit,
   harnessName,
   type Issue,
   type LinkedIssue,
@@ -36,7 +37,15 @@ import type { TaskWorktrees } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
 import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
 import { grillIssue } from "./grill.ts";
-import { afterLimited, afterOk, harnessForRun, isHeld, releaseExpired } from "./limits.ts";
+import {
+  activeLimits,
+  afterLimited,
+  afterOk,
+  type HoldEvent,
+  harnessForRun,
+  isHeld,
+  releaseExpired,
+} from "./limits.ts";
 import { advanceMerges, pendingMerge } from "./merge.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
 import { planIssue, type SplitPlan } from "./plan.ts";
@@ -148,6 +157,8 @@ export interface CoordinatorLoopOptions {
   log?: (line: string) => void;
   /** Every event of every sub-issue run, for the UI's live log (MET-18). */
   onAgentEvent?: (run: { issueKey: string; agent: string }, event: AdapterEvent) => void;
+  /** Each harness hold that starts or ends, for the daily summary (MET-82). */
+  onHold?: (event: HoldEvent) => void;
   /** Recorded as the owner of runs. Default this process. */
   pid?: number;
   /** Not set when `[daemon] self_update = false`: then the loop never updates itself. */
@@ -207,6 +218,8 @@ export interface LoopSnapshot {
   blocked: BlockedPart[];
   /** The last self-update, once there was one. */
   selfUpdate?: SelfUpdateView;
+  /** Harness holds in force now (MET-82). An expired hold is left out before it is released. */
+  limits: HarnessLimit[];
 }
 
 export interface TickReport {
@@ -226,6 +239,8 @@ export interface TickReport {
 export interface CoordinatorLoop {
   /** One poll and dispatch pass. Concurrent calls share the running pass. */
   tick(): Promise<TickReport>;
+  /** Records expired holds without dispatching, even before the first tick. */
+  releaseExpiredHolds(): Promise<void>;
   /** Ticks now and then every interval. */
   start(): void;
   /** Cancels the timer. Runs in flight keep going; a restart re-queues them. */
@@ -374,6 +389,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       const now = clock.now();
       const next = afterLimited(prev, result.resetAt, now);
       s.limits[harness] = next;
+      if (!isHeld(prev, now)) {
+        // A hold that expired but was not released yet ends here, at its own end.
+        if (prev !== undefined && prev.endedAt === undefined) {
+          options.onHold?.({ harness, kind: "end", at: prev.until, since: prev.since });
+        }
+        options.onHold?.({ harness, kind: "start", at: next.since });
+      }
       // Once per hold; again only when a new reset time moves its end.
       if (!isHeld(prev, now) || prev?.until !== next.until) {
         const fromReset =
@@ -381,7 +403,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         log(limitHoldLine(harness, next.until, !fromReset));
       }
     } else if (result.status === "ok" && prev !== undefined) {
-      const next = afterOk(prev);
+      const next = afterOk(prev, clock.now());
       if (next === undefined) delete s.limits[harness];
       else s.limits[harness] = next;
     }
@@ -431,8 +453,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   async function releaseHolds(s: LoopState): Promise<void> {
     let changed = false;
     for (const [harness, hold] of Object.entries(s.limits) as Array<[HarnessId, HarnessHold]>) {
-      const released = releaseExpired(hold, clock.now());
+      const now = clock.now();
+      const released = releaseExpired(hold, now);
       if (!released.ended) continue;
+      const end = Math.min(Date.parse(hold.until), now.getTime());
+      options.onHold?.({
+        harness,
+        kind: "end",
+        at: new Date(end).toISOString(),
+        since: hold.since,
+      });
       changed = true;
       if (released.hold === undefined) delete s.limits[harness];
       else s.limits[harness] = released.hold;
@@ -1270,6 +1300,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       merged: [],
     };
     await requeue(s, report);
+    await releaseHolds(s);
     if (await readPaused()) {
       report.paused = true;
       pausedSeen = true;
@@ -1278,7 +1309,6 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       return report;
     }
     s.lastPollAt = clock.now().toISOString();
-    await releaseHolds(s);
     const up = options.selfUpdate;
     if (pausedSeen) {
       pausedSeen = false;
@@ -1354,6 +1384,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       });
       return ticking;
     },
+    async releaseExpiredHolds() {
+      await releaseHolds(await init());
+    },
     start() {
       if (timer !== undefined) return;
       timer = clock.setInterval(safeTick, intervalMs);
@@ -1405,7 +1438,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             reason: pr.needsHuman ?? "",
           })),
       );
-      const out: LoopSnapshot = { lastPollAt: state?.lastPollAt ?? null, runs, blocked };
+      const limits = activeLimits(state?.limits ?? {}, clock.now());
+      const out: LoopSnapshot = { lastPollAt: state?.lastPollAt ?? null, runs, blocked, limits };
       const u = state?.selfUpdate;
       if (u !== undefined) {
         out.selfUpdate = { from: u.from, to: u.to, at: u.at, state: u.state };

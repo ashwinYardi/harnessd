@@ -1,6 +1,6 @@
 // The hold on a harness that hit a usage limit (MET-70, docs/LOOP.md "Usage limits").
 // Pure: the loop owns the state, the clock and the log.
-import type { HarnessId, ResolvedAgentConfig } from "@harnessd/shared";
+import type { HarnessId, HarnessLimit, ResolvedAgentConfig } from "@harnessd/shared";
 import type { HarnessHold } from "./state.ts";
 
 /** The wait after the first limited run that gave no reset time. */
@@ -37,9 +37,15 @@ export function afterLimited(
   return { until: new Date(now.getTime() + backoffMs).toISOString(), since, backoffMs };
 }
 
-/** The hold after an ok run on the harness: the backoff is cleared. */
-export function afterOk(prev: HarnessHold | undefined): HarnessHold | undefined {
+/**
+ * The hold after an ok run on the harness. An active hold stays as it is: the run started
+ * before the limit, so it says nothing about the reset. After the hold, the backoff is
+ * cleared. A hold that expired but was not released yet loses only its backoff, so its
+ * release still reports the end.
+ */
+export function afterOk(prev: HarnessHold | undefined, now: Date): HarnessHold | undefined {
   if (prev === undefined || prev.endedAt !== undefined) return undefined;
+  if (isHeld(prev, now)) return prev;
   return { until: prev.until, since: prev.since };
 }
 
@@ -77,4 +83,35 @@ export function harnessForRun(
   const onFallback: ResolvedAgentConfig = { ...rest, harness: fallback };
   if (fallback_model !== undefined) onFallback.model = fallback_model;
   return onFallback;
+}
+
+/**
+ * The holds in force at `now`, by harness id: an expired or ended hold is left out. A
+ * backoff hold ends exactly `backoffMs` after it started; a reset-time hold may keep an
+ * old `backoffMs`, so the end decides which one it is.
+ */
+export function activeLimits(
+  limits: Partial<Record<HarnessId, HarnessHold>>,
+  now: Date,
+): HarnessLimit[] {
+  return (Object.entries(limits) as Array<[HarnessId, HarnessHold]>)
+    .filter(([, hold]) => isHeld(hold, now))
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([harness, hold]) => ({
+      harness,
+      until: hold.until,
+      backoff:
+        hold.backoffMs !== undefined &&
+        Date.parse(hold.until) === Date.parse(hold.since) + hold.backoffMs,
+    }));
+}
+
+/** A hold starts or ends. The daily summary counts limited time from these (MET-82). */
+export interface HoldEvent {
+  harness: HarnessId;
+  kind: "start" | "end";
+  /** ISO time: the hold's start, or the time it ended (its `until` once that has passed). */
+  at: string;
+  /** On an end: the hold's own start, so an end without its start still counts right. */
+  since?: string;
 }

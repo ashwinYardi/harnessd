@@ -60,7 +60,12 @@ export function agentsView(config: MergedConfig, loop: LoopSnapshot): AgentsSnap
       }),
     )
     .sort((a, b) => order(a.role) - order(b.role) || a.name.localeCompare(b.name));
-  return { agents, lastPollAt: loop.lastPollAt, maxConcurrent: config.limits.max_concurrent };
+  return {
+    agents,
+    lastPollAt: loop.lastPollAt,
+    maxConcurrent: config.limits.max_concurrent,
+    limits: loop.limits,
+  };
 }
 
 export interface BoardReader {

@@ -48,6 +48,7 @@ import {
   ConfigError,
   type HarnessAdapter,
   type HarnessId,
+  type LoopView,
   type MergedConfig,
 } from "@harnessd/shared";
 import { UI_DIR } from "@harnessd/ui";
@@ -265,6 +266,7 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
     slack: config.slack,
     repoDir,
     inProgress: () => (loop?.running() ?? []).map((key) => ({ key })),
+    releaseExpiredHolds: () => loop?.releaseExpiredHolds(),
     log,
     ...(io.fetch ? { fetch: io.fetch } : {}),
   });
@@ -291,6 +293,8 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
         }
       : {}),
     notifier: visibility.notifier,
+    // Each hold's start and end goes to the daily summary (MET-82).
+    onHold: (event) => void visibility.hold(event),
     log,
     // The UI's live log shows each tool call (MET-18); stdout stays one line per step.
     onAgentEvent: (run, event) => {
@@ -384,12 +388,13 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
         active
           ? active.linear.listBoard(active.team)
           : Promise.reject(new Error("The loop has not started. Finish setup in Settings.")),
-      loop: () => (active ? active.loop.snapshot() : { lastPollAt: null, runs: [], blocked: [] }),
+      loop: () =>
+        active ? active.loop.snapshot() : { lastPollAt: null, runs: [], blocked: [], limits: [] },
     }),
     agents: () =>
       active
         ? agentsView(active.config, active.loop.snapshot())
-        : agentsView(fallback, { lastPollAt: null, runs: [], blocked: [] }),
+        : agentsView(fallback, { lastPollAt: null, runs: [], blocked: [], limits: [] }),
     logs,
     pause,
   });
@@ -403,6 +408,13 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     return { blocking: [...new Set([ready.check, ...ids])], blocker: ready };
   };
 
+  // The holds come from the loop each read, so the app sees one start or end at once.
+  const runningView = (built: Built): LoopView => ({
+    state: "running",
+    blocking: [],
+    limits: built.loop.snapshot().limits,
+  });
+
   const loopRoutes: Route[] = [
     {
       method: "GET",
@@ -410,17 +422,17 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       // Only reads: in setup it runs the checks again, so a saved key or a setup action
       // shows at once (D-026). It never starts the loop. `selfUpdate` is the last
       // self-update, once there was one (docs/API.md).
-      handler: async () => {
+      handler: async (): Promise<LoopView> => {
         if (!active) return { state: "setup", blocking: (await currentBlocking()).blocking };
         const { selfUpdate } = active.loop.snapshot();
-        return { state: "running", blocking: [], ...(selfUpdate ? { selfUpdate } : {}) };
+        return { ...runningView(active), ...(selfUpdate ? { selfUpdate } : {}) };
       },
     },
     {
       method: "POST",
       path: "/api/start",
-      handler: async () => {
-        if (active) return { state: "running", blocking: [] };
+      handler: async (): Promise<LoopView> => {
+        if (active) return runningView(active);
         const now = await currentBlocking();
         if (now.blocking.length > 0) {
           throw new HttpError(
@@ -437,11 +449,11 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
             `Fix these first: ${next.check}. ${next.message}`,
           );
         }
-        if (active) return { state: "running", blocking: [] };
+        if (active) return runningView(active);
         active = next;
         loops.push(next.loop);
         started?.();
-        return { state: "running", blocking: [] };
+        return runningView(next);
       },
     },
   ];

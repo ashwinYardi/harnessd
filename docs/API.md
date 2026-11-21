@@ -46,13 +46,13 @@ The UI's read models are typed in `packages/shared/src/ui.ts`.
 | Method | Path | Response |
 |---|---|---|
 | GET | `/api/board` | `BoardSnapshot`: `{ "fetchedAt", "issues": BoardIssue[], "error"? }` |
-| GET | `/api/agents` | `AgentsSnapshot`: `{ "agents": AgentView[], "lastPollAt", "maxConcurrent" }` |
+| GET | `/api/agents` | `AgentsSnapshot`: `{ "agents": AgentView[], "lastPollAt", "maxConcurrent", "limits" }` |
 | GET | `/api/logs` | `{ "lines": LogLine[] }`, the newest 500 lines |
 | GET | `/api/events` | `text/event-stream` (below) |
 | GET | `/`, `/index.html`, `/assets/…` | The built UI |
 
 - **Board.** Every issue of the team and project that is not canceled. Done shows the last 7 days. Linear is read at most once per 15 s; concurrent reads share one call. A failed read keeps the last good issues and sets `error`; before the first good read, `fetchedAt` is null. The loop adds `agent` to an issue it runs and `blocked` (the reason) to a part whose PR waits for a human at the merge gate.
-- **Agents.** Every configured agent, coordinator first. Each run has its `startedAt`, its size budget `budgetMs`, the `tokens` used so far (input plus output) and its `lastAction` (the latest tool call or message). `stopping` is true while a pause stops it.
+- **Agents.** Every configured agent, coordinator first. Each run has its `startedAt`, its size budget `budgetMs`, the `tokens` used so far (input plus output) and its `lastAction` (the latest tool call or message). `stopping` is true while a pause stops it. `limits` lists the harness holds in force, the same as on `/api/loop`. A hold that starts or ends changes it, so the `agents` event carries it within a second.
 - **Logs.** Each loop log line and each agent tool call, with a `seq` that grows by one. The first `seq` is the daemon start time in ms, so a restarted daemon never reuses one. `level` is `warn` for failures, timeouts and escalations.
 - **Events.** One stream per page. On connect it sends `pause`, `agents` and `board` with the current state. After that, each change goes out once as the same event: the pause flag and the agents are checked every second, the board every 15 s. Each new log line goes out as a `log` event. A comment line goes out every 15 s, so idle connections stay open. The stream ends when the daemon stops; the browser then reconnects, and the UI fetches `/api/logs` again to fill any gap.
 
@@ -70,7 +70,7 @@ The Settings pages use these routes (code: `packages/daemon/src/setup/routes.ts`
 
 | Method | Path | Body | Response |
 |---|---|---|---|
-| GET | `/api/loop` | | `{ "state": "setup" \| "running", "blocking": string[] }`; in setup, each read runs the checks again, so `blocking` lists the ids that block now. An optional `selfUpdate` is `{ from, to, at, state, error? }` for the last self-update (MET-63), with `state` `pending`, `done`, `failed` or `blocked`; the Settings banner shows its commits |
+| GET | `/api/loop` | | `LoopView`: `{ "state": "setup" \| "running", "blocking": string[], "limits"? }`; in setup, each read runs the checks again, so `blocking` lists the ids that block now. An optional `selfUpdate` is `{ from, to, at, state, error? }` for the last self-update (MET-63), with `state` `pending`, `done`, `failed` or `blocked`; the Settings banner shows its commits |
 | POST | `/api/start` | `{}` | the same, once the loop runs; 409 `setup_incomplete` names the blockers |
 | GET | `/api/harnesses` | | `{ "harnesses": HarnessCard[] }` for `claude-code` and `codex` |
 | POST | `/api/harnesses/<id>/install` | `{}` | `Job` |
@@ -82,6 +82,11 @@ The Settings pages use these routes (code: `packages/daemon/src/setup/routes.ts`
 | POST | `/api/team` | `{ "agents": [{ "name", "role", "harness", "model"? }] }` | the new team, plus `synced` (files `harnessd sync` wrote) or `syncError` |
 
 - **Self-update.** While the loop runs, GET /api/loop can return a `selfUpdate` field. It holds `{ from, to, at, state, error? }` for the last self-update. See docs/LOOP.md, “Self-update”.
+- **limits** is set while the loop runs. It lists each harness hold in force (docs/LOOP.md "Usage limits"): `[{ "harness": "claude-code", "until": "…", "backoff": false }]`. `until` is the ISO time the hold ends. `backoff` is true when the harness gave no reset time, so `until` is the backoff's end. A hold whose time has passed is left out, even before the loop releases it. No hold gives `[]`. The type is `LoopView` and `HarnessLimit` in `packages/shared`.
+
+  ```json
+  { "state": "running", "blocking": [], "limits": [{ "harness": "claude-code", "until": "2026-11-20T18:37:00.000Z", "backoff": false }] }
+  ```
 - **HarnessCard** is `{ id, name, required, bin, checks, commands, job }`. `checks` are the status engine's `harness.<id>.*` checks, run for this harness whether an agent uses it or not. `required` is true when an agent uses it. `commands` are the setup commands as text, for a person to run by hand.
 - **Setup commands are fixed.** Each action route runs one argv known in code: `npm install -g <package>`, `npm install -g <package>@latest`, and the CLI's own login (`claude auth login` or `codex login`) as a child process of the daemon, at the path the status engine checks (D-031). No other app is started. The body must be `{}`; any key is a 400. No shell runs. One command runs per harness at a time (409 `busy`). A command gets SIGTERM after 10 minutes, and SIGKILL 5 s later. Config writes run one at a time.
 - **Job** is `{ id, harness, action, command, state, exitCode?, lines, startedAt, url?, code? }`. `state` is `running`, `ok` or `failed`. `lines` holds the last 200 output lines, with env secret values masked; they are not written to the daemon log. For sign-in, `url` is the first `https://` URL in the output and `code` is the first device code. The app opens `url` only on a click. Each change goes out as a `job` event on `/api/setup/events`; a new stream gets the current jobs first.

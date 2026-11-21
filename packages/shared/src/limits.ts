@@ -32,3 +32,14 @@ export function limitHoldLine(id: HarnessId, until: Date | string, backoff = fal
 export function limitAvailableLine(id: HarnessId): string {
   return `${harnessName(id)} available again`;
 }
+
+/**
+ * A harness hold in force, as GET /api/loop and the agents event show it (MET-82).
+ * `backoff` is true when the harness gave no reset time and `until` is a backoff guess.
+ */
+export interface HarnessLimit {
+  harness: HarnessId;
+  /** ISO time the hold ends. */
+  until: string;
+  backoff: boolean;
+}

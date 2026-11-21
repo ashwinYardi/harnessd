@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { HarnessId, ResolvedAgentConfig } from "@harnessd/shared";
 import {
+  activeLimits,
   afterLimited,
   afterOk,
   FIRST_BACKOFF_MS,
@@ -10,6 +11,7 @@ import {
   MAX_BACKOFF_MS,
   releaseExpired,
 } from "./limits.ts";
+import type { HarnessHold } from "./state.ts";
 
 const T0 = new Date("2026-11-20T17:37:00.000Z");
 const at = (ms: number) => new Date(T0.getTime() + ms);
@@ -50,12 +52,21 @@ test("more limited runs while a hold is active do not double it", () => {
 test("an ok run clears the backoff", () => {
   const hold = afterLimited(undefined, undefined, T0);
   const released = releaseExpired(hold, at(15 * MIN)).hold;
-  assert.equal(afterOk(released), undefined);
+  assert.equal(afterOk(released, at(20 * MIN)), undefined);
   assert.equal(
-    afterLimited(afterOk(released), undefined, at(20 * MIN)).backoffMs,
+    afterLimited(afterOk(released, at(20 * MIN)), undefined, at(20 * MIN)).backoffMs,
     FIRST_BACKOFF_MS,
   );
-  assert.deepEqual(afterOk(hold), { until: hold.until, since: hold.since }, "the hold stays");
+});
+
+test("an ok run that ends during an active hold leaves the hold as it is", () => {
+  const backoff = afterLimited(undefined, undefined, T0);
+  assert.deepEqual(afterOk(backoff, at(MIN)), backoff, "the backoff hold keeps its flag");
+  assert.deepEqual(activeLimits({ "claude-code": afterOk(backoff, at(MIN)) ?? backoff }, at(MIN)), [
+    { harness: "claude-code", until: backoff.until, backoff: true },
+  ]);
+  const reset = afterLimited(undefined, "2026-11-20T20:00:00.000Z", T0);
+  assert.deepEqual(afterOk(reset, at(MIN)), reset);
 });
 
 test("releaseExpired ends a hold once, and drops one with no backoff", () => {
@@ -122,4 +133,23 @@ test("harnessForRun waits with no fallback, a held fallback or one without an ad
     harnessForRun({ ...AGENT, fallback_harness: "claude-code" }, heldSet("claude-code"), all),
     undefined,
   );
+});
+
+test("activeLimits lists only holds in force, with the backoff flag", () => {
+  assert.deepEqual(activeLimits({}, T0), []);
+  const reset = afterLimited(undefined, "2026-11-20T20:00:00.000Z", T0);
+  const backoff = afterLimited(undefined, undefined, T0);
+  const expired = afterLimited(undefined, "2026-11-20T17:40:00.000Z", T0);
+  assert.deepEqual(activeLimits({ codex: backoff, "claude-code": reset }, at(MIN)), [
+    { harness: "claude-code", until: "2026-11-20T20:00:00.000Z", backoff: false },
+    { harness: "codex", until: at(15 * MIN).toISOString(), backoff: true },
+  ]);
+  assert.deepEqual(activeLimits({ "claude-code": expired }, at(5 * MIN)), [], "expired: left out");
+  const ended = releaseExpired(backoff, at(16 * MIN)).hold as HarnessHold;
+  assert.deepEqual(activeLimits({ codex: ended }, at(16 * MIN)), [], "ended: left out");
+  // A reset time after a backoff keeps the old backoffMs, but is no backoff hold.
+  const later = afterLimited(ended, "2026-11-20T21:00:00.000Z", at(20 * MIN));
+  assert.deepEqual(activeLimits({ codex: later }, at(21 * MIN)), [
+    { harness: "codex", until: "2026-11-20T21:00:00.000Z", backoff: false },
+  ]);
 });

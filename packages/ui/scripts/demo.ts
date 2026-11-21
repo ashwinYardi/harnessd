@@ -141,6 +141,7 @@ const SNAPSHOT: LoopSnapshot = {
       reason: "touches protected paths",
     },
   ],
+  limits: [],
 };
 
 let paused: PauseState = { paused: false };
@@ -160,7 +161,7 @@ const pause: PauseControl = {
 
 const snapshot = (): LoopSnapshot =>
   empty
-    ? { lastPollAt: ago(0.1), runs: [], blocked: [] }
+    ? { lastPollAt: ago(0.1), runs: [], blocked: [], limits: [] }
     : {
         ...SNAPSHOT,
         runs: SNAPSHOT.runs.map((r) => ({ ...r, stopping: paused.paused })),

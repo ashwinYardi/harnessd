@@ -2,6 +2,7 @@
 // uses and the daily summary. The webhook is looked up before each post, so one saved in
 // Settings works with no restart. Without one nothing is posted, and `status` says so.
 import type { SlackConfig } from "@harnessd/shared";
+import type { HoldEvent } from "./limits.ts";
 import type { NoticeIssue, Notifier } from "./notifier.ts";
 import { createSlackNotifier, SLACK_WEBHOOK_ENV, type SlackFetch } from "./slack.ts";
 import { createDailySummary, createFileSummaryStore, type SummaryStore } from "./summary.ts";
@@ -14,6 +15,8 @@ export interface VisibilityOptions {
   repoDir: string;
   /** Work running now, for the summary. */
   inProgress: () => NoticeIssue[];
+  /** Records hold expirations before the summary reads the hold history. */
+  releaseExpiredHolds?: () => Promise<void> | undefined;
   log: (line: string) => void;
   fetch?: SlackFetch;
   now?: () => Date;
@@ -26,6 +29,8 @@ export interface Visibility {
   status(): Promise<string>;
   /** Give it to the loop. */
   notifier: Notifier;
+  /** Records a harness hold's start or end for the daily summary (MET-82). Never throws. */
+  hold(event: HoldEvent): Promise<void>;
   /** Sends the daily summary when one is due. Never throws. */
   checkSummary(): Promise<void>;
   /** Waits for queued Slack posts, at most `ms`. */
@@ -69,10 +74,12 @@ export function createVisibility(options: VisibilityOptions): Visibility {
         : `slack: ${w.why}, so harnessd posts no Slack notices or daily summary (docs/INSTALL.md)`;
     },
     notifier: summary.wrap(poster),
+    hold: (event) => summary.hold(event),
     async checkSummary() {
       try {
         // No webhook yet: the summary waits, and goes out once a webhook is saved.
         if (!("url" in (await webhook()))) return;
+        await options.releaseExpiredHolds?.();
         await summary.check();
       } catch (error) {
         log(`summary: check failed: ${(error as Error).message}`);

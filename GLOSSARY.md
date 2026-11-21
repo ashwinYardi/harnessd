@@ -78,6 +78,6 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Limited**: the run status when the harness hit a usage or rate limit, not a task failure. A limited run uses no attempt. The result can carry the reset time (MET-70). _Avoid_: failed, rate-limited error.
 
-**Hold**: the time a harness gets no new runs after a limited run: until its reset time, or a backoff of 15 minutes that doubles up to 2 hours. Other harnesses keep working (MET-70). _Avoid_: pause (a pause stops every run), cooldown.
+**Harness hold**: the time a harness gets no new runs after a limited run: until its reset time, or a backoff of 15 minutes that doubles up to 2 hours. Other harnesses keep working. Short form: hold (MET-70). _Avoid_: pause (a pause stops every run), cooldown.
 
 **Fallback harness**: the harness and model an agent runs on while a hold is on its own harness, set by `fallback_harness` and `fallback_model`. A held fallback is not used (MET-81). _Avoid_: backup harness, secondary.
