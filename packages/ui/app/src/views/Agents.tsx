@@ -8,7 +8,7 @@ import { Badge } from "../components/ui/badge.tsx";
 import { Card } from "../components/ui/card.tsx";
 import { ScrollArea } from "../components/ui/scroll-area.tsx";
 import { Skeleton } from "../components/ui/skeleton.tsx";
-import { usePin } from "../hooks/usePin.ts";
+import { type RowProps, usePin } from "../hooks/usePin.ts";
 import { cn } from "../lib/cn.ts";
 import { budgetText, budgetUsed, duration, tokens } from "../lib/format.ts";
 import { EmptyState, ErrorState, ViewToolbar } from "./common.tsx";
@@ -82,10 +82,21 @@ function AgentName({ agent, rows }: { agent: AgentView; rows: number }) {
   );
 }
 
-type RowProps = ReturnType<typeof usePin>["rowProps"];
-
-function AgentRows({ group, now, rowProps }: { group: AgentGroup; now: Date; rowProps: RowProps }) {
-  const { agent, rows } = group;
+function AgentRows({
+  group,
+  live,
+  now,
+  rowProps,
+}: {
+  group: AgentGroup;
+  /** Keys of the rows in the newest snapshot. A pinned run not in it has ended. */
+  live: ReadonlySet<string>;
+  now: Date;
+  rowProps: RowProps;
+}) {
+  const { agent } = group;
+  // A run under the pointer that ended keeps its row; the agent is not also shown Idle.
+  const rows = group.rows.some((r) => r.run) ? group.rows.filter((r) => r.run) : group.rows;
   return (
     <>
       {rows.map(({ key, run }, i) => {
@@ -100,9 +111,10 @@ function AgentRows({ group, now, rowProps }: { group: AgentGroup; now: Date; row
             </tr>
           );
         }
+        const ended = !live.has(key);
         return (
           <tr
-            className={cn("border-t", run.stopping && "bg-warning-surface")}
+            className={cn("border-t", run.stopping && !ended && "bg-warning-surface")}
             key={key}
             {...rowProps(key)}
           >
@@ -117,17 +129,21 @@ function AgentRows({ group, now, rowProps }: { group: AgentGroup; now: Date; row
               <span
                 className={cn(
                   "block truncate font-mono text-muted-foreground text-xs",
-                  run.stopping && "text-warning-foreground",
+                  run.stopping && !ended && "text-warning-foreground",
                 )}
               >
-                {run.stopping ? "Stopping for pause" : (run.lastAction ?? "Starting")}
+                {ended
+                  ? "Ended"
+                  : run.stopping
+                    ? "Stopping for pause"
+                    : (run.lastAction ?? "Starting")}
               </span>
             </td>
             <td className="px-4 py-2.5 text-right align-top tabular-nums">
-              {duration(now.getTime() - Date.parse(run.startedAt))}
+              {!ended && duration(now.getTime() - Date.parse(run.startedAt))}
             </td>
             <td className="hidden px-4 py-2.5 align-top text-xs lg:table-cell">
-              <Budget now={now} run={run} />
+              {!ended && <Budget now={now} run={run} />}
             </td>
             <td className="hidden px-4 py-2.5 text-right align-top tabular-nums lg:table-cell">
               {tokens(run.tokens)}
@@ -151,6 +167,7 @@ export function Agents({
   const snapshot = agents.status === "ready" ? agents.data : undefined;
   const groups = useMemo(() => snapshot && toGroups(snapshot.agents), [snapshot]);
   const { shown: rows, rowProps } = usePin(groups, rowKey);
+  const live = useMemo(() => new Set(groups?.flatMap((g) => g.rows.map(rowKey))), [groups]);
   const running = snapshot?.agents.reduce((n, a) => n + a.runs.length, 0) ?? 0;
 
   return (
@@ -220,7 +237,13 @@ export function Agents({
                 </thead>
                 <tbody>
                   {rows?.map((group) => (
-                    <AgentRows group={group} key={group.id} now={now} rowProps={rowProps} />
+                    <AgentRows
+                      group={group}
+                      key={group.id}
+                      live={live}
+                      now={now}
+                      rowProps={rowProps}
+                    />
                   ))}
                 </tbody>
               </table>

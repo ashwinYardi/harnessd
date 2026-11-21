@@ -96,7 +96,11 @@ export function Logs({ logs, retry }: { logs: Load<LogLine[]>; retry: () => void
           {!follow && (
             <Button
               className="absolute right-8 bottom-8 shadow-md/10"
-              onClick={() => setTail(FOLLOW)}
+              onClick={() => {
+                // The button goes away, so focus moves to the log it scrolls.
+                body.current?.focus();
+                setTail(FOLLOW);
+              }}
               size="sm"
               variant="outline"
             >

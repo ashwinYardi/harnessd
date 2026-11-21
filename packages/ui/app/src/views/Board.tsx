@@ -8,7 +8,7 @@ import type { Load } from "../api.ts";
 import { Badge } from "../components/ui/badge.tsx";
 import { ScrollArea } from "../components/ui/scroll-area.tsx";
 import { Skeleton } from "../components/ui/skeleton.tsx";
-import { usePin } from "../hooks/usePin.ts";
+import { type RowProps, usePin } from "../hooks/usePin.ts";
 import { type Column, type ColumnId, groupBoard, needsYou } from "../lib/board.ts";
 import { cn } from "../lib/cn.ts";
 import { sinceText } from "../lib/format.ts";
@@ -25,10 +25,8 @@ const EMPTY: Record<ColumnId, string> = {
 
 const PRIORITY: Record<number, string> = { 1: "Urgent", 2: "High" };
 
-type RowProps = ReturnType<typeof usePin>["rowProps"];
-
 /** A column with its cards as the rows that pin. */
-type Lane = Column & { rows: BoardIssue[] };
+type Lane = Omit<Column, "issues"> & { rows: BoardIssue[] };
 
 const issueKey = (issue: BoardIssue) => issue.key;
 
@@ -198,7 +196,9 @@ export function Board({
 }) {
   const snapshot = board.status === "ready" ? board.data : undefined;
   const lanes = useMemo(
-    () => snapshot && groupBoard(snapshot.issues).map((c): Lane => ({ ...c, rows: c.issues })),
+    () =>
+      snapshot &&
+      groupBoard(snapshot.issues).map(({ issues, ...c }): Lane => ({ ...c, rows: issues })),
     [snapshot],
   );
   const { shown: columns, rowProps } = usePin(lanes, issueKey);
