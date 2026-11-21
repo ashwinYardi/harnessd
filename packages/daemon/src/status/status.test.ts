@@ -1033,14 +1033,33 @@ test("Codex in a sandboxed mode writes through `codex sandbox`, with a fixed arg
   assert.equal(calls.length, 1);
   const { cmd, args } = calls[0] ?? { cmd: "", args: [] };
   assert.equal(cmd, "/bin/codex");
-  assert.deepEqual(args.slice(0, 2), ["sandbox", "--permission-profile"]);
-  assert.ok(args.includes("-C"));
+  assert.deepEqual(args.slice(0, 3), ["sandbox", "--permission-profile", ":workspace"]);
+  assert.equal(args[args.indexOf("-C") + 1], args[args.indexOf("--") - 1]);
   assert.equal(args[args.indexOf("--") + 1], "/usr/bin/touch", "no shell runs the write");
-  assert.ok(
-    args.some((a) => a.includes('sandbox_mode="workspace-write"')),
-    args.join(" "),
-  );
+  assert.ok(!args.includes("-c"), "the built-in profile needs no config overrides");
   assert.deepEqual(await readdir(root), [], "the scratch worktree is removed");
+});
+
+test("Codex read-only mode runs through the read-only sandbox profile", async () => {
+  const w = await world();
+  const calls: { cmd: string; args: readonly string[] }[] = [];
+  const result = await worktreeWriteCheck({
+    id: "harness.codex.worktree_write",
+    harness: "codex",
+    bin: "/bin/codex",
+    version: "0.171.0",
+    root: join(w.globalDir, "worktrees"),
+    name: "repo",
+    sandboxMode: "read-only",
+    timeoutMs: 2000,
+    exec: async (cmd, args) => {
+      calls.push({ cmd, args });
+      return failed("Operation not permitted");
+    },
+  });
+  assert.equal(result.state, "fail");
+  assert.equal(result.detail, "Operation not permitted");
+  assert.equal(calls[0]?.args[2], ":read-only");
 });
 
 test("Codex in a sandboxed mode fails with the sandbox reason and names the setting", async () => {

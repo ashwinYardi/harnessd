@@ -39,25 +39,29 @@ export function codexSandboxMode(): string {
 }
 
 /**
- * The fixed argv of the Codex sandbox check. The scratch folder is `-C`, so
- * workspace-write treats it as its writable root. No shell runs: `touch` is one argv.
+ * The built-in Codex permission profile that matches a sandbox mode. `:workspace`
+ * makes the folder `-C` names writable. `:read-only` reports the denial the run
+ * would meet. Any other sandboxed mode is checked as `:workspace`.
+ */
+export function codexSandboxProfile(mode: string): ":read-only" | ":workspace" {
+  return mode === "read-only" ? ":read-only" : ":workspace";
+}
+
+/**
+ * The fixed argv of the Codex sandbox check. `-C` names the scratch folder, so the
+ * `:workspace` profile treats it as the writable root. No shell runs: `touch` is one argv.
  */
 function codexSandboxArgv(mode: string, dir: string): string[] {
-  const profile = "harnessd-write-check";
-  const args = [
+  return [
     "sandbox",
     "--permission-profile",
-    profile,
-    "-c",
-    `sandbox_mode=${JSON.stringify(mode)}`,
+    codexSandboxProfile(mode),
+    "-C",
+    dir,
+    "--",
+    "/usr/bin/touch",
+    join(dir, WORKTREE_WRITE_FILE),
   ];
-  if (mode === "workspace-write") {
-    args.push("-c", `permissions.${profile}.workspace_roots={${JSON.stringify(dir)}=true}`);
-  } else {
-    args.push("-c", `permissions.${profile}={}`);
-  }
-  args.push("-C", dir, "--", "/usr/bin/touch", join(dir, WORKTREE_WRITE_FILE));
-  return args;
 }
 
 export interface WorktreeWriteOptions {
@@ -121,6 +125,7 @@ async function checkWrite(options: WorktreeWriteOptions): Promise<Check> {
     } else {
       await writeFile(file, "harnessd\n");
     }
+    await rm(file, { force: true });
 
     const where = sandboxed ? ` (codex sandbox ${options.sandboxMode})` : "";
     return { id, state: "ok", detail: `wrote and deleted a file in ${root}${where}`, fix: "" };
