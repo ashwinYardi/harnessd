@@ -1,6 +1,6 @@
 // Applies live updates in place, and pins the row under the pointer or focus (lib/pin.ts).
 import { type FocusEvent, useCallback, useMemo, useState } from "react";
-import { type Group, pin } from "../lib/pin.ts";
+import { type Group, type PinOptions, pin } from "../lib/pin.ts";
 
 interface Inside {
   pointer: string | null;
@@ -17,6 +17,7 @@ const OUTSIDE: Inside = { pointer: null, focus: null };
 export function usePin<T, G extends Group<T>>(
   next: readonly G[] | undefined,
   key: (row: T) => string,
+  options: PinOptions = {},
 ) {
   const [inside, setInside] = useState<Inside>(OUTSIDE);
   // With no rows on screen, no row can hold the pointer or focus (no leave or blur fires).
@@ -30,7 +31,7 @@ export function usePin<T, G extends Group<T>>(
   const [state, setState] = useState(() => ({ next, pinned, shown: next && [...next] }));
   let shown = state.shown;
   if (state.next !== next || state.pinned !== pinned) {
-    shown = next && pin(state.shown ?? next, next, key, pinned);
+    shown = next && pin(state.shown ?? next, next, key, pinned, options);
     setState({ next, pinned, shown });
   }
 

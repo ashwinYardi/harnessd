@@ -22,7 +22,7 @@ test("a pinned run keeps its index while a run is added above it, and its conten
   const shown = [group("coder", run("coder/MET-1"), run("coder/MET-2"))];
   const next = [group("coder", run("coder/MET-3"), run("coder/MET-1"), run("coder/MET-2", "Edit"))];
   const out = pin(shown, next, key, ["coder/MET-2"]);
-  assert.deepEqual(keys(out), ["coder:coder/MET-3,coder/MET-2,coder/MET-1"]);
+  assert.deepEqual(keys(out), ["coder:coder/MET-1,coder/MET-2,coder/MET-3"]);
   assert.equal(out[0]?.rows[1]?.lastAction, "Edit");
 });
 
@@ -44,7 +44,7 @@ test("a pinned row that left the data keeps its slot and last contents until rel
   assert.deepEqual(keys(out), ["coder:coder/MET-1,coder/MET-2"]);
   assert.equal(out[0]?.rows[1]?.lastAction, "Edit");
   out = pin(out, [group("coder", run("coder/MET-4"), run("coder/MET-1"))], key, ["coder/MET-2"]);
-  assert.deepEqual(keys(out), ["coder:coder/MET-4,coder/MET-2,coder/MET-1"], "still pinned");
+  assert.deepEqual(keys(out), ["coder:coder/MET-1,coder/MET-2,coder/MET-4"], "still pinned");
   assert.deepEqual(keys(pin(out, next, key, [])), ["coder:coder/MET-1"]);
 });
 
@@ -80,4 +80,39 @@ test("a row under both the pointer and focus shows once", () => {
   const shown = [group("ready", run("MET-1"), run("MET-2"))];
   const next = [group("ready", run("MET-2"), run("MET-1"))];
   assert.deepEqual(keys(pin(shown, next, key, ["MET-2", "MET-2"])), ["ready:MET-1,MET-2"]);
+});
+
+test("a pinned card keeps its index when the cards above it leave its column", () => {
+  const shown = [group("ready", run("MET-1"), run("MET-2"), run("MET-3")), group("done")];
+  const next = [group("ready", run("MET-3", "Edit")), group("done", run("MET-1"), run("MET-2"))];
+  const out = pin(shown, next, key, ["MET-3"]);
+  assert.deepEqual(keys(out), ["ready:MET-1,MET-2,MET-3", "done:"]);
+  assert.equal(out[0]?.rows[2]?.lastAction, "Edit");
+  assert.deepEqual(keys(pin(out, next, key, [])), ["ready:MET-3", "done:MET-1,MET-2"]);
+});
+
+test("in stacked groups, a change in a group above does not move the pinned row", () => {
+  const shown = [group("coder", run("coder")), group("qa", run("qa/MET-1"))];
+  const next = [
+    group("coder", run("coder/MET-2"), run("coder/MET-3")),
+    group("qa", run("qa/MET-1", "Edit")),
+  ];
+  const out = pin(shown, next, key, ["qa/MET-1"], { stacked: true });
+  assert.deepEqual(keys(out), ["coder:coder", "qa:qa/MET-1"]);
+  assert.equal(out[1]?.rows[0]?.lastAction, "Edit");
+  assert.deepEqual(keys(pin(out, next, key, [], { stacked: true })), keys(next));
+});
+
+test("in side-by-side groups, a change in another group applies at once", () => {
+  const shown = [group("ready", run("MET-1")), group("done", run("MET-2"))];
+  const next = [group("ready", run("MET-1"), run("MET-3")), group("done", run("MET-2"))];
+  assert.deepEqual(keys(pin(shown, next, key, ["MET-2"])), ["ready:MET-1,MET-3", "done:MET-2"]);
+});
+
+test("a pinned Idle row keeps its place when its agent starts a run", () => {
+  const shown = [group("coder", run("coder"))];
+  const next = [group("coder", run("coder/MET-1"))];
+  assert.deepEqual(keys(pin(shown, next, key, ["coder"], { stacked: true })), [
+    "coder:coder,coder/MET-1",
+  ]);
 });

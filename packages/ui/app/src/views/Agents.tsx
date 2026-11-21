@@ -54,6 +54,8 @@ interface AgentGroup {
 }
 
 const rowKey = (row: AgentRow) => row.key;
+/** The agents' rows stack in one table, so a change above a pinned row holds too. */
+const STACKED = { stacked: true };
 
 function toGroups(agents: readonly AgentView[]): AgentGroup[] {
   return agents.map((agent) => ({
@@ -95,8 +97,11 @@ function AgentRows({
   rowProps: RowProps;
 }) {
   const { agent } = group;
-  // A run under the pointer that ended keeps its row; the agent is not also shown Idle.
-  const rows = group.rows.some((r) => r.run) ? group.rows.filter((r) => r.run) : group.rows;
+  // A pinned run that ended keeps its row; the agent is not also shown Idle below it. A pinned
+  // Idle row keeps its place when the agent starts a run, until the pointer and focus leave.
+  const idleBelowRun = (r: AgentRow, i: number) =>
+    !r.run && live.has(r.key) && group.rows.slice(0, i).some((above) => above.run);
+  const rows = group.rows.filter((r, i) => !idleBelowRun(r, i));
   return (
     <>
       {rows.map(({ key, run }, i) => {
@@ -166,7 +171,7 @@ export function Agents({
 }) {
   const snapshot = agents.status === "ready" ? agents.data : undefined;
   const groups = useMemo(() => snapshot && toGroups(snapshot.agents), [snapshot]);
-  const { shown: rows, rowProps } = usePin(groups, rowKey);
+  const { shown: rows, rowProps } = usePin(groups, rowKey, STACKED);
   const live = useMemo(() => new Set(groups?.flatMap((g) => g.rows.map(rowKey))), [groups]);
   const running = snapshot?.agents.reduce((n, a) => n + a.runs.length, 0) ?? 0;
 
