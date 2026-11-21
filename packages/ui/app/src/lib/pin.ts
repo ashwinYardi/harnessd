@@ -7,7 +7,7 @@ export interface Group<T> {
   rows: readonly T[];
 }
 
-export interface PinOptions {
+export interface PinOptions<T = unknown> {
   /**
    * The groups stack in one list, such as the parts of one table. Then the rows of the groups
    * above a pinned row also hold, because a change there moves the pinned row too. Without it,
@@ -21,6 +21,12 @@ export interface PinOptions {
    * new contents apply at release. The pinned row itself always shows its new contents.
    */
   holdSizes?: boolean;
+  /**
+   * A row that this marks in `next` never holds, unless it is pinned itself: it takes its true
+   * place at once. The Board uses it, so a card that turns Blocked or Needs input reaches Needs
+   * you at once (PRODUCT.md: they are the loudest things on screen).
+   */
+  neverHold?: (row: T) => boolean;
 }
 
 /**
@@ -29,8 +35,7 @@ export interface PinOptions {
  * in `shown`, with its contents from `next`. To keep that index, the rows above it in its
  * group hold too (and, when `stacked`, all rows of the groups above). Held rows show their
  * contents from `next`, or their last contents if they left it (or, with `holdSizes`, until
- * release). The other rows take their new
- * places below the held rows. A held group that left `next` stays at its index. Release (no
+ * release). The other rows take their new places below the held rows. A held group that left `next` stays at its index. Release (no
  * pinned keys) restores the true order.
  */
 export function pin<T, G extends Group<T>>(
@@ -38,7 +43,7 @@ export function pin<T, G extends Group<T>>(
   next: readonly G[],
   key: (row: T) => string,
   pinned: readonly string[],
-  options: PinOptions = {},
+  options: PinOptions<T> = {},
 ): G[] {
   const spots = pinned.map((k) => find(shown, key, k)).filter((at) => at !== undefined);
   if (spots.length === 0) return [...next];
@@ -54,11 +59,17 @@ export function pin<T, G extends Group<T>>(
   const pinnedKeys = new Set(pinned);
   const contents = (r: T) =>
     options.holdSizes === true && !pinnedKeys.has(key(r)) ? r : (find(next, key, key(r))?.row ?? r);
-  const held = new Set(holds.flatMap((h) => h.group.rows.slice(0, h.count).map(key)));
+  const holdable = (r: T) => {
+    if (pinnedKeys.has(key(r)) || !options.neverHold) return true;
+    const fresh = find(next, key, key(r))?.row;
+    return fresh === undefined || !options.neverHold(fresh);
+  };
+  const heldRows = holds.map((h) => h.group.rows.slice(0, h.count).filter(holdable));
+  const held = new Set(heldRows.flat().map(key));
   const groups = next.map((g) => ({ ...g, rows: g.rows.filter((r) => !held.has(key(r))) }));
-  for (const h of holds) {
+  for (const [i, h] of holds.entries()) {
     if (h.count === 0 && !h.frozen) continue;
-    const rows = h.group.rows.slice(0, h.count).map(contents);
+    const rows = (heldRows[i] ?? []).map(contents);
     let index = groups.findIndex((g) => g.id === h.group.id);
     if (index < 0) {
       index = Math.min(h.groupIndex, groups.length);

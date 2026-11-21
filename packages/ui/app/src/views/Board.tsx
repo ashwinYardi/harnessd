@@ -12,6 +12,7 @@ import { type RowProps, usePin } from "../hooks/usePin.ts";
 import { type Column, type ColumnId, groupBoard, needsYou } from "../lib/board.ts";
 import { cn } from "../lib/cn.ts";
 import { sinceText } from "../lib/format.ts";
+import type { PinOptions } from "../lib/pin.ts";
 import { ErrorState, ViewToolbar } from "./common.tsx";
 
 const EMPTY: Record<ColumnId, string> = {
@@ -30,7 +31,8 @@ type Lane = Omit<Column, "issues"> & { rows: BoardIssue[] };
 
 const issueKey = (issue: BoardIssue) => issue.key;
 // Cards change height (an agent label, a blocked line), so the cards above a pinned card hold.
-const PIN = { holdSizes: true };
+// A card that turns Blocked or Needs input never holds: it goes to Needs you at once.
+const PIN: PinOptions<BoardIssue> = { holdSizes: true, neverHold: needsYou };
 
 function IssueRow({
   issue,

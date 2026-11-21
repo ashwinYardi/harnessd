@@ -134,3 +134,12 @@ test("without holdSizes, a row above the pinned row updates its contents", () =>
   const out = pin(shown, next, key, ["coder/MET-2"]);
   assert.equal(out[0]?.rows[0]?.lastAction, "Edit");
 });
+
+test("a card above the pinned card that turns loud never holds, so Needs you shows it at once", () => {
+  const shown = [group("needs-you"), group("ready", run("MET-1"), run("MET-2"))];
+  const next = [group("needs-you", run("MET-1", "Blocked")), group("ready", run("MET-2"))];
+  const loud = (r: Run) => r.lastAction === "Blocked";
+  const out = pin(shown, next, key, ["MET-2"], { holdSizes: true, neverHold: loud });
+  assert.deepEqual(keys(out), ["needs-you:MET-1", "ready:MET-2"]);
+  assert.equal(out[0]?.rows[0]?.lastAction, "Blocked");
+});
