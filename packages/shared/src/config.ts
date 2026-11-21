@@ -56,6 +56,11 @@ export interface QaConfig {
 export interface DaemonConfig {
   /** Port of the local HTTP API on 127.0.0.1. 0 picks a free port. */
   port: number;
+  /**
+   * When the repo is harnessd's own install, rebuild and restart after a merge to the
+   * default branch (MET-63, docs/LOOP.md "Self-update"). Default true.
+   */
+  self_update: boolean;
 }
 
 /** How the merge gate merges a PR (`gh pr merge --squash` and so on). */
@@ -326,7 +331,7 @@ export const DEFAULT_SETTINGS: Settings = {
     setup_command: "pnpm install --frozen-lockfile --prefer-offline",
     test_command: "pnpm test",
   },
-  daemon: { port: 4747 },
+  daemon: { port: 4747, self_update: true },
   harnesses: {},
 };
 
@@ -610,8 +615,13 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
   }
 
   if (root.daemon !== undefined) {
-    const t = c.table(root.daemon, "daemon", ["port"]);
-    out.daemon = t.port === undefined ? {} : { port: c.port(t.port, "daemon.port") };
+    const t = c.table(root.daemon, "daemon", ["port", "self_update"]);
+    const daemon: Partial<DaemonConfig> = {};
+    if (t.port !== undefined) daemon.port = c.port(t.port, "daemon.port");
+    if (t.self_update !== undefined) {
+      daemon.self_update = c.bool(t.self_update, "daemon.self_update");
+    }
+    out.daemon = daemon;
   }
 
   if (root.harnesses !== undefined) {

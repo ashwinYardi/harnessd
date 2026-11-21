@@ -101,6 +101,8 @@ The minimum tested version is 0.171.0. Below it, `harness.codex.version` is `war
 
 `HARNESSD_HOME` is passed on when it was set for `init`.
 
+When the service works on its own install clone, it pulls, rebuilds and restarts itself through launchd after each merge to the default branch (docs/LOOP.md "Self-update"). Set `[daemon] self_update = false` to turn it off.
+
 launchd does not load nvm or your shell profile. The service sees only the PATH in the plist, and `harnessd init` writes that PATH. The from-source wrapper in the README names its Node by an absolute path, so the service always runs that Node, whatever Node is first on PATH. After you change Node, run the README Install block again with the new Node active, then run `harnessd init` again.
 
 ## Secrets

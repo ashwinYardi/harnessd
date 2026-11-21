@@ -17,11 +17,13 @@ import {
   type MergedConfig,
   type ResolvedAgentConfig,
   type RunResult,
+  type SelfUpdateView,
   type Task,
 } from "@harnessd/shared";
 import { resolveAgentConfig } from "../config/merge.ts";
 import type { GitHub } from "../github/client.ts";
 import type { LinearClient, ListReadyOptions } from "../linear/client.ts";
+import { lastLines, type SelfUpdateResult, type SelfUpdater, short } from "../selfupdate/index.ts";
 import type { TaskWorktrees } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
 import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
@@ -39,7 +41,13 @@ import {
   type SubIssueRole,
   splitIssue,
 } from "./split.ts";
-import type { InFlightRun, LoopState, LoopStore } from "./state.ts";
+import type {
+  InFlightRun,
+  LoopState,
+  LoopStore,
+  SelfUpdateRecord,
+  SelfUpdateTrigger,
+} from "./state.ts";
 import { syncWorktree } from "./worktree-sync.ts";
 
 /** The Linear calls the loop makes. A LinearClient satisfies it. */
@@ -78,6 +86,13 @@ export const RESUMED_RUN_NOTE =
 
 /** Failed runs of one sub-issue before it goes to Needs input (D-014: back to Ready once). */
 export const MAX_RUN_ATTEMPTS = 2;
+
+/** What the loop needs for self-update (MET-63, docs/LOOP.md "Self-update"). */
+export interface LoopSelfUpdate {
+  updater: SelfUpdater;
+  /** Writes paused.json with the reason, so the pause survives a restart. */
+  pause(reason: string): Promise<unknown>;
+}
 
 /** States in which a part no longer blocks its QA sub-issue. */
 const QA_READY_STATES = new Set(["in review", "done"]);
@@ -125,6 +140,8 @@ export interface CoordinatorLoopOptions {
   onAgentEvent?: (run: { issueKey: string; agent: string }, event: AdapterEvent) => void;
   /** Recorded as the owner of runs. Default this process. */
   pid?: number;
+  /** Not set when `[daemon] self_update = false`: then the loop never updates itself. */
+  selfUpdate?: LoopSelfUpdate;
 }
 
 /** What a QA run checks: the parent's checklist and the parts that block QA. */
@@ -178,6 +195,8 @@ export interface LoopSnapshot {
   lastPollAt: string | null;
   runs: RunActivity[];
   blocked: BlockedPart[];
+  /** The last self-update, once there was one. */
+  selfUpdate?: SelfUpdateView;
 }
 
 export interface TickReport {
@@ -267,6 +286,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   let pausedNow = false;
   let watch: unknown;
   let checking = false;
+  /** A self-update check to run on the next unpaused tick. The first one is the start check. */
+  let checkWanted: { trigger?: SelfUpdateTrigger } | undefined = {};
+  /** True once a tick saw the pause flag; the first tick after it checks again. */
+  let pausedSeen = false;
+  /** applyUpdate built the new version and the restart is under way: dispatch nothing. */
+  let restarting = false;
 
   /** Follows a run's events: its latest action and token use, and the UI's log. */
   function follow(l: LiveRun, run: AdapterRun): void {
@@ -288,6 +313,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         log(`worktree recovery failed: ${message(error)}`);
       }
       state = await store.load();
+      const u = state.selfUpdate;
+      if (u?.state === "applying") {
+        // The previous process built this version and restarted into it.
+        log(`self-update: ${short(u.from)} -> ${short(u.to)}`);
+        u.state = "done";
+        u.at = clock.now().toISOString();
+        await save();
+      }
       return state;
     })();
     return ready;
@@ -378,15 +411,19 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         worktree: entry.worktree,
         branch: entry.branch,
         interruptedAt: entry.pausedAt ?? clock.now().toISOString(),
-        reason: "paused",
+        reason: entry.stopReason ?? "paused",
       });
     }
     const where =
       entry.worktree === "" ? "it had no worktree yet" : `worktree kept at ${entry.worktree}`;
+    const why =
+      entry.stopReason === "self-update"
+        ? "Stopped over its budget while a self-update waited (D-014); it runs again after the restart"
+        : "Paused by harnessd pause";
     await safely(`comment on ${entry.issueKey}`, () =>
-      linear.comment(entry.issueId, `**harnessd**: Paused by harnessd pause; ${where}.`),
+      linear.comment(entry.issueId, `**harnessd**: ${why}; ${where}.`),
     );
-    log(`${entry.issueKey}: paused, re-queued, ${where}`);
+    log(`${entry.issueKey}: ${entry.stopReason ?? "paused"}, re-queued, ${where}`);
   }
 
   async function finish(s: LoopState, entry: InFlightRun, result: RunResult): Promise<void> {
@@ -907,6 +944,147 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     }
   }
 
+  // --- self-update --------------------------------------------------------
+
+  /** Asks the updater for a newer build; a target becomes a pending update. */
+  async function checkUpdate(
+    s: LoopState,
+    up: LoopSelfUpdate,
+    trigger: SelfUpdateTrigger | undefined,
+  ): Promise<void> {
+    let target: Awaited<ReturnType<SelfUpdater["checkForUpdate"]>>;
+    try {
+      target = await up.updater.checkForUpdate();
+    } catch (error) {
+      log(`self-update: check failed: ${oneLine(message(error))}`);
+      return;
+    }
+    if (target === undefined) return;
+    const u = s.selfUpdate;
+    if (u?.state === "pending" && u.to === target.to) return;
+    const record: SelfUpdateRecord = {
+      from: target.from,
+      to: target.to,
+      at: clock.now().toISOString(),
+      state: "pending",
+    };
+    if (trigger !== undefined) record.trigger = trigger;
+    s.selfUpdate = record;
+    await save();
+    log(`self-update: ${short(target.from)} -> ${short(target.to)} waits for a safe point`);
+  }
+
+  /**
+   * The safe point: no run in flight. A run over its size budget (D-014) is stopped like a
+   * paused one: its worktree is kept and it runs again after the restart.
+   */
+  async function safePoint(s: LoopState, up: LoopSelfUpdate): Promise<void> {
+    const now = clock.now().getTime();
+    const over = [...live.values()].filter(
+      (l) => l.entry.pausedAt === undefined && now - Date.parse(l.entry.startedAt) > l.budgetMs,
+    );
+    if (over.length > 0) {
+      const stamp = clock.now().toISOString();
+      for (const l of over) {
+        l.entry.pausedAt = stamp;
+        l.entry.stopReason = "self-update";
+      }
+      await save();
+      log(`self-update: cancelling ${over.map((l) => l.key).join(", ")}, over budget`);
+      await Promise.all(
+        over.map(async (l) => {
+          l.abort?.abort();
+          await l.run?.cancel();
+          await l.done;
+        }),
+      );
+    }
+    if (s.inFlight.length > 0) return;
+    await applyUpdate(s, up);
+  }
+
+  async function applyUpdate(s: LoopState, up: LoopSelfUpdate): Promise<void> {
+    const u = s.selfUpdate;
+    if (u === undefined) return;
+    const span = `${short(u.from)} -> ${short(u.to)}`;
+    u.state = "applying";
+    u.at = clock.now().toISOString();
+    delete u.error;
+    // Saved first: the new process reads it and finishes the record.
+    await save();
+    log(`self-update: ${span}: safe point, updating`);
+    let result: SelfUpdateResult | { status: "error"; error: string };
+    try {
+      result = await up.updater.applyUpdate({ from: u.from, to: u.to });
+    } catch (error) {
+      result = { status: "error", error: message(error) };
+    }
+    if (result.status === "applied") {
+      restarting = true;
+      log(`self-update: ${span}: built, restarting`);
+      return;
+    }
+    const blocked = result.status === "blocked";
+    const detail =
+      result.status === "blocked"
+        ? result.reason
+        : result.status === "failed"
+          ? `${result.step}: ${lastLines(result.error)}`
+          : lastLines(result.error);
+    const reason = `self-update ${blocked ? "blocked" : "failed"}: ${detail}`;
+    u.state = blocked ? "blocked" : "failed";
+    u.error = detail;
+    u.at = clock.now().toISOString();
+    pausedNow = true;
+    pausedSeen = true;
+    await safely("pause the loop", () => up.pause(reason));
+    log(`${oneLine(reason)}; the old build keeps running, the loop is paused`);
+    if (s.selfUpdatePings[u.to] !== undefined) {
+      // The same target failed before: the owner already knows.
+      await save();
+      return;
+    }
+    s.selfUpdatePings[u.to] = clock.now().toISOString();
+    await save();
+    const what = blocked ? `is blocked: ${detail}` : `failed at ${detail.split(":")[0]}`;
+    const body = [
+      `**harnessd self-update**: the update from \`${short(u.from)}\` to \`${short(u.to)}\` ${what}. ` +
+        "harnessd keeps the old build and is paused. Fix it, then run `harnessd resume`.",
+      ...(blocked
+        ? []
+        : ["", "```", lastLines(result.status === "failed" ? result.error : detail), "```"]),
+    ].join("\n");
+    const trigger = u.trigger;
+    if (trigger !== undefined) {
+      await safely(`comment on ${trigger.key}`, () => linear.comment(trigger.id, `${body}\n`));
+      await safely(`move ${trigger.key} to Needs input`, () =>
+        linear.moveTo(trigger.id, "Needs input"),
+      );
+    }
+    const issue = trigger
+      ? { key: trigger.key, ...(trigger.url ? { url: trigger.url } : {}) }
+      : { key: "harnessd" };
+    await safely("send the notice", () =>
+      notifier.notify({
+        kind: "needs_input",
+        issue,
+        prs: [],
+        reason: `self-update ${blocked ? "blocked" : "failed"}`,
+        detail: `${short(u.from)} -> ${short(u.to)}: ${detail}`,
+      }),
+    );
+  }
+
+  /** True while an update waits or restarts: the tick then dispatches, grills and merges nothing. */
+  async function holdForUpdate(s: LoopState): Promise<boolean> {
+    const up = options.selfUpdate;
+    if (up === undefined) return false;
+    if (restarting) return true;
+    if (s.selfUpdate?.state !== "pending") return false;
+    await safePoint(s, up);
+    return true;
+  }
+
   // --- tick ---------------------------------------------------------------
 
   async function pass(): Promise<TickReport> {
@@ -922,11 +1100,31 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     await requeue(s, report);
     if (await readPaused()) {
       report.paused = true;
+      pausedSeen = true;
       // Written by the CLI while no daemon was reachable: stop what still runs.
       await pauseRuns();
       return report;
     }
     s.lastPollAt = clock.now().toISOString();
+    const up = options.selfUpdate;
+    if (pausedSeen) {
+      pausedSeen = false;
+      // `harnessd resume` after a blocked or failed update: check again.
+      const last = s.selfUpdate;
+      if (last?.state === "blocked" || last?.state === "failed") {
+        checkWanted = last.trigger ? { trigger: last.trigger } : {};
+      }
+    }
+    if (up !== undefined && checkWanted !== undefined && !restarting) {
+      const wanted = checkWanted;
+      checkWanted = undefined;
+      await checkUpdate(s, up, wanted.trigger);
+    }
+    if (await holdForUpdate(s)) {
+      await save();
+      report.paused = pausedNow;
+      return report;
+    }
     if (s.merges.length > 0) {
       const merges = await advanceMerges(s, {
         github,
@@ -946,6 +1144,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         await pauseRuns();
         await save();
         return report;
+      }
+      // A merge to the default branch, by harnessd or a human, may change harnessd itself.
+      const landed = merges.landed.at(-1);
+      if (up !== undefined && landed !== undefined) {
+        await checkUpdate(s, up, landed);
+        if (await holdForUpdate(s)) {
+          await save();
+          report.paused = pausedNow;
+          return report;
+        }
       }
     }
     await dispatchEligible(s, report);
@@ -1018,7 +1226,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             reason: pr.needsHuman ?? "",
           })),
       );
-      return { lastPollAt: state?.lastPollAt ?? null, runs, blocked };
+      const out: LoopSnapshot = { lastPollAt: state?.lastPollAt ?? null, runs, blocked };
+      const u = state?.selfUpdate;
+      if (u !== undefined) {
+        out.selfUpdate = { from: u.from, to: u.to, at: u.at, state: u.state };
+        if (u.error !== undefined) out.selfUpdate.error = u.error;
+      }
+      return out;
     },
     resume() {
       pausedNow = false;

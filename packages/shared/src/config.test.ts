@@ -24,7 +24,7 @@ test("parseConfigFile accepts a full config", () => {
     slack: { channel: "#ops", summary_time: "18:30", time_zone: "Europe/Berlin" },
     merge: { protected_paths: ["infra/**"], label: "hold", method: "rebase" },
     qa: { setup_command: "", test_command: "make test" },
-    daemon: { port: 4800 },
+    daemon: { port: 4800, self_update: false },
     agents: {
       backend: {
         role: "backend",
@@ -84,6 +84,10 @@ test("wrong types are rejected with their path", () => {
   rejects(
     { daemon: { port: "80" } },
     `${FILE}: daemon.port: expected a port from 0 to 65535, got "80"`,
+  );
+  rejects(
+    { daemon: { self_update: "no" } },
+    `${FILE}: daemon.self_update: expected true or false, got "no"`,
   );
   rejects({ slack: "#x" }, `${FILE}: slack: expected a table, got "#x"`);
   rejects({ qa: { test_command: "" } }, `${FILE}: qa.test_command: expected a non-empty string`);

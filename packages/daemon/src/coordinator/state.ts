@@ -3,7 +3,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AgentRole } from "@harnessd/shared";
+import type { AgentRole, SelfUpdateState, SelfUpdateView } from "@harnessd/shared";
 
 /** A sub-issue an agent is working on. */
 export interface InFlightRun {
@@ -22,6 +22,8 @@ export interface InFlightRun {
   pid: number;
   /** Set when `harnessd pause` cancelled the run: its worktree is kept (MET-15). */
   pausedAt?: string;
+  /** Why the run was cancelled with its worktree kept. Unset means `harnessd pause`. */
+  stopReason?: "self-update";
 }
 
 /** A run `harnessd pause` cancelled. Its worktree is kept until the sub-issue runs again. */
@@ -33,7 +35,21 @@ export interface InterruptedRun {
   worktree: string;
   branch: string;
   interruptedAt: string;
-  reason: "paused";
+  /** `paused`: `harnessd pause`. `self-update`: it ran over its budget while an update waited. */
+  reason: "paused" | "self-update";
+}
+
+/** The issue whose merge started a self-update, for the comment and the notice. */
+export interface SelfUpdateTrigger {
+  id: string;
+  key: string;
+  url?: string;
+}
+
+/** The last self-update (docs/LOOP.md "Self-update"). */
+export interface SelfUpdateRecord extends SelfUpdateView {
+  /** Not set for the check at daemon start. */
+  trigger?: SelfUpdateTrigger;
 }
 
 /** What QA asked a part to fix; its next run's prompt carries it. */
@@ -94,6 +110,10 @@ export interface LoopState {
   gateFailures: Record<string, number>;
   /** PR URL to the time its needs-human ping went out, so it goes out once. */
   humanPings: Record<string, string>;
+  /** Target commit to the time its blocked or failed notice went out, so it goes out once. */
+  selfUpdatePings: Record<string, string>;
+  /** The last self-update, if any. */
+  selfUpdate?: SelfUpdateRecord;
 }
 
 export function emptyLoopState(): LoopState {
@@ -108,6 +128,7 @@ export function emptyLoopState(): LoopState {
     merges: [],
     gateFailures: {},
     humanPings: {},
+    selfUpdatePings: {},
   };
 }
 
@@ -134,7 +155,8 @@ function isRun(value: unknown): value is InFlightRun {
     typeof r.branch === "string" &&
     typeof r.startedAt === "string" &&
     typeof r.pid === "number" &&
-    (r.pausedAt === undefined || typeof r.pausedAt === "string")
+    (r.pausedAt === undefined || typeof r.pausedAt === "string") &&
+    (r.stopReason === undefined || r.stopReason === "self-update")
   );
 }
 
@@ -150,7 +172,7 @@ function isInterrupted(value: unknown): value is InterruptedRun {
     typeof r.worktree === "string" &&
     typeof r.branch === "string" &&
     typeof r.interruptedAt === "string" &&
-    r.reason === "paused"
+    (r.reason === "paused" || r.reason === "self-update")
   );
 }
 
@@ -231,12 +253,52 @@ function strings(value: unknown): Record<string, string> {
   return out;
 }
 
+const SELF_UPDATE_STATES: readonly SelfUpdateState[] = [
+  "pending",
+  "applying",
+  "done",
+  "blocked",
+  "failed",
+];
+
+function selfUpdate(value: unknown): SelfUpdateRecord | undefined {
+  const u = value as Partial<SelfUpdateRecord> | null;
+  if (
+    typeof u !== "object" ||
+    u === null ||
+    typeof u.from !== "string" ||
+    typeof u.to !== "string" ||
+    typeof u.at !== "string" ||
+    !SELF_UPDATE_STATES.includes(u.state as SelfUpdateState)
+  ) {
+    return undefined;
+  }
+  const out: SelfUpdateRecord = {
+    from: u.from,
+    to: u.to,
+    at: u.at,
+    state: u.state as SelfUpdateState,
+  };
+  if (typeof u.error === "string") out.error = u.error;
+  const t = u.trigger as Partial<SelfUpdateTrigger> | undefined;
+  if (
+    typeof t === "object" &&
+    t !== null &&
+    typeof t.id === "string" &&
+    typeof t.key === "string"
+  ) {
+    out.trigger = { id: t.id, key: t.key, ...(typeof t.url === "string" ? { url: t.url } : {}) };
+  }
+  return out;
+}
+
 /** Reads a state file's JSON, keeping only well-formed parts. Throws on anything unreadable. */
 export function parseLoopState(text: string): LoopState {
   const raw = JSON.parse(text) as Partial<LoopState> | null;
   if (typeof raw !== "object" || raw === null || !Array.isArray(raw.inFlight)) {
     throw new Error("no inFlight array");
   }
+  const update = selfUpdate(raw.selfUpdate);
   return {
     version: 1,
     lastPollAt: typeof raw.lastPollAt === "string" ? raw.lastPollAt : null,
@@ -248,6 +310,8 @@ export function parseLoopState(text: string): LoopState {
     merges: merges(raw.merges),
     gateFailures: counts(raw.gateFailures),
     humanPings: strings(raw.humanPings),
+    selfUpdatePings: strings(raw.selfUpdatePings),
+    ...(update ? { selfUpdate: update } : {}),
   };
 }
 
