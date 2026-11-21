@@ -67,6 +67,7 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 | `harness.<id>.cli` | `[harnesses.<id>] bin` in the config, else `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, `$HARNESSD_OPENCODE_BIN` or `opencode`, on PATH; then `--version` | `missing` when not found |
 | `harness.<id>.auth` | `claude auth status --json`; `codex login status`; `opencode auth list --format json --standalone` (provider ids only) | `fail` when signed out, or for OpenCode when a provider an agent names is not signed in; `warn` when the status cannot be read, or no provider is named or signed in |
 | `harness.<id>.version` | the version against a list of known-bad releases; for Codex and OpenCode, also against the minimum tested version (Codex 0.171.0, D-032; OpenCode 2.0.20) | `warn` |
+| `harness.<id>.worktree_write` | a scratch folder under the worktrees root, one file written and deleted with the harness's own sandbox: as the daemon user for Claude Code and OpenCode, and for Codex with `danger-full-access`; a sandboxed Codex writes through `codex sandbox` | `missing` when the CLI is not installed; `fail` with the reason when the sandbox or the root cannot write. Fix: make the root writable, or set Codex `--sandbox danger-full-access` (D-032). A cached result lasts 10 minutes on `GET /api/status` and `GET /api/loop`; `doctor` and Start check afresh |
 | `github.cli` | `$HARNESSD_GH_BIN` or `gh` on PATH | `missing` |
 | `github.auth` | `gh auth status --active` | `fail`: run `gh auth login` |
 | `github.push` | `gh repo view --json viewerPermission` | `fail` below WRITE, or with no GitHub remote |
@@ -79,7 +80,7 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 | `daemon.port` | binds `127.0.0.1:<daemon.port>` | `warn` when a running harnessd holds it; `fail` when anything else does |
 | `skills.pack` | each default skill in `~/.harnessd/skills/` | `warn`: run `harnessd init` |
 
-Harnesses are checked once for each harness an agent uses. Checks run in parallel. No command runs past 5 s, so `doctor` returns within a few seconds. No check spends tokens. Sign-in checks read only the exit code and named JSON fields, never the account or the token. Output never shows a key, a token or a webhook: each value of 6 characters or more of an environment variable with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in its name, and each value read from the secret store, is replaced by `***`. The loop and the Slack notifier read through the same lookup (D-030).
+Harnesses are checked once for each harness an agent uses as its `harness` or `fallback_harness`. Checks run in parallel. No command runs past 5 s, so `doctor` returns within a few seconds. No check spends tokens. Sign-in checks read only the exit code and named JSON fields, never the account or the token. Output never shows a key, a token or a webhook: each value of 6 characters or more of an environment variable with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in its name, and each value read from the secret store, is replaced by `***`. The loop and the Slack notifier read through the same lookup (D-030).
 
 ## Codex
 An agent with `harness = "codex"` runs on the Codex CLI (D-032, docs/CONFIG.md "Codex agents").

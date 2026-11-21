@@ -55,6 +55,21 @@ export async function findOnPath(
   return undefined;
 }
 
+/** The one-line detail of a command killed at its deadline. */
+export function timedOut(ms: number): string {
+  return `timed out after ${ms / 1000} s`;
+}
+
+/** The first non-empty line of a command's output, trimmed; "" when there is none. */
+export function firstLine(text: string): string {
+  return (
+    text
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line !== "") ?? ""
+  );
+}
+
 /** The first non-empty line of `<path> --version`, or undefined when it fails. */
 export async function readVersion(
   exec: Exec,

@@ -267,7 +267,11 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
       options.checks({ harnessesOnly: SETUP_HARNESSES }),
       mergedConfig(),
     ]);
-    const used = new Set(Object.values(config?.agents ?? {}).map((a) => a.harness));
+    const used = new Set(
+      Object.values(config?.agents ?? {}).flatMap((a) =>
+        a.fallback_harness === undefined ? [a.harness] : [a.harness, a.fallback_harness],
+      ),
+    );
     return {
       harnesses: SETUP_HARNESSES.map((id) => ({
         id,
