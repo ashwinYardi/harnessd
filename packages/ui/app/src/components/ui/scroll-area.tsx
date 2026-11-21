@@ -1,7 +1,7 @@
 // From shadcn/ui, base-nova registry (MIT; see packages/ui/THIRD_PARTY_NOTICES.md).
 // harnessd changes: both scrollbars, thin thumbs in the scrollbar tokens that show while the
 // pointer is over the area or it scrolls, a 2 px inset focus ring, and viewportProps, so a
-// view can hold a ref to the viewport (held updates and the log follow it).
+// view can hold a ref to the viewport, for example to follow the end of a list.
 import { ScrollArea as ScrollAreaPrimitive } from "@base-ui/react/scroll-area";
 import type * as React from "react";
 import { cn } from "../../lib/cn.ts";
