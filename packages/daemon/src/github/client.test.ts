@@ -80,6 +80,31 @@ test("findPrForIssue lists open PRs with --json and picks the newest whose title
   assert.equal(await gh.findPrForIssue("MET-99"), undefined);
 });
 
+test("createPr sends the title and the body on stdin and returns the PR URL", async () => {
+  const { gh, calls } = await client();
+  const url = await gh.createPr({
+    base: "main",
+    head: "met-113-ship",
+    title: "MET-113: Ship the work",
+    body: "Summary\n\nHow: pnpm test",
+  });
+  assert.equal(url, "https://github.test/o/r/pull/99");
+  const [call] = await calls();
+  assert.deepEqual(call?.argv, [
+    "pr",
+    "create",
+    "--base",
+    "main",
+    "--head",
+    "met-113-ship",
+    "--title",
+    "MET-113: Ship the work",
+    "--body-file",
+    "-",
+  ]);
+  assert.equal(call?.stdin, "Summary\n\nHow: pnpm test");
+});
+
 test("prFiles reads gh pr view --json files", async () => {
   const { gh, calls } = await client();
   assert.deepEqual(await gh.prFiles(9), [
