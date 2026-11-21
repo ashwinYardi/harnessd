@@ -10,6 +10,7 @@ test("every service has a name, a 24-unit path and a license", () => {
     "github",
     "linear",
     "openai",
+    "opencode",
     "slack",
   ]);
   for (const id of SERVICE_IDS) {
@@ -25,11 +26,13 @@ test("the git logo carries its CC BY 3.0 credit", () => {
   assert.match(SERVICES.git.credit ?? "", /Jason Long/);
 });
 
-test("each harness shows its maker's logo: Claude for Claude Code, OpenAI for Codex", () => {
+test("each harness shows its maker's logo: Claude, OpenAI and OpenCode", () => {
   assert.equal(harnessService("claude-code"), "claude");
   assert.equal(harnessService("codex"), "openai");
+  assert.equal(harnessService("opencode"), "opencode");
+  const known = new Set(["claude-code", "codex", "opencode"]);
   for (const h of HARNESSES) {
-    if (h !== "claude-code" && h !== "codex") assert.equal(harnessService(h), undefined, h);
+    if (!known.has(h)) assert.equal(harnessService(h), undefined, h);
   }
   assert.equal(harnessService("nope"), undefined);
 });

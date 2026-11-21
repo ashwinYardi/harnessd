@@ -26,7 +26,7 @@ Settings has a sub-nav and one card per harness or connection. Each card shows t
 
 ## Pinned aesthetic
 - Dense, quiet, keyboard-first, professional. Small type, tight rows and thin borders let one screen hold the whole team. Color is rare, so a red Needs you count stands out at once. Every action has a key. The UI looks like a well-made tool, not a product page.
-- Real service logos (GitHub, Linear, Slack, Claude, OpenAI, git) next to their names, in one color, so the eye finds a service by its shape first.
+- Real service logos (GitHub, Linear, Slack, Claude, OpenAI, OpenCode, git) next to their names, in one color, so the eye finds a service by its shape first.
 - No gradients, no emoji, no filler copy, no decorative illustration (AGENTS.md).
 - Light and dark themes. Text contrast meets WCAG AA.
 

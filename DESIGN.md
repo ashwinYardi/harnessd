@@ -99,7 +99,7 @@ harnessd's UI is an Operate surface (PRODUCT.md). It answers three questions fas
 ## Colors
 Restrained: zinc neutrals in light, true black and neutral in dark, one accent, and three state colors that each do one job.
 - **Brand** (blue for now): the `--brand` token family in `index.css`. `--primary` and `--ring` read it. It fills the default button, focus rings, the switch and the budget bar under 80 percent. Nothing else. The brand accent replaces it by changing the one `--brand` line (light value, then dark value) and, if needed, `--brand-foreground`. `lib/tokens.test.ts` checks AA for both values.
-- **Service logos**: GitHub, Linear, Slack, Claude, OpenAI and git, in the current text color. Never in a brand color, so the state colors keep their meaning.
+- **Service logos**: GitHub, Linear, Slack, Claude, OpenAI, OpenCode and git, in the current text color. Never in a brand color, so the state colors keep their meaning.
 - **Destructive and error** (red): only Needs you, Blocked, blocking checks (fail and missing, D-023) and failed calls. The Needs you column, its count in the sidebar and the header button are red. Nothing else is red.
 - **Warning** (amber): budgets at 80 percent or more, stopping runs, warning log lines, warn checks, and the header while paused.
 - **Success** (emerald): the live connection dot, the running-agent dot, ok checks and success toasts.

@@ -1,8 +1,9 @@
 // Settings → Team (MET-28): one row per agent with its role, harness and model. Save writes
 // the workspace .harnessd/config.toml through the config validator, then runs harnessd sync.
+// An opencode row's model field suggests the ids `opencode models` lists (MET-93).
 import { AGENT_ROLES, HARNESSES, validateTeam } from "@harnessd/shared";
 import { PlusIcon, Trash2Icon } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ApiError, type Load } from "../../api.ts";
 import { HarnessName } from "../../components/service-logo.tsx";
 import { Button } from "../../components/ui/button.tsx";
@@ -19,7 +20,14 @@ import { Skeleton } from "../../components/ui/skeleton.tsx";
 import { Spinner } from "../../components/ui/spinner.tsx";
 import { toast } from "../../components/ui/toast.tsx";
 import { cn } from "../../lib/cn.ts";
-import { readTeam, saveTeam, type TeamAgent } from "../../setupApi.ts";
+import { modelField } from "../../lib/opencode.ts";
+import {
+  type OpencodeModels,
+  readOpencodeModels,
+  readTeam,
+  saveTeam,
+  type TeamAgent,
+} from "../../setupApi.ts";
 import { ErrorState } from "../common.tsx";
 
 interface Row extends TeamAgent {
@@ -35,19 +43,30 @@ const strip = (rows: Row[]) =>
 function Field({
   error,
   id,
+  help,
+  helpId,
   children,
 }: {
   error: string | undefined;
   id: string;
+  /** One muted line under the field, shown when there is no error. */
+  help?: string | undefined;
+  helpId?: string;
   children: React.ReactNode;
 }) {
   return (
     <div className="grid gap-1">
       {children}
-      {error && (
+      {error ? (
         <p className="text-destructive-foreground text-xs" id={id}>
           {error}
         </p>
+      ) : (
+        help && (
+          <p className="text-pretty text-muted-foreground text-xs" id={helpId}>
+            {help}
+          </p>
+        )
       )}
     </div>
   );
@@ -100,6 +119,8 @@ export function Team() {
   const [serverErrors, setServerErrors] = useState<Record<string, string>>({});
   const [tried, setTried] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [models, setModels] = useState<Load<OpencodeModels>>({ status: "loading" });
+  const usesOpencode = rows.some((r) => r.harness === "opencode");
 
   const load = useCallback(async () => {
     try {
@@ -113,6 +134,18 @@ export function Team() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The model list loads once, when a row first picks opencode. A failure leaves free text.
+  const modelsAsked = useRef(false);
+  useEffect(() => {
+    if (!usesOpencode || modelsAsked.current) return;
+    modelsAsked.current = true;
+    readOpencodeModels().then(
+      (data) => setModels({ status: "ready", data }),
+      (e: unknown) =>
+        setModels({ status: "error", error: e instanceof Error ? e.message : String(e) }),
+    );
+  }, [usesOpencode]);
 
   const errors = useMemo(
     () => ({ ...(tried ? validateTeam(strip(rows)) : {}), ...serverErrors }),
@@ -230,6 +263,8 @@ export function Team() {
               {rows.map((row, i) => {
                 const err = (f: string) => errors[`${i}.${f}`];
                 const eid = (f: string) => (err(f) ? `${base}-${i}-${f}-error` : undefined);
+                const model = modelField(row.harness, models);
+                const modelHelpId = `${base}-${i}-model-help`;
                 return (
                   <tr className="border-t align-top" key={row.key}>
                     <td className="px-4 py-2">
@@ -277,11 +312,20 @@ export function Team() {
                       </Field>
                     </td>
                     <td className="px-2 py-2">
-                      <Field error={err("model")} id={`${base}-${i}-model-error`}>
+                      <Field
+                        error={err("model")}
+                        help={model.help}
+                        helpId={modelHelpId}
+                        id={`${base}-${i}-model-error`}
+                      >
                         <Input
-                          aria-describedby={eid("model")}
+                          aria-describedby={eid("model") ?? (model.help ? modelHelpId : undefined)}
                           aria-invalid={err("model") ? true : undefined}
                           aria-label={`Model of ${row.name || "the new agent"}`}
+                          autoComplete="off"
+                          list={
+                            model.suggestions.length > 0 ? `${base}-opencode-models` : undefined
+                          }
                           onChange={(e) => update(i, { model: e.target.value })}
                           placeholder="Harness default"
                           size="sm"
@@ -307,6 +351,13 @@ export function Team() {
               })}
             </tbody>
           </table>
+          {models.status === "ready" && models.data.models.length > 0 && (
+            <datalist id={`${base}-opencode-models`}>
+              {models.data.models.map((m) => (
+                <option key={m} value={m} />
+              ))}
+            </datalist>
+          )}
         </div>
         <p className="border-t px-4 py-2 text-muted-foreground text-xs">
           The four default agents always stay. Change their harness or model here.

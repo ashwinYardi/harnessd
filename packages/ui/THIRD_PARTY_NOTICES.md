@@ -7,7 +7,7 @@ The web UI uses these works. Each is made for reuse, and each license is below.
 | shadcn/ui (https://ui.shadcn.com) | The primitives in `app/src/components/ui/` and `cn()` in `app/src/lib/cn.ts`, from the base-nova registry, with harnessd's changes | MIT |
 | Base UI (`@base-ui/react`) | The accessible behaviour under those primitives | MIT |
 | Lucide (`lucide-react`) | Interface icons | ISC; some icons MIT (Feather) |
-| Simple Icons (`simple-icons`) | The GitHub, Linear, Slack, Claude, OpenAI and Git logos | CC0-1.0; the Git logo is CC BY 3.0 |
+| Simple Icons (`simple-icons`) | The GitHub, Linear, Slack, Claude, OpenAI, OpenCode and Git logos | CC0-1.0; the Git logo is CC BY 3.0 |
 
 Each file in `app/src/components/ui/` says at the top that it comes from shadcn/ui and lists harnessd's changes.
 
@@ -87,7 +87,7 @@ Icons that Lucide takes from Feather are under the MIT License, Copyright (c) 20
 
 ## Simple Icons
 
-The SVG paths are dedicated to the public domain under CC0 1.0 Universal (https://creativecommons.org/publicdomain/zero/1.0/). GitHub, Linear and Claude come from `simple-icons` 16. Slack and OpenAI are not in version 16; their paths are copied unchanged from `simple-icons` 15.22.0 into `app/src/lib/service-paths.ts`.
+The SVG paths are dedicated to the public domain under CC0 1.0 Universal (https://creativecommons.org/publicdomain/zero/1.0/). GitHub, Linear, Claude and OpenCode come from `simple-icons` 16, imported one by one. Slack and OpenAI are not in version 16; their paths are copied unchanged from `simple-icons` 15.22.0 into `app/src/lib/service-paths.ts`.
 
 The Git logo is by Jason Long, under CC BY 3.0 (https://creativecommons.org/licenses/by/3.0/). Source: https://git-scm.com/community/logos.
 
