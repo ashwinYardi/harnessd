@@ -1,0 +1,34 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "docs": {
+      "type": "local",
+      "command": [
+        "docs-mcp",
+        "--repo",
+        "say \"hi\""
+      ],
+      "environment": {
+        "DOCS.TOKEN": "",
+        "LEVEL": "debug"
+      },
+      "enabled": true
+    },
+    "harnessd-memory": {
+      "type": "local",
+      "command": [
+        "harnessd",
+        "mcp",
+        "memory"
+      ],
+      "enabled": true
+    },
+    "search": {
+      "type": "local",
+      "command": [
+        "search-mcp"
+      ],
+      "enabled": true
+    }
+  }
+}
