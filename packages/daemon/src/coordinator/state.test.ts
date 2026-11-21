@@ -182,6 +182,27 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
   assert.throws(() => parseLoopState("[]"), /no inFlight array/);
 });
 
+test("an interrupted run from before the keep reasons loads as paused", () => {
+  const old = {
+    issueId: "id-2",
+    issueKey: "MET-42",
+    role: "frontend",
+    agent: "frontend",
+    worktree: "/wt/met-42",
+    branch: "met-42-ui",
+    interruptedAt: "2026-11-19T10:01:00.000Z",
+  };
+  const parsed = parseLoopState(JSON.stringify({ inFlight: [], interrupted: [old] }));
+  assert.deepEqual(parsed.interrupted, [{ ...old, reason: "paused" }]);
+  const kept = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      interrupted: [{ ...old, reason: "uncommitted changes" }],
+    }),
+  );
+  assert.equal(kept.interrupted[0]?.reason, "uncommitted changes");
+});
+
 test("parseLoopState drops a malformed self-update record and keeps a valid one", () => {
   const base = { inFlight: [] };
   assert.equal(

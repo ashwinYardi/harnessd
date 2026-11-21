@@ -606,8 +606,9 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
     } finally {
       // A pause keeps the worktree in use for inspection (MET-15); the loop records it.
       if (!cancelled()) {
+        // A detached PR-head checkout holds no branch work: remove it as a scratch tree.
         await deps.worktrees
-          .remove(path)
+          .remove(path, { scratch: true })
           .catch((error) => log(`${qa.key}: could not remove ${path}: ${message(error)}`));
         deps.onWorktree?.("");
       }
