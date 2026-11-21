@@ -17,6 +17,10 @@ export interface Job {
   exitCode?: number;
   lines: string[];
   startedAt: string;
+  /** Sign-in only: the first https url in the output (MET-48). Opened only on a click. */
+  url?: string;
+  /** Sign-in only: the first device code in the output, such as ABCD-EFGH (MET-48). */
+  code?: string;
 }
 
 export interface HarnessCard {

@@ -7,7 +7,7 @@ import { loadConfig } from "../config/load.ts";
 import { resolveAgentConfig } from "../config/merge.ts";
 import { startDaemon } from "../server/daemon.ts";
 import type { Check } from "../status/status.ts";
-import { type SetupOptions, setupRoutes } from "./routes.ts";
+import { type SetupOptions, setupRoutes, spawnRunner } from "./routes.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -75,7 +75,6 @@ async function serve(extra: Partial<SetupOptions> = {}) {
     repoDir,
     globalDir,
     env: {},
-    platform: "darwin",
     checks: async () => CHECKS,
     isExecutable: async (p) => p === "/opt/bin/claude",
     runner: (cmd, args, onLine) => {
@@ -193,28 +192,165 @@ test("an action takes no text from the request: extra keys and unknown actions a
   }
 });
 
-test("Sign in opens Terminal on macOS with the CLI's login command", async () => {
+const CLAUDE_BIN = '\n[harnesses.claude-code]\nbin = "/opt/bin/claude"\n';
+
+async function withClaudeBin(s: { globalDir: string }) {
+  const file = join(s.globalDir, "config.toml");
+  await writeFile(file, (await readFile(file, "utf8")) + CLAUDE_BIN);
+}
+
+const settle = () => new Promise((r) => setTimeout(r, 10));
+
+async function jobOf(s: { get: (p: string) => Promise<unknown> }, id: string) {
+  const body = (await s.get("/api/harnesses")) as {
+    harnesses: Array<{ id: string; job: Record<string, unknown> | null }>;
+  };
+  return body.harnesses.find((h) => h.id === id)?.job ?? null;
+}
+
+// Sign-in has no platform branch any more (D-031), so SetupOptions takes no platform.
+test("Sign in runs the resolved CLI with its own login argv, not Terminal", async () => {
   const s = await serve();
   try {
+    await withClaudeBin(s);
     const res = await s.post("/api/harnesses/claude-code/signin", {});
     assert.equal(res.status, 200);
-    assert.deepEqual(s.runs, [
-      'osascript -e tell application "Terminal" to do script "claude auth login" -e tell application "Terminal" to activate',
-    ]);
+    const job = (await res.json()) as { command: string; state: string };
+    assert.equal(job.command, "claude auth login");
+    assert.equal(job.state, "running");
+    assert.deepEqual(s.runs, ["/opt/bin/claude auth login"]);
+    assert.doesNotMatch(s.runs.join("\n"), /osascript|Terminal/);
   } finally {
     await s.close();
   }
-  const linux = await serve({ platform: "linux" });
+});
+
+test("Sign in for Codex takes HARNESSD_CODEX_BIN and runs `login` with no extra flags", async () => {
+  const s = await serve({
+    env: { HARNESSD_CODEX_BIN: "/opt/bin/codex" },
+    isExecutable: async (p) => p === "/opt/bin/codex",
+  });
   try {
-    const res = await linux.post("/api/harnesses/claude-code/signin", {});
-    assert.equal(res.status, 400);
-    assert.match(
-      ((await res.json()) as { message: string }).message,
-      /Run claude auth login in a terminal/,
-    );
-    assert.deepEqual(linux.runs, []);
+    assert.equal((await s.post("/api/harnesses/codex/signin", {})).status, 200);
+    assert.deepEqual(s.runs, ["/opt/bin/codex login"]);
   } finally {
-    await linux.close();
+    await s.close();
+  }
+});
+
+test("Sign in with no CLI found is a 400 that names the problem, and runs nothing", async () => {
+  const s = await serve();
+  try {
+    const res = await s.post("/api/harnesses/claude-code/signin", {});
+    assert.equal(res.status, 400);
+    const body = (await res.json()) as { error: string; message: string };
+    assert.equal(body.error, "not_installed");
+    assert.match(body.message, /claude is not on PATH/);
+    assert.deepEqual(s.runs, []);
+  } finally {
+    await s.close();
+  }
+});
+
+test("the sign-in job carries the first login URL and device code, masked of env secrets", async () => {
+  const s = await serve({
+    env: { OPENAI_API_KEY: "sk-secret-value" },
+    runner: async (_cmd, _args, onLine) => {
+      onLine("Using key sk-secret-value");
+      onLine("Open https://auth.example.com/device in your browser.");
+      onLine("Enter this one-time code: ABCD-1234");
+      onLine("Or open https://other.example.com and enter WXYZ-9876");
+      return 0;
+    },
+  });
+  try {
+    await withClaudeBin(s);
+    assert.equal((await s.post("/api/harnesses/claude-code/signin", {})).status, 200);
+    await settle();
+    const job = await jobOf(s, "claude-code");
+    assert.equal(job?.state, "ok");
+    assert.equal(job?.url, "https://auth.example.com/device");
+    assert.equal(job?.code, "ABCD-1234");
+    assert.equal((job?.lines as string[] | undefined)?.[0], "Using key ***");
+    assert.doesNotMatch(JSON.stringify(job), /sk-secret-value|Terminal/);
+  } finally {
+    await s.close();
+  }
+});
+
+test("a sign-in that fails with no URL is failed and has no url or code", async () => {
+  const s = await serve({
+    runner: async (_cmd, _args, onLine) => {
+      onLine("error: could not reach the login server");
+      return 2;
+    },
+  });
+  try {
+    await withClaudeBin(s);
+    await s.post("/api/harnesses/claude-code/signin", {});
+    await settle();
+    const job = await jobOf(s, "claude-code");
+    assert.equal(job?.state, "failed");
+    assert.equal(job?.exitCode, 2);
+    assert.equal("url" in (job ?? {}), false);
+    assert.equal("code" in (job ?? {}), false);
+  } finally {
+    await s.close();
+  }
+});
+
+test("install output is not read for a login URL", async () => {
+  const s = await serve({
+    runner: async (_cmd, _args, onLine) => {
+      onLine("see https://docs.example.com and enter ABCD-1234");
+      return 0;
+    },
+  });
+  try {
+    await s.post("/api/harnesses/codex/install", {});
+    await settle();
+    const job = await jobOf(s, "codex");
+    assert.equal(job?.url, undefined);
+    assert.equal(job?.code, undefined);
+  } finally {
+    await s.close();
+  }
+});
+
+test("sign-in runs a real fake CLI from [harnesses.<id>] bin and reads its prompt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-fake-cli-"));
+  roots.push(root);
+  const bin = join(root, "claude");
+  await writeFile(
+    bin,
+    [
+      "#!/bin/sh",
+      '[ "$1 $2" = "auth login" ] || { echo "bad argv: $*" >&2; exit 9; }',
+      'echo "Opening https://login.example.com/oauth?state=x"',
+      'echo "Enter code: QWER-TYUI" >&2',
+      "exit 0",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  const s = await serve({ runner: spawnRunner, isExecutable: async (p) => p === bin });
+  try {
+    const file = join(s.globalDir, "config.toml");
+    await writeFile(
+      file,
+      `${await readFile(file, "utf8")}\n[harnesses.claude-code]\nbin = "${bin}"\n`,
+    );
+    assert.equal((await s.post("/api/harnesses/claude-code/signin", {})).status, 200);
+    let job = await jobOf(s, "claude-code");
+    for (let i = 0; i < 200 && job?.state === "running"; i++) {
+      await settle();
+      job = await jobOf(s, "claude-code");
+    }
+    assert.equal(job?.state, "ok", JSON.stringify(job));
+    assert.equal(job?.url, "https://login.example.com/oauth?state=x");
+    assert.equal(job?.code, "QWER-TYUI");
+  } finally {
+    await s.close();
   }
 });
 

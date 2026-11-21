@@ -21,8 +21,15 @@ import { loadConfig } from "../config/load.ts";
 import { applyTeam, type TeamChange, TeamEditError } from "../config/team.ts";
 import { EventStream, HttpError, type Route, type SendEvent } from "../server/router.ts";
 import { isExecutableFile } from "../status/detect.ts";
-import { type Check, harnessSetupSpec, type StatusOptions } from "../status/status.ts";
+import {
+  type Check,
+  harnessSetupSpec,
+  locateHarness,
+  maskEnvSecrets,
+  type StatusOptions,
+} from "../status/status.ts";
 import { type SyncResult, syncRepo } from "../sync/sync.ts";
+import { parseLoginPrompt } from "./login-prompt.ts";
 
 /** The harnesses the Settings page shows a card for. */
 export const SETUP_HARNESSES = ["claude-code", "codex"] as const satisfies readonly HarnessId[];
@@ -47,7 +54,6 @@ export interface SetupOptions {
   /** The status engine, with options merged over the daemon's own. */
   checks: (options: Partial<StatusOptions>) => Promise<Check[]>;
   runner?: SetupRunner;
-  platform?: NodeJS.Platform;
   isExecutable?: (path: string) => Promise<boolean>;
   sync?: (options: { repoDir: string; globalDir: string }) => Promise<SyncResult>;
 }
@@ -62,6 +68,10 @@ export interface JobView {
   exitCode?: number;
   lines: string[];
   startedAt: string;
+  /** Sign-in only: the first https URL in the output, for the app to open on a click. */
+  url?: string;
+  /** Sign-in only: the first device code in the output, for the person to copy. */
+  code?: string;
 }
 
 const MAX_LINES = 200;
@@ -101,11 +111,14 @@ export const spawnRunner: SetupRunner = (cmd, args, onLine) =>
     });
   });
 
-/** The fixed argv of each action. Sign-in opens Terminal, so the CLI's own login runs there. */
+/**
+ * The fixed argv of each action. Sign-in runs the CLI's own login as a child process, at
+ * the path the status engine uses (D-031). No other app is started or driven.
+ */
 function commandFor(
   harness: SetupHarness,
   action: HarnessAction,
-  platform: NodeJS.Platform,
+  bin: string | undefined,
 ): { cmd: string; args: string[]; text: string } {
   const spec = harnessSetupSpec(harness);
   if (!spec) throw new HttpError(404, "not_found");
@@ -116,23 +129,7 @@ function commandFor(
     const pkg = `${spec.pkg}@latest`;
     return { cmd: "npm", args: ["install", "-g", pkg], text: `npm install -g ${pkg}` };
   }
-  if (platform !== "darwin") {
-    throw new HttpError(
-      400,
-      "unsupported",
-      `Sign-in opens Terminal on macOS only. Run ${spec.login} in a terminal, then press Recheck.`,
-    );
-  }
-  return {
-    cmd: "osascript",
-    args: [
-      "-e",
-      `tell application "Terminal" to do script "${spec.login}"`,
-      "-e",
-      'tell application "Terminal" to activate',
-    ],
-    text: spec.login,
-  };
+  return { cmd: bin ?? spec.bin, args: spec.loginArgs, text: spec.login };
 }
 
 function manualCommands(harness: SetupHarness): Record<HarnessAction, string> {
@@ -202,7 +199,6 @@ interface TeamAgentView {
 
 export function setupRoutes(options: SetupOptions): { routes: Route[] } {
   const runner = options.runner ?? spawnRunner;
-  const platform = options.platform ?? process.platform;
   const isExec = options.isExecutable ?? isExecutableFile;
   const sync = options.sync ?? syncRepo;
   const workspaceFile = join(options.repoDir, ".harnessd", "config.toml");
@@ -214,17 +210,20 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     for (const send of listeners) send("job", job);
   };
 
+  const mergedConfig = () =>
+    loadConfig({
+      globalDir: options.globalDir,
+      workspaceDir: join(options.repoDir, ".harnessd"),
+    }).catch((e: unknown) => {
+      // A broken config is named, not hidden behind "no agent uses it".
+      if (e instanceof ConfigError) throw new HttpError(400, "invalid_config", e.message);
+      throw e;
+    });
+
   async function harnesses() {
     const [checks, config] = await Promise.all([
       options.checks({ harnessesOnly: SETUP_HARNESSES }),
-      loadConfig({
-        globalDir: options.globalDir,
-        workspaceDir: join(options.repoDir, ".harnessd"),
-      }).catch((e: unknown) => {
-        // A broken config is named, not hidden behind "no agent uses it".
-        if (e instanceof ConfigError) throw new HttpError(400, "invalid_config", e.message);
-        throw e;
-      }),
+      mergedConfig(),
     ]);
     const used = new Set(Object.values(config?.agents ?? {}).map((a) => a.harness));
     return {
@@ -240,7 +239,26 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     };
   }
 
-  function start(harness: SetupHarness, action: HarnessAction): JobView {
+  /** Sign-in runs the file the status engine checks: config bin, then HARNESSD_*_BIN, then PATH. */
+  async function loginBin(harness: SetupHarness): Promise<string> {
+    const found = await locateHarness(harness, {
+      config: await mergedConfig(),
+      env: options.env,
+      isExecutable: isExec,
+    });
+    if ("absent" in found) {
+      throw new HttpError(
+        400,
+        "not_installed",
+        `${found.absent}. Install ${NAMES[harness]} first.`,
+      );
+    }
+    return found.path;
+  }
+
+  async function start(harness: SetupHarness, action: HarnessAction): Promise<JobView> {
+    const bin = action === "signin" ? await loginBin(harness) : undefined;
+    // Checked after the await, so two clicks never start two commands.
     if (jobs.get(harness)?.state === "running") {
       throw new HttpError(
         409,
@@ -248,7 +266,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
         `${NAMES[harness]} is already running a command. Wait for it to end.`,
       );
     }
-    const { cmd, args, text } = commandFor(harness, action, platform);
+    const { cmd, args, text } = commandFor(harness, action, bin);
     const job: JobView = {
       id: randomUUID(),
       harness,
@@ -260,15 +278,19 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     };
     jobs.set(harness, job);
     emit(job);
-    void runner(cmd, args, (line) => {
+    // Output stays in the job view only; it never goes to the daemon log.
+    void runner(cmd, args, (raw) => {
+      const line = maskEnvSecrets(raw, options.env);
       job.lines = [...job.lines, line].slice(-MAX_LINES);
+      if (action === "signin") {
+        const prompt = parseLoginPrompt(line);
+        if (job.url === undefined && prompt.url !== undefined) job.url = prompt.url;
+        if (job.code === undefined && prompt.code !== undefined) job.code = prompt.code;
+      }
       emit({ ...job });
     }).then((code) => {
       job.state = code === 0 ? "ok" : "failed";
       job.exitCode = code;
-      if (code === 0 && action === "signin") {
-        job.lines = [...job.lines, "Terminal opened. Finish sign-in there, then press Recheck."];
-      }
       emit({ ...job });
     });
     return { ...job };

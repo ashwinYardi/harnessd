@@ -8,6 +8,12 @@
 - Don't touch protected paths without human review: auth, payments, secrets, release config, merge-gate config.
 - Reports: one line of result, at most 3 bullets.
 
+## QA
+- QA checks the result, not only the diff. Run the tests, then check each "Done when" item and each item of the build plan.
+- **For a change to the UI or the API, check it in a browser.** Build the PR's worktree. Start it as a second daemon with its own `HARNESSD_HOME` (a temp folder) and a free `daemon.port`, such as 4748. Open the changed screens with the browser tool your harness has (Claude: Playwright MCP; Codex: its browser tool). Check them at 1280x800 and 390x844.
+- **Never restart the main harnessd service during QA.** It runs the loop, and QA runs inside that loop. After the merge, the main service updates itself (MET-63). Until then, a human pulls, builds and restarts it.
+- Put screenshots and the checked items in the PR comment. Stop the side daemon and delete its temp folder when you finish, also after a failure.
+
 ## What goes in this public repo
 This repo is public. Every file in it must be one of these:
 - Original code, docs or assets made for harnessd.
