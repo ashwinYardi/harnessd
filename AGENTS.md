@@ -5,6 +5,7 @@
 - Harness integration goes through CLIs only (D-002). Never add a vendor SDK.
 - UI: dense, quiet, keyboard-first and professional. No gradients, emoji, or filler copy.
 - Every PR has tests or a clear reason why not. CI must be green.
+- **Builder runs.** harnessd commits, pushes and opens the PR after your run. Do not run `git commit`, `git push` or `gh pr create`.
 - Don't touch protected paths without human review: auth, payments, secrets, release config, merge-gate config.
 - Reports: one line of result, at most 3 bullets.
 

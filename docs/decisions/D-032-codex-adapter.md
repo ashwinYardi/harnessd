@@ -1,5 +1,5 @@
 # D-032 Agent runs on Codex use `codex exec --json`
-Status: accepted 2026-11-21. Issue: MET-69. Extends D-031; it does not contradict it.
+Status: accepted 2026-11-21. Issue: MET-69. Extends D-031; it does not contradict it. Amended by D-038: the daemon ships the run; agents get no git write and no GitHub login.
 
 **Transport: `codex exec --json`, not `app-server`.**
 - `codex exec --json` runs one process per task. It writes JSONL events on stdout, then exits.
