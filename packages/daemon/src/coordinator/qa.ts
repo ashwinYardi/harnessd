@@ -467,6 +467,11 @@ export interface QaRunResult {
   reviews: PrReview[];
   /** True when `signal` stopped the round early. Nothing was posted for the PR in progress. */
   cancelled?: boolean;
+  /**
+   * True when the QA agent's harness hit a usage limit (MET-70). The round stopped there:
+   * nothing was posted for that PR and no later part ran. It is no QA failure.
+   */
+  limited?: boolean;
 }
 
 /** Reviews every part's PR. Never throws: a broken step is an `error` review. */
@@ -477,6 +482,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
   const deadline = now() + input.budgetMs;
   const checklist = qaChecklist(parent);
   const cancelled = () => deps.signal?.aborted === true;
+  let limited = false;
   const stopped = (part: LinkedIssue, pr?: PullRequest): PrReview => ({
     part,
     ...(pr ? { pr } : {}),
@@ -591,6 +597,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         if (deps.agent.model !== undefined) task.model = deps.agent.model;
         if (env !== undefined) task.env = env;
         const reply = await runForReply(deps.adapter, task, path);
+        if (!reply.ok && reply.limited) limited = true;
         verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
       }
     } catch (error) {
@@ -606,6 +613,14 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       }
     }
     if (cancelled()) return stopped(part, pr);
+    if (limited)
+      return {
+        part,
+        pr,
+        decision: "error",
+        failing: [],
+        error: verdict.ok ? "limited" : verdict.error,
+      };
 
     const decision = decideReview(checklist, tests, verdict);
     if (decision.decision === "error") {
@@ -643,7 +658,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
 
   const reviews: PrReview[] = [];
   for (const part of input.parts) {
-    if (cancelled()) break;
+    if (cancelled() || limited) break;
     if (part.state.toLowerCase() === "done") {
       log(`${qa.key}: ${part.key} is Done, not reviewed`);
       continue;
@@ -651,6 +666,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
     reviews.push(await review(part));
   }
   if (cancelled()) return { outcome: "error", reviews, cancelled: true };
+  if (limited) return { outcome: "error", reviews, limited: true };
   const outcome = reviews.some((r) => r.decision === "request_changes")
     ? "changes_requested"
     : reviews.some((r) => r.decision === "error")

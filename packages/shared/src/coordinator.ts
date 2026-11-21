@@ -56,7 +56,8 @@ export interface Precedent {
   why: string;
 }
 
-export type GrillOutcome = "proceed" | "needs_input" | "error";
+/** `limited`: the harness hit a usage limit; nothing was written and the issue stays (MET-70). */
+export type GrillOutcome = "proceed" | "needs_input" | "error" | "limited";
 
 export interface GrillResult {
   calls: Call[];
@@ -66,7 +67,7 @@ export interface GrillResult {
   terms?: GlossaryTerm[];
   /** Calls that set new precedent, written as draft decision records. Set when the grill ran. */
   precedents?: Precedent[];
-  /** Short reason when the outcome is `error`. */
+  /** Short reason when the outcome is `error` or `limited`. */
   error?: string;
 }
 

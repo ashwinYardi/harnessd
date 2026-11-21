@@ -10,7 +10,10 @@ import {
   type DecisionNote,
   emptyTokenUsage,
   type HarnessAdapter,
+  type HarnessId,
   type LinkedIssue,
+  limitAvailableLine,
+  limitHoldLine,
   type MergedConfig,
   type Priority,
   type RunResult,
@@ -208,7 +211,7 @@ class FakeLinear implements LoopLinear {
 interface PendingRun {
   task: Task;
   cwd: string;
-  finish(status?: RunResult["status"], error?: string, text?: string): void;
+  finish(status?: RunResult["status"], error?: string, text?: string, resetAt?: string): void;
 }
 
 /**
@@ -216,29 +219,47 @@ interface PendingRun {
  * and keeps every other run open until the test finishes it.
  */
 function fakeAdapter(
-  options: { grillReply?: string; plans?: Record<string, string>; id?: string } = {},
+  options: {
+    grillReply?: string;
+    plans?: Record<string, string>;
+    id?: HarnessId;
+    /** Grill and plan runs end with this status instead of `ok`. */
+    grillStatus?: RunResult["status"];
+    planStatus?: RunResult["status"];
+  } = {},
 ) {
   const tasks: Task[] = [];
   const pending: PendingRun[] = [];
   const adapter: HarnessAdapter = {
-    id: "claude-code",
+    id: options.id ?? "claude-code",
     start(task, cwd) {
       tasks.push(task);
-      const result = (status: RunResult["status"], text?: string, error?: string): RunResult => {
+      const result = (
+        status: RunResult["status"],
+        text?: string,
+        error?: string,
+        resetAt?: string,
+      ): RunResult => {
         const r: RunResult = { status, exitCode: 0, durationMs: 1, tokens: emptyTokenUsage() };
         if (text !== undefined) r.finalText = text;
         if (error !== undefined) r.error = error;
+        if (resetAt !== undefined) r.resetAt = resetAt;
         return r;
       };
       let resolve: (r: RunResult) => void = () => {};
       let promise: Promise<RunResult>;
       if (task.id.startsWith("grill-")) {
         promise = Promise.resolve(
-          result("ok", options.grillReply ?? '{"calls":[],"escalation":null}'),
+          result(
+            options.grillStatus ?? "ok",
+            options.grillReply ?? '{"calls":[],"escalation":null}',
+          ),
         );
       } else if (task.id.startsWith("plan-")) {
         const key = task.id.slice("plan-".length);
-        promise = Promise.resolve(result("ok", options.plans?.[key] ?? "not json"));
+        promise = Promise.resolve(
+          result(options.planStatus ?? "ok", options.plans?.[key] ?? "not json"),
+        );
       } else {
         promise = new Promise((r) => {
           resolve = r;
@@ -246,7 +267,8 @@ function fakeAdapter(
         pending.push({
           task,
           cwd,
-          finish: (status = "ok", error, text) => resolve(result(status, text, error)),
+          finish: (status = "ok", error, text, resetAt) =>
+            resolve(result(status, text, error, resetAt)),
         });
       }
       // Like a real adapter, each iteration replays the run from the start.
@@ -714,6 +736,266 @@ test("a limited run goes back to Ready and uses no attempt (MET-70)", async () =
   assert.equal(t.memory.state.attempts[part.id], undefined);
   assert.equal(t.pings.length, 0);
   assert.ok(!t.linear.comments.some((c) => /failed/.test(c.body)), "no failure comment");
+});
+
+// --- usage limits (MET-70) ---------------------------------------------------
+
+/** A clock the test moves by hand. */
+function manualClock(start = "2026-11-20T17:37:00.000Z") {
+  let now = Date.parse(start);
+  return {
+    clock: { now: () => new Date(now), setInterval: () => 0, clearInterval: () => {} },
+    advance(ms: number) {
+      now += ms;
+    },
+    at: (ms: number) => new Date(now + ms).toISOString(),
+  };
+}
+
+/** The frontend agent runs on Codex; every other agent on Claude Code. */
+const FRONTEND_ON_CODEX = mergeLayers([
+  {
+    scope: "workspace",
+    dir: "/repo/.harnessd",
+    settings: {},
+    agents: { frontend: { harness: "codex", label: "frontend", keyPrefix: "agents.frontend" } },
+    rules: [],
+    skills: [],
+    mcp: {},
+    skillSettings: {},
+  },
+]);
+
+const MINUTE = 60_000;
+
+function part(t: ReturnType<typeof setup>, parentId: string, role: string, title: string) {
+  return t.linear.add({ title, parentId, description: `${partMarker(role)}\n**Size**: S` });
+}
+
+function gate() {
+  let open = (): void => {};
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+
+test("a hold that starts during worktree creation prevents the next adapter start", async () => {
+  const time = manualClock();
+  const adapter = fakeAdapter();
+  const wt = fakeWorktrees();
+  const preparing = gate();
+  const proceed = gate();
+  const t = setup({
+    adapter,
+    extra: { clock: time.clock },
+    worktrees: {
+      ...wt.worktrees,
+      async create(input) {
+        if (input.title === "Second") {
+          preparing.open();
+          await proceed.promise;
+        }
+        return wt.worktrees.create(input);
+      },
+    },
+  });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const first = part(t, parent.id, "backend", "First");
+  assert.deepEqual((await t.loop.tick()).dispatched, [first.key]);
+
+  const second = part(t, parent.id, "frontend", "Second");
+  const tick = t.loop.tick();
+  await preparing.promise;
+  adapter.pending[0]?.finish("limited", "usage limit reached", undefined, time.at(MINUTE));
+  await settle();
+  proceed.open();
+  assert.deepEqual((await tick).dispatched, []);
+  assert.equal(adapter.runs().length, 1);
+  assert.equal(second.state, "Ready");
+  assert.deepEqual(t.memory.state.attempts, {});
+  assert.ok(wt.removed.includes(`/wt/${second.key}`));
+});
+
+test("a limited run holds its harness until the reset while another harness keeps working", async () => {
+  const time = manualClock();
+  const codex = fakeAdapter({ id: "codex" });
+  const claude = fakeAdapter();
+  const t = setup({
+    adapter: claude,
+    config: FRONTEND_ON_CODEX,
+    extra: { clock: time.clock, adapters: { "claude-code": claude.adapter, codex: codex.adapter } },
+  });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const a = part(t, parent.id, "backend", "A");
+  const ui = part(t, parent.id, "frontend", "UI");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key, ui.key]);
+  const resetAt = time.at(60 * MINUTE);
+  claude.pending[0]?.finish("limited", "usage limit reached", undefined, resetAt);
+  await settle();
+  await settle();
+  assert.equal(a.state, "Ready");
+  assert.equal(t.memory.state.attempts[a.id], undefined, "no attempt used");
+  assert.deepEqual(t.memory.state.limits["claude-code"], {
+    until: resetAt,
+    since: time.at(0),
+  });
+  assert.deepEqual(
+    t.logs.filter((l) => /limited until/.test(l)),
+    [limitHoldLine("claude-code", resetAt)],
+  );
+
+  // Claude Code is held: the backend part waits, a new Codex part still starts.
+  codex.pending[0]?.finish("ok");
+  const ui2 = part(t, parent.id, "frontend", "UI 2");
+  time.advance(30 * MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, [ui2.key]);
+  assert.equal(claude.runs().length, 1);
+  assert.equal(
+    t.logs.filter((l) => /limited until/.test(l)).length,
+    1,
+    "logged once, not per tick",
+  );
+
+  // The reset passes: the hold ends, once, and the part runs again.
+  time.advance(30 * MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.deepEqual(t.memory.state.limits, {});
+  assert.deepEqual(
+    t.logs.filter((l) => /available again/.test(l)),
+    [limitAvailableLine("claude-code")],
+  );
+  claude.pending.at(-1)?.finish("ok");
+  codex.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+  assert.equal(a.state, "In Review");
+});
+
+test("no reset time: a 15 minute backoff that doubles, and an ok run clears it", async () => {
+  const time = manualClock();
+  const t = setup({ extra: { clock: time.clock } });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const a = part(t, parent.id, "backend", "A");
+
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish("limited", "rate limit");
+  await t.loop.idle();
+  assert.equal(t.memory.state.limits["claude-code"]?.backoffMs, 15 * MINUTE);
+  assert.ok(t.logs.includes(limitHoldLine("claude-code", time.at(15 * MINUTE), true)));
+
+  time.advance(14 * MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  time.advance(1 * MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  t.adapter.pending.at(-1)?.finish("limited", "rate limit");
+  await t.loop.idle();
+  assert.equal(t.memory.state.limits["claude-code"]?.backoffMs, 30 * MINUTE, "doubled");
+  assert.ok(t.logs.includes(limitHoldLine("claude-code", time.at(30 * MINUTE), true)));
+
+  time.advance(30 * MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+  assert.deepEqual(t.memory.state.limits, {}, "an ok run clears the backoff");
+  assert.equal(a.state, "In Review");
+  assert.equal(t.memory.state.attempts[a.id], undefined);
+});
+
+test("a hold that starts during QA checkout prevents the reviewer from starting", async () => {
+  const time = manualClock();
+  const wt = fakeWorktrees();
+  const preparing = gate();
+  const proceed = gate();
+  const t = setup({
+    extra: { clock: time.clock },
+    worktrees: {
+      ...wt.worktrees,
+      async checkout(input) {
+        preparing.open();
+        await proceed.promise;
+        return wt.worktrees.checkout(input);
+      },
+    },
+  });
+  const work = t.linear.add({ title: "Work", state: "In Progress" });
+  const first = part(t, work.id, "backend", "First");
+  assert.deepEqual((await t.loop.tick()).dispatched, [first.key]);
+
+  const { backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+  await t.loop.tick();
+  await preparing.promise;
+  t.adapter.pending[0]?.finish("limited", "usage limit reached", undefined, time.at(MINUTE));
+  await settle();
+  proceed.open();
+  await t.loop.idle();
+
+  assert.equal(t.adapter.runs().length, 1);
+  assert.equal(qa.state, "Ready");
+  assert.deepEqual(t.memory.state.qaFailures, {});
+  assert.deepEqual(t.gh.reviews, []);
+  assert.ok(wt.removed.includes(`/wt/${qa.key}-sha7`));
+});
+
+test("a limited QA run counts no QA failure and goes back to Ready", async () => {
+  const time = manualClock();
+  const t = setup({ extra: { clock: time.clock } });
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending[0]?.finish("limited", "usage limit reached", undefined, time.at(MINUTE));
+  await t.loop.idle();
+  assert.equal(qa.state, "Ready");
+  assert.equal(backend.state, "In Review", "the part is not sent back");
+  assert.deepEqual(t.memory.state.qaFailures, {});
+  assert.equal(t.gh.reviews.length, 0);
+  assert.equal(t.linear.comments.length, 0);
+  assert.deepEqual(t.wt.removed, [`/wt/${qa.key}-sha7`]);
+  assert.equal(parent.state, "In Progress");
+  assert.deepEqual((await t.loop.tick()).dispatched, [], "QA waits for the reset");
+
+  time.advance(MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+});
+
+test("a limited grill or plan run does not escalate: the issue stays Ready, nothing is posted", async () => {
+  for (const which of ["grill", "plan"] as const) {
+    const time = manualClock();
+    const adapter = fakeAdapter(
+      which === "grill" ? { grillStatus: "limited" } : { planStatus: "limited" },
+    );
+    const t = setup({ adapter, extra: { clock: time.clock } });
+    const issue = t.linear.add({ title: "Work", description: BODY("M") });
+
+    const report = await t.loop.tick();
+    assert.deepEqual(report.escalated, [], which);
+    assert.deepEqual(report.split, [], which);
+    assert.equal(issue.state, "Ready", which);
+    assert.equal(t.linear.children(issue).length, 0, which);
+    assert.deepEqual(t.pings, [], which);
+    assert.ok(t.memory.state.limits["claude-code"], `${which}: the coordinator harness is held`);
+    if (which === "grill") assert.deepEqual(t.linear.comments, []);
+    const runs = t.adapter.tasks.length;
+    await t.loop.tick();
+    assert.equal(t.adapter.tasks.length, runs, `${which}: no run while held`);
+  }
+});
+
+test("a hold in loop.json survives a restart", async () => {
+  const time = manualClock();
+  const state = emptyLoopState();
+  state.limits["claude-code"] = { until: time.at(60 * MINUTE), since: time.at(0) };
+  const store = memoryStore(state);
+  const t = setup({ store, extra: { clock: time.clock } });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const a = part(t, parent.id, "backend", "A");
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  time.advance(60 * MINUTE);
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.deepEqual(store.state.limits, {});
 });
 
 /** A parent with one backend part and its QA sub-issue, as a split leaves them. */

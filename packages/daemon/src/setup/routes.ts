@@ -10,6 +10,7 @@ import {
   ConfigError,
   DEFAULT_AGENTS,
   type HarnessId,
+  harnessName,
   hasControlChar,
   parseConfigFile,
   type TeamRow,
@@ -34,8 +35,6 @@ import { parseLoginPrompt } from "./login-prompt.ts";
 /** The harnesses the Settings page shows a card for. */
 export const SETUP_HARNESSES = ["claude-code", "codex"] as const satisfies readonly HarnessId[];
 type SetupHarness = (typeof SETUP_HARNESSES)[number];
-
-const NAMES: Record<SetupHarness, string> = { "claude-code": "Claude Code", codex: "Codex" };
 
 export type HarnessAction = "install" | "update" | "signin";
 const ACTIONS: readonly HarnessAction[] = ["install", "update", "signin"];
@@ -229,7 +228,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     return {
       harnesses: SETUP_HARNESSES.map((id) => ({
         id,
-        name: NAMES[id],
+        name: harnessName(id),
         required: used.has(id),
         bin: config?.harnesses[id]?.bin ?? null,
         checks: checks.filter((c) => c.id.startsWith(`harness.${id}.`)),
@@ -250,7 +249,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
       throw new HttpError(
         400,
         "not_installed",
-        `${found.absent}. Install ${NAMES[harness]} first.`,
+        `${found.absent}. Install ${harnessName(harness)} first.`,
       );
     }
     return found.path;
@@ -263,7 +262,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
       throw new HttpError(
         409,
         "busy",
-        `${NAMES[harness]} is already running a command. Wait for it to end.`,
+        `${harnessName(harness)} is already running a command. Wait for it to end.`,
       );
     }
     const { cmd, args, text } = commandFor(harness, action, bin);

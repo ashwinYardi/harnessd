@@ -210,7 +210,11 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     if (parsed.finalText !== undefined) run.finalText = parsed.finalText;
     const error = errorOf(status, exitCode, parsed);
     if (error !== undefined) run.error = error;
-    if (status === "error" && spawnError === undefined && parsed.reason !== undefined) {
+    if (
+      (status === "error" || status === "limited") &&
+      spawnError === undefined &&
+      parsed.reason !== undefined
+    ) {
       run.reason = parsed.reason;
     }
     if (status === "limited" && parsed.resetAt !== undefined) run.resetAt = parsed.resetAt;
@@ -224,7 +228,7 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     if (stopReason) return stopReason;
     if (spawnError !== undefined) return "error";
     if (exitCode === 0 && parsed.ok) return "ok";
-    return parsed.limited ? "limited" : "error";
+    return parsed.limited || parsed.reason === "usage_limit" ? "limited" : "error";
   }
 
   function errorOf(

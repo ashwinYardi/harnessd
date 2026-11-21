@@ -112,14 +112,16 @@ function inlineToml(value: unknown): string {
 
 /** Codex prints these while it retries; the run goes on, so they are logs, not failures. */
 const TRANSIENT_ERROR = /^Reconnecting\.\.\./;
-/** Codex retries a short rate limit itself, so only a spent plan or quota counts. */
-const USAGE_LIMIT = /usage limit|usage_limit|quota/i;
+/** Transient reconnect events are filtered before classifying terminal failures. */
+const USAGE_LIMIT = /usage[ _]limit|insufficient_quota|quota (?:exceeded|exhausted)/i;
+const RATE_LIMIT =
+  /\brate[ _-]?limit(?:ed\b|_error\b|_exceeded\b|\s+(?:reached|exceeded|hit)\b)|(?:HTTP|status)\s*429\b|\b429 Too Many Requests\b/i;
 const AUTH =
   /\b401\b|unauthori[sz]ed|not (logged|signed) in|log ?in again|codex login|authenticat|api key|token (has )?expired/i;
 
 /** Sorts a failure message into a reason the human fixes outside the run. */
 export function failureReason(message: string): RunFailureReason | undefined {
-  if (USAGE_LIMIT.test(message)) return "usage_limit";
+  if (USAGE_LIMIT.test(message) || RATE_LIMIT.test(message)) return "usage_limit";
   if (AUTH.test(message)) return "auth";
   return undefined;
 }
@@ -128,6 +130,21 @@ const REASON_PREFIX: Record<RunFailureReason, string> = {
   usage_limit: "usage limit reached",
   auth: "not signed in",
 };
+
+/** Codex can report either a retry interval or a dated retry time. */
+function codexResetAt(message: string, now: number): string | undefined {
+  const relative = /\btry again in (\d+) (second|minute|hour|day)s?\b/i.exec(message);
+  if (relative?.[2] !== undefined) {
+    const unitMs = { second: 1_000, minute: 60_000, hour: 3_600_000, day: 86_400_000 };
+    const unit = relative[2].toLowerCase() as keyof typeof unitMs;
+    const reset = new Date(now + Number(relative[1]) * unitMs[unit]);
+    if (Number.isFinite(reset.getTime())) return reset.toISOString();
+  }
+  const absolute = /\btry again at (.+?)[.]?$/i.exec(message)?.[1];
+  if (absolute === undefined) return undefined;
+  const reset = Date.parse(absolute);
+  return Number.isFinite(reset) ? new Date(reset).toISOString() : undefined;
+}
 
 type ItemPhase = "item.started" | "item.updated" | "item.completed";
 
@@ -139,7 +156,7 @@ class CodexJsonParser implements LineParser {
   #tokens = emptyTokenUsage();
   #turns = 0;
   #failure: string | undefined;
-  #stderr: string[] = [];
+  #lastStderr: string | undefined;
   /** Items already shown as a tool event, so a started item is not shown twice. */
   #shown = new Set<string>();
 
@@ -161,7 +178,7 @@ class CodexJsonParser implements LineParser {
   }
 
   stderr(line: string): void {
-    if (line.trim() !== "") this.#stderr.push(line.trim());
+    if (line.trim() !== "") this.#lastStderr = line.trim();
   }
 
   outcome(exitCode: number | null): ParsedOutcome {
@@ -169,19 +186,15 @@ class CodexJsonParser implements LineParser {
     const out: ParsedOutcome = { ok, tokens: { ...this.#tokens } };
     if (this.#sessionId !== undefined) out.sessionId = this.#sessionId;
     if (this.#finalText !== undefined) out.finalText = this.#finalText;
-    let message = this.#failure;
-    let reason = message === undefined ? undefined : failureReason(message);
-    if (message === undefined && exitCode !== 0) {
-      // No event said why: the CLI may have failed before its first event.
-      const line = this.#stderr.find((l) => failureReason(l) !== undefined);
-      if (line !== undefined) {
-        message = line;
-        reason = failureReason(line);
-      }
-    }
+    const message = this.#failure ?? (!ok || exitCode !== 0 ? this.#lastStderr : undefined);
+    const reason = message === undefined ? undefined : failureReason(message);
     if (reason !== undefined && message !== undefined) {
       out.reason = reason;
       out.error = `${REASON_PREFIX[reason]}: ${message}`;
+      if (reason === "usage_limit") {
+        const resetAt = codexResetAt(message, Date.now());
+        if (resetAt !== undefined) out.resetAt = resetAt;
+      }
     } else if (message !== undefined) {
       out.error = message;
     } else if (exitCode !== 0) {

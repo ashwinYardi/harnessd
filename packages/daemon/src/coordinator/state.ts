@@ -3,7 +3,13 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import type { AgentRole, SelfUpdateState, SelfUpdateView } from "@harnessd/shared";
+import {
+  type AgentRole,
+  type HarnessId,
+  isHarnessId,
+  type SelfUpdateState,
+  type SelfUpdateView,
+} from "@harnessd/shared";
 
 /** A sub-issue an agent is working on. */
 export interface InFlightRun {
@@ -91,6 +97,21 @@ export interface PendingMerge {
   prs: MergePr[];
 }
 
+/**
+ * A harness that hit a usage limit (MET-70). No run starts on it while `until` is in
+ * the future. An ended hold with a backoff is kept, so the next limit waits longer.
+ */
+export interface HarnessHold {
+  /** ISO time the hold ends: the harness's reset time, or now plus the backoff. */
+  until: string;
+  /** ISO time the hold started. */
+  since: string;
+  /** The last backoff wait, when the harness gave no reset time. An ok run clears it. */
+  backoffMs?: number;
+  /** ISO time the hold ended; set only on a hold kept for its backoff. */
+  endedAt?: string;
+}
+
 export interface LoopState {
   version: 1;
   /** ISO time of the last poll, null before the first. */
@@ -114,6 +135,8 @@ export interface LoopState {
   selfUpdateNotices: Record<string, string>;
   /** The last self-update, if any. */
   selfUpdate?: SelfUpdateRecord;
+  /** Harnesses held by a usage limit (MET-70). */
+  limits: Partial<Record<HarnessId, HarnessHold>>;
 }
 
 export function emptyLoopState(): LoopState {
@@ -129,6 +152,7 @@ export function emptyLoopState(): LoopState {
     gateFailures: {},
     humanPings: {},
     selfUpdateNotices: {},
+    limits: {},
   };
 }
 
@@ -292,6 +316,21 @@ function selfUpdate(value: unknown): SelfUpdateRecord | undefined {
   return out;
 }
 
+function holds(value: unknown): Partial<Record<HarnessId, HarnessHold>> {
+  const out: Partial<Record<HarnessId, HarnessHold>> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const h = raw as Partial<HarnessHold> | null;
+    if (!isHarnessId(id) || typeof h !== "object" || h === null) continue;
+    if (typeof h.until !== "string" || typeof h.since !== "string") continue;
+    const hold: HarnessHold = { until: h.until, since: h.since };
+    if (typeof h.backoffMs === "number" && h.backoffMs > 0) hold.backoffMs = h.backoffMs;
+    if (typeof h.endedAt === "string") hold.endedAt = h.endedAt;
+    out[id] = hold;
+  }
+  return out;
+}
+
 /** Reads a state file's JSON, keeping only well-formed parts. Throws on anything unreadable. */
 export function parseLoopState(text: string): LoopState {
   const raw = JSON.parse(text) as Partial<LoopState> | null;
@@ -312,6 +351,7 @@ export function parseLoopState(text: string): LoopState {
     humanPings: strings(raw.humanPings),
     selfUpdateNotices: strings(raw.selfUpdateNotices),
     ...(update ? { selfUpdate: update } : {}),
+    limits: holds(raw.limits),
   };
 }
 

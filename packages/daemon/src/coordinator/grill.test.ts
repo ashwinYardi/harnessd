@@ -495,3 +495,15 @@ test("a term or draft that already exists is not announced as new", async () => 
   assert.equal(result.outcome, "proceed");
   assert.doesNotMatch(s.comments[0]?.body ?? "", /New terms|Draft decision records/);
 });
+
+test("a limited run ends the grill at once: no retry, no note, no comment, no escalation (MET-70)", async () => {
+  const s = setup([{ status: "limited", error: "usage limit reached" }]);
+  const result = await grillIssue(issues.secret, s.deps);
+  assert.equal(result.outcome, "limited");
+  assert.equal(result.escalation, null);
+  assert.equal(s.tasks.length, 1, "no retry while the harness is limited");
+  assert.deepEqual(s.comments, []);
+  assert.deepEqual(s.moves, []);
+  assert.deepEqual(s.pings, []);
+  assert.deepEqual(s.notes, []);
+});

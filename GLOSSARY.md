@@ -68,7 +68,7 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Brand token**: the `--brand` line in `index.css` that holds the accent for light and dark. Primary and ring read it (D-029). _Avoid_: theme color.
 
-**Failure reason**: the `reason` of a run that ended in `error` because the human must act outside the run: `usage_limit` (the harness quota is spent) or `auth` (the harness is not signed in). Other errors have no failure reason. _Avoid_: error type, error code.
+**Failure reason**: the `reason` of a run that ended in `limited` due to `usage_limit` or in `error` due to `auth` (the harness is not signed in). Other errors have no failure reason. _Avoid_: error type, error code.
 
 **Self-update**: harnessd pulls, rebuilds and restarts its own install after a merge to its own repo's default branch (MET-63, docs/LOOP.md "Self-update"). _Avoid_: auto-upgrade, `harnessd update` (that updates a harness CLI).
 
@@ -77,3 +77,5 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 **Trigger issue**: the parent issue whose merge started a self-update check. A blocked or failed update comments on it and moves it to Needs input. The check at daemon start has none.
 
 **Limited**: the run status when the harness hit a usage or rate limit, not a task failure. A limited run uses no attempt. The result can carry the reset time (MET-70). _Avoid_: failed, rate-limited error.
+
+**Hold**: the time a harness gets no new runs after a limited run: until its reset time, or a backoff of 15 minutes that doubles up to 2 hours. Other harnesses keep working (MET-70). _Avoid_: pause (a pause stops every run), cooldown.

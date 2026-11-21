@@ -8,7 +8,7 @@ import type {
   Size,
   Task,
 } from "@harnessd/shared";
-import { extractJson, runForReply } from "./grill.ts";
+import { extractJson, type RunReply, runForReply } from "./grill.ts";
 import type { GrillContext } from "./prompt.ts";
 
 /** Roles a planned part can have. QA is added by harnessd, never planned. */
@@ -35,8 +35,11 @@ export interface PlanPart {
 
 export interface SplitPlan {
   parts: PlanPart[];
-  /** `fallback` when the model's reply was unusable. */
-  source: "model" | "fallback";
+  /**
+   * `fallback` when the model's reply was unusable. `limited` when the harness hit a
+   * usage limit: there are no parts and the issue is not split (MET-70).
+   */
+  source: "model" | "fallback" | "limited";
   /** Why the model's plan was not used. */
   error?: string;
 }
@@ -204,13 +207,14 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
   };
   if (deps.agent.model !== undefined) task.model = deps.agent.model;
 
-  const reply =
+  const reply: RunReply =
     deps.adapter.id === deps.agent.harness
       ? await runForReply(deps.adapter, task, deps.cwd)
       : ({
           ok: false,
           error: `adapter ${deps.adapter.id} does not match the ${deps.agent.name} harness ${deps.agent.harness}`,
         } as const);
+  if (!reply.ok && reply.limited) return { parts: [], source: "limited", error: reply.error };
   const parsed: ParsedPlanReply = reply.ok ? parsePlanReply(reply.text) : reply;
   if (parsed.ok) return { parts: parsed.parts, source: "model" };
   return { parts: fallbackPlan(issue), source: "fallback", error: parsed.error };
