@@ -461,9 +461,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       delete s.qaFeedback[id];
       await safely(`move ${entry.issueKey} to In Review`, () => linear.moveTo(id, "In Review"));
       log(`${entry.issueKey}: done, In Review`);
-    } else if (result.status === "cancelled") {
+    } else if (result.status === "cancelled" || result.status === "limited") {
+      // A usage limit is no task failure: no attempt counted (MET-70; part 2 pauses the harness).
       await safely(`re-queue ${entry.issueKey}`, () => linear.moveTo(id, "Ready"));
-      log(`${entry.issueKey}: cancelled, re-queued`);
+      log(`${entry.issueKey}: ${result.status}, re-queued`);
     } else {
       const failures = (s.attempts[id] ?? 0) + 1;
       const why = `${result.status}${result.error ? `: ${oneLine(result.error)}` : ""}`;

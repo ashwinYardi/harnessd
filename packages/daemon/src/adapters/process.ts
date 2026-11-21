@@ -24,6 +24,10 @@ export interface ParsedOutcome {
   /** Why the run failed, when the harness said so. */
   error?: string;
   reason?: RunResult["reason"];
+  /** True when a usage or rate limit stopped the run, not the task (MET-70). */
+  limited?: boolean;
+  /** ISO time the limit resets, when the harness said it. */
+  resetAt?: string;
   tokens: TokenUsage;
   costUsd?: number;
   sessionId?: string;
@@ -209,15 +213,18 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     if (status === "error" && spawnError === undefined && parsed.reason !== undefined) {
       run.reason = parsed.reason;
     }
+    if (status === "limited" && parsed.resetAt !== undefined) run.resetAt = parsed.resetAt;
     events.push({ type: "end", result: run });
     events.close();
     resolveResult(run);
   }
 
+  /** Order: timeout and cancel, then a spawn failure, then success, then a limit, then error. */
   function statusOf(exitCode: number | null, parsed: ParsedOutcome): RunStatus {
     if (stopReason) return stopReason;
     if (spawnError !== undefined) return "error";
-    return exitCode === 0 && parsed.ok ? "ok" : "error";
+    if (exitCode === 0 && parsed.ok) return "ok";
+    return parsed.limited ? "limited" : "error";
   }
 
   function errorOf(

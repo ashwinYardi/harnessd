@@ -73,6 +73,7 @@ When the split is done, the parent moves to In Progress.
 | error or timeout, first time | A comment is posted and the sub-issue goes back to Ready for one retry. |
 | error or timeout, second time | A comment is posted, the sub-issue moves to Needs input and one notice is sent. |
 | cancelled | The sub-issue goes back to Ready. No attempt is counted. |
+| limited | The harness hit a usage or rate limit. The sub-issue goes back to Ready. No attempt is counted. |
 | cancelled by a pause | The worktree is kept. See Pause. |
 
 The worktree is removed after every run, except a run a pause cancelled.

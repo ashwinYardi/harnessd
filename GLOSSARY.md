@@ -75,3 +75,5 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 **Safe point**: the first tick with no run in flight while a self-update waits. Only then is the update applied. _Avoid_: idle point.
 
 **Trigger issue**: the parent issue whose merge started a self-update check. A blocked or failed update comments on it and moves it to Needs input. The check at daemon start has none.
+
+**Limited**: the run status when the harness hit a usage or rate limit, not a task failure. A limited run uses no attempt. The result can carry the reset time (MET-70). _Avoid_: failed, rate-limited error.

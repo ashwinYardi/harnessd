@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Stand-in for `claude -p ... --output-format stream-json --verbose` in adapter tests.
-// FAKE_CLAUDE_MODE: ok (default) | error | malformed | hang | hang-stubborn
+// FAKE_CLAUDE_MODE: ok (default) | error | malformed | hang | hang-stubborn | limit-result |
+// limit-stderr | limit-hang | rate-limit-ok | error-success | error-stderr
 // FAKE_CLAUDE_RECORD: file to write {argv, cwd, grandchildPid?, probe?, inspect?} into.
 // FAKE_CLAUDE_PROBE: copied into the record as `probe`, to see the child's environment.
 // FAKE_CLAUDE_INSPECT=1: also records what the run sees in its cwd: the skill folders in
@@ -105,6 +106,43 @@ if (mode === "ok" || mode === "malformed") {
     usage: usage(4, 2, 0, 0),
   });
   process.exitCode = 1;
+} else if (mode === "limit-result") {
+  // Recorded shape of the 2026-11-20 run: is_error with subtype success and the limit as result.
+  init();
+  result({
+    subtype: "success",
+    is_error: true,
+    result: "Claude AI usage limit reached|1763660400",
+    total_cost_usd: 0,
+    usage: usage(0, 0, 0, 0),
+  });
+  process.exitCode = 1;
+} else if (mode === "limit-stderr") {
+  process.stderr.write(
+    'API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"}}\n',
+  );
+  process.exitCode = 1;
+} else if (mode === "rate-limit-ok") {
+  // Claude retries a 429 on its own; a run that then succeeds is ok.
+  init();
+  process.stderr.write("API Error: 429 rate_limit_error, retrying in 2s\n");
+  result({ subtype: "success", is_error: false, result: "Done.", usage: usage(1, 1, 0, 0) });
+  process.exitCode = 0;
+} else if (mode === "error-success") {
+  init();
+  result({ subtype: "success", is_error: true, result: "API Error: 500 internal server error" });
+  process.exitCode = 1;
+} else if (mode === "error-stderr") {
+  init();
+  result({ subtype: "success", is_error: true, result: "" });
+  process.stderr.write("first stderr line\n");
+  process.stderr.write("Error: invalid model name\n");
+  process.exitCode = 1;
+} else if (mode === "limit-hang") {
+  process.stderr.write("You've hit your limit · resets 7pm (UTC)\n");
+  init();
+  assistant("msg_1", [{ type: "text", text: "Working." }], usage(1, 1, 0, 0));
+  setInterval(() => {}, 1000);
 } else if (mode === "hang" || mode === "hang-stubborn") {
   if (mode === "hang-stubborn") process.on("SIGTERM", () => {});
   // A grandchild in the same process group, to prove the whole tree is killed.
