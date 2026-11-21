@@ -53,6 +53,35 @@ test("an unknown harness names the file and key", () => {
   );
 });
 
+test("fallback_harness and fallback_model parse on an agent", () => {
+  const input = {
+    agents: {
+      backend: { harness: "claude-code", fallback_harness: "codex", fallback_model: "gpt-5" },
+    },
+  };
+  assert.deepEqual(parseConfigFile(input, FILE), input);
+  assert.deepEqual(
+    parseAgentSettings(
+      { fallback_harness: "codex", fallback_model: "gpt-5" },
+      "agents/qa.md",
+      "",
+      false,
+    ),
+    { fallback_harness: "codex", fallback_model: "gpt-5" },
+  );
+});
+
+test("an unknown fallback_harness names the file and key", () => {
+  rejects(
+    { agents: { backend: { fallback_harness: "vim" } } },
+    `${FILE}: agents.backend.fallback_harness: expected one of claude-code, codex, antigravity, opencode, cursor, grok, got "vim"`,
+  );
+  rejects(
+    { agents: { backend: { fallback_model: 5 } } },
+    `${FILE}: agents.backend.fallback_model: expected a string, got 5`,
+  );
+});
+
 test("unknown keys are rejected with their path", () => {
   rejects(
     { limits: { max_concurent: 2 } },

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { HarnessId, ResolvedAgentConfig } from "@harnessd/shared";
 import {
   afterLimited,
   afterOk,
   FIRST_BACKOFF_MS,
+  harnessForRun,
   isHeld,
   MAX_BACKOFF_MS,
   releaseExpired,
@@ -69,4 +71,55 @@ test("releaseExpired ends a hold once, and drops one with no backoff", () => {
   assert.equal(first.hold?.backoffMs, FIRST_BACKOFF_MS, "the backoff is kept for the next limit");
   assert.equal(isHeld(first.hold, at(16 * MIN)), false);
   assert.deepEqual(releaseExpired(first.hold, at(17 * MIN)), { hold: first.hold, ended: false });
+});
+
+// --- harnessForRun (MET-81) ---------------------------------------------------
+
+const AGENT: ResolvedAgentConfig = {
+  name: "backend",
+  role: "backend",
+  harness: "claude-code",
+  model: "opus",
+  fallback_harness: "codex",
+  fallback_model: "gpt-5",
+  instructions: "",
+  rules: [],
+  skills: [],
+};
+const heldSet =
+  (...ids: HarnessId[]) =>
+  (h: HarnessId) =>
+    ids.includes(h);
+const all = () => true;
+
+test("harnessForRun keeps the agent while its harness is free", () => {
+  assert.equal(harnessForRun(AGENT, heldSet(), all), AGENT);
+});
+
+test("harnessForRun moves a held agent to its fallback harness and model", () => {
+  const chosen = harnessForRun(AGENT, heldSet("claude-code"), all);
+  assert.equal(chosen?.harness, "codex");
+  assert.equal(chosen?.model, "gpt-5");
+  assert.equal(chosen?.name, "backend");
+});
+
+test("harnessForRun drops the main model when no fallback model is set", () => {
+  const { fallback_model: _, ...noModel } = AGENT;
+  const chosen = harnessForRun(noModel, heldSet("claude-code"), all);
+  assert.equal(chosen?.harness, "codex");
+  assert.equal("model" in (chosen ?? {}), false);
+});
+
+test("harnessForRun waits with no fallback, a held fallback or one without an adapter", () => {
+  const { fallback_harness: _, ...none } = AGENT;
+  assert.equal(harnessForRun(none, heldSet("claude-code"), all), undefined);
+  assert.equal(harnessForRun(AGENT, heldSet("claude-code", "codex"), all), undefined);
+  assert.equal(
+    harnessForRun(AGENT, heldSet("claude-code"), (h) => h === "claude-code"),
+    undefined,
+  );
+  assert.equal(
+    harnessForRun({ ...AGENT, fallback_harness: "claude-code" }, heldSet("claude-code"), all),
+    undefined,
+  );
 });

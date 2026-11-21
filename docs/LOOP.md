@@ -161,7 +161,7 @@ A QA agent run that ends `limited` stops the round. No review is posted, no QA f
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
 
 ## Usage limits
-A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70).
+A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff.
 
 - **Part run.** The worktree is removed and the sub-issue goes back to Ready. No attempt is counted and no comment is posted.
 - **QA run.** See QA: no review and no QA failure.
@@ -174,7 +174,7 @@ The limit also starts a **hold** on that harness, kept in `loop.json` under `lim
 | a reset time | at the reset time |
 | no reset time | after a backoff: 15 minutes, doubled after each hold that ended, at most 2 hours |
 
-While a hold lasts, no part, QA, grill or plan run starts on that harness. The issue waits in Ready and nothing is logged per tick. Agents on other harnesses dispatch as usual. Runs in flight are not cancelled. More limited runs during a hold do not double it. An ok run on the harness clears the backoff.
+While a hold lasts, no part, QA, grill or plan run starts on that harness. An agent with a usable `fallback_harness` runs on its fallback harness and model instead (docs/CONFIG.md "Fallback harness", MET-81). A fallback is usable when it has an adapter and no hold of its own. Otherwise the issue waits in Ready and nothing is logged per tick. Agents on other harnesses dispatch as usual. Runs in flight are not cancelled. More limited runs during a hold do not double it. An ok run on the harness clears the backoff.
 
 The log gets one line when a hold starts and one when it ends, in the daemon's local time:
 
@@ -182,6 +182,7 @@ The log gets one line when a hold starts and one when it ends, in the daemon's l
 Claude Code limited until 18:37
 Claude Code limited until 17:52 (backoff)
 Claude Code available again
+MET-61: backend on Codex while Claude Code is limited
 ```
 
 ## Merge

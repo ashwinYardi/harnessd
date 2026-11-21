@@ -105,10 +105,23 @@ A value and a reference are never both set: saving one removes the other.
 - A value in `[secrets]` that is not a reference is an error. The error never repeats the value.
 - `webhook_url` under `[slack]` is still an unknown-key error.
 
+**Fallback harness.** `fallback_harness` (a harness id) and `fallback_model` (a string) are optional. Default: no fallback (D-035).
+- While a usage limit holds the agent's `harness` (docs/LOOP.md "Usage limits"), its runs use the fallback harness and model.
+- The loop uses the fallback only when it has an adapter and no hold of its own. Otherwise the run waits in Ready.
+- Without `fallback_model`, the fallback harness uses its own default model.
+- A `fallback_harness` equal to `harness` is ignored.
+```toml
+[agents.backend]
+harness = "claude-code"
+model = "opus"
+fallback_harness = "codex"   # while Claude Code is limited
+fallback_model = "gpt-5"
+```
+
 Default agents: coordinator, backend, frontend and qa, all on `claude-code` (D-010). Settings → Team edits the `[agents.<name>]` tables of the workspace file and nothing else; comments and other tables stay (D-026). It can change a default agent but not remove it. The agent's name is its table key or file name; without an `avatar` the UI shows the name's initial. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
 
 ## agents/<name>.md
-Optional frontmatter with `role`, `harness`, `model` and `avatar`; the body is the agent's instructions.
+Optional frontmatter with `role`, `harness`, `model`, `fallback_harness`, `fallback_model` and `avatar`; the body is the agent's instructions.
 ```markdown
 ---
 harness: codex
@@ -166,7 +179,7 @@ They are part of the skill folder, so the pin covers them. Sync merges the hooks
 ## Merge rules
 Order: defaults, then global, then workspace, then the agent.
 - Scalars override. Arrays (such as `protected_paths`) replace. Tables deep-merge.
-- Agent fields (`role`, `harness`, `model`, `avatar`) override per layer.
+- Agent fields (`role`, `harness`, `model`, `fallback_harness`, `fallback_model`, `avatar`) override per layer.
 - Rules, skills and MCP servers merge by name; the workspace wins. A skill with `enabled = false` in the last layer that sets `enabled` is dropped. An `[mcp.<name>]` table is replaced whole, not deep-merged.
 - An agent's instruction text is global AGENTS.md, workspace AGENTS.md, then the agent's own instructions from global and then workspace, joined by blank lines.
 

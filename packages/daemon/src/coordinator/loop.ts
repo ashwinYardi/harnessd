@@ -12,6 +12,7 @@ import {
   emptyTokenUsage,
   type HarnessAdapter,
   type HarnessId,
+  harnessName,
   type Issue,
   type LinkedIssue,
   limitAvailableLine,
@@ -35,7 +36,7 @@ import type { TaskWorktrees } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
 import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
 import { grillIssue } from "./grill.ts";
-import { afterLimited, afterOk, isHeld, releaseExpired } from "./limits.ts";
+import { afterLimited, afterOk, harnessForRun, isHeld, releaseExpired } from "./limits.ts";
 import { advanceMerges, pendingMerge } from "./merge.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
 import { planIssue, type SplitPlan } from "./plan.ts";
@@ -410,6 +411,22 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     };
   }
 
+  /**
+   * The agent config a run starts with: the agent on its main harness, or on its fallback
+   * while a limit holds the main one (MET-81). Undefined when the run must wait.
+   */
+  function forRun(main: ResolvedAgentConfig): ResolvedAgentConfig | undefined {
+    return harnessForRun(main, held, (h) => adapters[h] !== undefined);
+  }
+
+  /** Logs a run that starts on the fallback harness. Called once the run really starts. */
+  function logFallback(key: string, main: ResolvedAgentConfig, agent: ResolvedAgentConfig): void {
+    if (agent.harness === main.harness) return;
+    log(
+      `${key}: ${main.name} on ${harnessName(agent.harness)} while ${harnessName(main.harness)} is limited`,
+    );
+  }
+
   /** Ends the holds whose time has come, with one log line each. */
   async function releaseHolds(s: LoopState): Promise<void> {
     let changed = false;
@@ -576,14 +593,15 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       log(`${issue.key}: no agent has role ${role}`);
       return;
     }
-    const agent = resolveAgentConfig(config, agentName);
-    const adapter = adapters[agent.harness];
-    if (adapter === undefined) {
-      log(`${issue.key}: no adapter for harness ${agent.harness}`);
+    const main = resolveAgentConfig(config, agentName);
+    if (adapters[main.harness] === undefined) {
+      log(`${issue.key}: no adapter for harness ${main.harness}`);
       return;
     }
-    // A held harness starts nothing; the issue waits in Ready (MET-70).
-    if (held(agent.harness)) return;
+    // A held harness starts nothing: the agent runs on its fallback, or the issue waits in Ready (MET-70).
+    const agent = forRun(main);
+    const adapter = agent && adapters[agent.harness];
+    if (agent === undefined || adapter === undefined) return;
     const budget = budgetMs(issue.size, config.limits);
     if (budget === undefined) {
       await escalate(
@@ -599,6 +617,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       linear.moveTo(issue.id, "In Progress"),
     );
     if (!started) return;
+    logFallback(issue.key, main, agent);
 
     const entry: InFlightRun = {
       issueId: issue.id,
@@ -895,14 +914,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       log("no agent has role coordinator");
       return;
     }
-    const agent = resolveAgentConfig(config, name);
-    const harness = adapters[agent.harness];
-    if (harness === undefined) {
-      log(`${issue.key}: no adapter for harness ${agent.harness}`);
+    const main = resolveAgentConfig(config, name);
+    if (adapters[main.harness] === undefined) {
+      log(`${issue.key}: no adapter for harness ${main.harness}`);
       return;
     }
-    if (held(agent.harness)) return;
+    const agent = forRun(main);
+    const harness = agent && adapters[agent.harness];
+    if (agent === undefined || harness === undefined) return;
     const adapter = tracked(harness);
+    logFallback(issue.key, main, agent);
 
     const children = await linear.listChildren(issue.id);
     let plan: SplitPlan = { parts: [], source: "model" };

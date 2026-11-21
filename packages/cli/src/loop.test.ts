@@ -9,6 +9,7 @@ import {
   agentForRole,
   type Check,
   createFilePauseStore,
+  harnessForRun,
   loadConfig,
   readDaemonInfo,
   resolveAgentConfig,
@@ -580,3 +581,60 @@ for (const updated of [true, false]) {
     assert.deepEqual((loop as { state?: string }).state, "running");
   });
 }
+
+test("while Claude Code is held, a codex fallback dispatches through harnessAdapters with its model", async () => {
+  const s = await setup({});
+  const fake = join(s.root, "fake-codex");
+  await writeFile(fake, '#!/bin/sh\necho \'{"type":"turn.completed","usage":{}}\'\n');
+  chmodSync(fake, 0o755);
+  await writeFile(
+    join(s.repo, ".harnessd", "config.toml"),
+    [
+      "[agents.backend]",
+      'role = "backend"',
+      'harness = "claude-code"',
+      'model = "opus"',
+      'fallback_harness = "codex"',
+      'fallback_model = "gpt-5"',
+      "",
+      "[harnesses.codex]",
+      `bin = "${fake}"`,
+      "",
+    ].join("\n"),
+  );
+  const config = await loadConfig({ globalDir: s.home, workspaceDir: join(s.repo, ".harnessd") });
+  const adapters = harnessAdapters(config, "auto");
+  const main = resolveAgentConfig(config, "backend");
+  const hasAdapter = (h: keyof typeof adapters) => adapters[h] !== undefined;
+
+  assert.equal(
+    harnessForRun(main, () => false, hasAdapter),
+    main,
+    "a free main harness runs",
+  );
+  const agent = harnessForRun(main, (h) => h === "claude-code", hasAdapter);
+  assert.equal(agent?.harness, "codex");
+  assert.equal(agent?.model, "gpt-5");
+  assert.equal(
+    harnessForRun(main, () => true, hasAdapter),
+    undefined,
+    "a held fallback is not used",
+  );
+
+  const adapter = adapters[agent?.harness ?? "claude-code"];
+  assert.equal(adapter?.id, "codex");
+  const started = adapter?.start(
+    { id: "MET-81", title: "t", prompt: "p", budgetMs: 10_000, model: agent?.model ?? "" },
+    s.repo,
+  );
+  const events = [];
+  for await (const event of started?.events ?? []) events.push(event);
+  const first = events[0];
+  assert.ok(first?.type === "start");
+  assert.equal(first.argv[0], fake);
+  assert.deepEqual(
+    first.argv.slice(first.argv.indexOf("--model"), first.argv.indexOf("--model") + 2),
+    ["--model", "gpt-5"],
+  );
+  assert.equal((await started?.result)?.status, "ok");
+});

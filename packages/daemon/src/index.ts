@@ -18,6 +18,7 @@ export * from "./control/pause.ts";
 export * from "./coordinator/decisions.ts";
 export * from "./coordinator/dispatch.ts";
 export * from "./coordinator/grill.ts";
+export * from "./coordinator/limits.ts";
 export * from "./coordinator/loop.ts";
 export * from "./coordinator/merge.ts";
 export * from "./coordinator/notifier.ts";
