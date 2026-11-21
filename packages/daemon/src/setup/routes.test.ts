@@ -644,7 +644,8 @@ test("the models route gives an empty list and a reason, never a 500", async () 
     const timeout = (await broken.get("/api/setup/opencode/models")) as { reason: string };
     assert.match(timeout.reason, /timed out after 30 s/);
     const failed = (await broken.get("/api/setup/opencode/models")) as { reason: string };
-    assert.equal(failed.reason, "opencode models --standalone exited 2: Error: token ***");
+    assert.equal(failed.reason, "opencode models --standalone exited 2");
+    assert.doesNotMatch(JSON.stringify(failed), /sk-secret-value|token/);
   } finally {
     await broken.close();
   }

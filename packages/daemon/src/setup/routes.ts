@@ -372,15 +372,8 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     if (res.code === 124) {
       return { reason: `${shown} timed out after ${OPENCODE_READ_TIMEOUT_MS / 1000} s` };
     }
-    if (res.code !== 0) {
-      const line =
-        res.stderr
-          .split("\n")
-          .find((l) => l.trim() !== "")
-          ?.trim() ?? "";
-      const why = maskEnvSecrets(line, options.env).slice(0, 200);
-      return { reason: `${shown} exited ${res.code}${why === "" ? "" : `: ${why}`}` };
-    }
+    // Its error output is not shown: it could hold a value no mask knows.
+    if (res.code !== 0) return { reason: `${shown} exited ${res.code}` };
     return { stdout: res.stdout };
   }
 
@@ -413,7 +406,9 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
     reason?: string;
   }> {
     const required = requiredProviders(await mergedConfig());
-    const read = await opencodeRead(OPENCODE_AUTH_LIST);
+    const read = await opencodeRead(OPENCODE_AUTH_LIST).catch((e: unknown) => ({
+      reason: (e as Error).message,
+    }));
     let signed: string[] = [];
     let reason: string | undefined;
     if ("reason" in read) reason = read.reason;
