@@ -36,7 +36,12 @@ export interface RunResult {
   finalText?: string;
   /** Short reason when status is not `ok`. */
   error?: string;
+  /** Why an `error` run failed, when the harness said it was out of quota or not signed in. */
+  reason?: RunFailureReason;
 }
+
+/** A failure the human fixes outside the run: a usage limit, or a harness that is not signed in. */
+export type RunFailureReason = "usage_limit" | "auth";
 
 /** Events streamed while a harness runs, in the order they happened. `end` is always last. */
 export type AdapterEvent =

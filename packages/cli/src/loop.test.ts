@@ -1,12 +1,20 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { type Check, createFilePauseStore, readDaemonInfo, startDaemon } from "@harnessd/daemon";
+import {
+  agentForRole,
+  type Check,
+  createFilePauseStore,
+  loadConfig,
+  readDaemonInfo,
+  resolveAgentConfig,
+  startDaemon,
+} from "@harnessd/daemon";
 import { run } from "./index.ts";
-import { parseRunArgs, runLoop } from "./loop.ts";
+import { harnessAdapters, parseRunArgs, runLoop } from "./loop.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -436,4 +444,34 @@ test("GET /api/loop reads the current checks, so a saved key clears linear.key w
   assert.deepEqual(answers.after, { state: "setup", blocking: [] });
   assert.deepEqual(answers.start, { state: "running", blocking: [] });
   assert.deepEqual(answers.running, { state: "running", blocking: [] });
+});
+
+test('[agents.backend] harness = "codex" dispatches to the codex adapter with the set bin', async () => {
+  const s = await setup({});
+  const fake = join(s.root, "fake-codex");
+  await writeFile(fake, '#!/bin/sh\necho \'{"type":"turn.completed","usage":{}}\'\n');
+  chmodSync(fake, 0o755);
+  await writeFile(
+    join(s.repo, ".harnessd", "config.toml"),
+    `[agents.backend]\nrole = "backend"\nharness = "codex"\n\n[harnesses.codex]\nbin = "${fake}"\n`,
+  );
+  const config = await loadConfig({ globalDir: s.home, workspaceDir: join(s.repo, ".harnessd") });
+  const adapters = harnessAdapters(config, "auto");
+  const name = agentForRole(config, "backend");
+  assert.equal(name, "backend");
+  const adapter = adapters[resolveAgentConfig(config, name ?? "").harness];
+  assert.equal(adapter?.id, "codex");
+  assert.equal(adapters["claude-code"]?.id, "claude-code");
+
+  const started = adapter?.start(
+    { id: "MET-75", title: "t", prompt: "p", budgetMs: 10_000 },
+    s.repo,
+  );
+  const events = [];
+  for await (const event of started?.events ?? []) events.push(event);
+  const first = events[0];
+  assert.ok(first?.type === "start");
+  assert.equal(first.argv[0], fake);
+  assert.ok(!first.argv.includes("--permission-mode"), "--permission-mode is Claude-only");
+  assert.equal((await started?.result)?.status, "ok");
 });

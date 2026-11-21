@@ -17,7 +17,7 @@ One developer, or a small team lead, who runs harnessd on their own Mac. They ar
 - A live log pane.
 - A pause and resume control. It is the kill switch (D-014), so it must always be visible and must give feedback within 1 second.
 - Settings pages. They make setup a few clicks:
-  - **Harnesses:** one card per harness CLI. The card shows found or not found, version, binary path and signed-in state. It warns on a known-bad version and has Install and Update buttons.
+  - **Harnesses:** one card per harness CLI. The card shows found or not found, version, binary path and signed-in state. It warns on a known-bad version and has Install, Update and Sign in buttons. During a sign-in it shows the login link and the device code to copy. When sign-in cannot finish in the app, it shows the one command to copy, with Recheck.
   - **Connections:** one row per connection (GitHub, Linear, Slack). Each row shows a live check result from `harnessd doctor` and the fix for a failure.
   - **Team:** the agents. The user adds an agent, picks its role, and assigns it a harness and a model.
 
@@ -33,5 +33,5 @@ Settings has a sub-nav and one card per harness or connection. Each card shows t
 ## UX rules
 - Every view has loading, empty and error states.
 - Every action works by keyboard, and focus is always visible.
-- Live updates never move content under the cursor.
+- Live updates apply in place. The row under the pointer or focus keeps its place, and its contents update. Only the log holds new lines while scrolled up, and offers Jump to latest.
 - Blocked and Needs input items are the loudest things on screen, because they are the only things that need the human.

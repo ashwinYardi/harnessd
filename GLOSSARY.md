@@ -56,16 +56,18 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Setup command**: one fixed command the app runs for a harness: install, update or sign in. Nothing from the request reaches it (D-026). _Avoid_: script, action.
 
-<<<<<<< HEAD
+**Login prompt**: the first `https://` URL and device code that a harness CLI's sign-in prints, kept on the job as `url` and `code` for the app to show (D-031). _Avoid_: auth link, OTP.
+
 **Secret store**: the folder `~/.harnessd/secrets/`, one owner-only file per secret, with fixed ids such as `linear.api_key` (D-030). _Avoid_: vault (the vault is memory), keychain.
 
 **Secret reference**: an `op://vault/item/field` or `env:NAME` string that stands for a secret. Config holds the reference, never the value. _Avoid_: secret path.
 
 **Secret source**: where the lookup found a secret: `saved`, `1Password` or `env`. The status engine and the app show the source, never the value. _Avoid_: origin, provider.
-=======
+
 **Service logo**: the one-color logo of a service harnessd works with (GitHub, Linear, Slack, Claude, OpenAI, git), always next to its name (D-029). _Avoid_: brand icon, provider icon.
 
 **Brand token**: the `--brand` line in `index.css` that holds the accent for light and dark. Primary and ring read it (D-029). _Avoid_: theme color.
->>>>>>> origin/main
+
+**Failure reason**: the `reason` of a run that ended in `error` because the human must act outside the run: `usage_limit` (the harness quota is spent) or `auth` (the harness is not signed in). Other errors have no failure reason. _Avoid_: error type, error code.
 
 **Self-update**: the daemon moves its own install to the new default-branch commit, builds it and restarts through launchd at a safe point.

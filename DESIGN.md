@@ -142,8 +142,8 @@ A 1 px border and a change of surface first. Controls take a faint `shadow-xs/5`
 - **Pause control:** always in the header at the right. Outline with a pause icon while running; primary "Resume" while paused. The click changes the header and the label at once (optimistic). The daemon's answer confirms it. A failure rolls back and shows an error toast. Never a confirmation.
 - **Service logo** (`components/service-logo.tsx`): a 16 px Simple Icons mark in `currentColor`, before the service's name on Harnesses and Connections cards; 14 px before the harness id in the agent list and the Team table. The text label is always there, so the logo is `aria-hidden`; `named` gives it its own accessible name where no text sits next to it. Port and skills show text only. In the agent list and the Team table, a harness with no mark keeps an empty 14 px slot, so every name starts at one edge.
 - **Command palette:** Cmd+K or Ctrl+K, or Commands in the sidebar. It lists every action: pause or resume, each view, run the checks again, read the board again, load the log again, and the three themes. Up, Down, Home, End, Enter, Esc.
-- **Toasts:** bottom right, at most four, 5 s. Every async result gets one: pause, resume, check again.
-- **Held updates:** while the pointer or focus is in the board or the agent table, live changes wait. A "Show N updates" button applies them.
+- **Toasts:** bottom right, at most four, 5 s. Every async result gets one: pause, resume, check again. A Copy button is the one exception: its label reads "Copied" for 1.5 s, and a toast shows only when the copy fails.
+- **Live updates:** they apply in place. The row under the pointer or focus keeps its place, and its contents update. Only the log holds new lines while scrolled up, and offers Jump to latest. A pinned run that ended says Ended until release. On the Board, the cards above a pinned card also keep their contents until release, so a card that grows cannot push it down. A card above it that turns Blocked or Needs input also keeps its slot, and goes to Needs you at release. The pinned row moves to its true place when both the pointer and focus leave it (`lib/pin.ts`, `hooks/usePin.ts`, `lib/log.ts`).
 - **States:** every view has a skeleton for loading, a sentence for empty that says what fills it, and an error card with Retry.
 
 ## UX checklist
@@ -170,7 +170,7 @@ Each item is met where it says. Check it again on every UI change.
 | Motion at 200 ms or less | Durations are 100, 150 and 200 ms (see motion tokens). `prefers-reduced-motion` stops them all (`index.css`). |
 | Optimistic pause with rollback | `lib/pause.ts` and `hooks/usePause.ts`; tested in `lib/pause.test.ts`. |
 | Toasts for async results | `components/ui/toast.tsx`; pause, resume and check again. |
-| Live updates never move content under the cursor | Held updates in Board and Agents; the log holds still while scrolled up or under the pointer. |
+| Live updates apply in place | Board and Agents pin the row under the pointer or focus (`lib/pin.ts`); the log holds new lines only while scrolled up, with Jump to latest (`lib/log.ts`). |
 | WCAG AA | The contrast table above; focus is always visible; skip link; landmarks and labels. |
 
 ## Do's and Don'ts
@@ -178,7 +178,7 @@ Each item is met where it says. Check it again on every UI change.
 - Do use lucide icons at 16 px, next to a text label or with a tooltip. Inside 12 px meta lines (issue reasons, the external-link hint) they shrink to 12 px.
 - Do build every new control from `components/ui`. Add a variant with CVA before a one-off class list.
 - Don't add gradients, glass, backdrop blur, emoji, eyebrow labels or decorative illustration.
-- Don't move content under the cursor: hold it, or append below the visible area.
+- Don't hold a whole view or count held updates. Live updates apply in place. The row under the pointer or focus keeps its place, and its contents update. Only the log holds new lines while scrolled up, and offers Jump to latest.
 - Don't add a modal or a confirmation to pause; it is the kill switch and must act at once.
 - Do put a service's logo next to its name, in one color.
 - Don't copy another product's name, logo, copy or screenshots into the UI or its docs (AGENTS.md, "What goes in this public repo").

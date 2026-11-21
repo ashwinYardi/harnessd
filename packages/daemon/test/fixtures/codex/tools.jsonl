@@ -1,0 +1,14 @@
+{"type":"thread.started","thread_id":"thread-fake-2"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"bash -lc 'pnpm test'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"bash -lc 'pnpm test'","aggregated_output":"ok\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_1","type":"file_change","changes":[{"path":"src/a.ts","kind":"update"},{"path":"src/b.ts","kind":"add"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"harnessd-memory","tool":"search_notes","arguments":{"query":"adapters"},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"harnessd-memory","tool":"search_notes","arguments":{"query":"adapters"},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"web_search","query":"codex exec json events"}}
+{"type":"item.started","item":{"id":"item_4","type":"todo_list","items":[{"text":"Write the test","completed":true},{"text":"Make it pass","completed":false}]}}
+{"type":"item.updated","item":{"id":"item_4","type":"todo_list","items":[{"text":"Write the test","completed":true},{"text":"Make it pass","completed":true}]}}
+{"type":"turn.completed","usage":{"input_tokens":500,"cached_input_tokens":100,"output_tokens":20}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"Tests pass."}}
+{"type":"turn.completed","usage":{"input_tokens":300,"cached_input_tokens":200,"output_tokens":10}}

@@ -5,6 +5,7 @@ import {
   type CoordinatorLoop,
   createBoardSource,
   createClaudeCodeAdapter,
+  createCodexAdapter,
   createCoordinatorLoop,
   createFileLoopStore,
   createFilePauseStore,
@@ -40,7 +41,12 @@ import {
   type Visibility,
   writeDaemonInfo,
 } from "@harnessd/daemon";
-import { ConfigError, type MergedConfig } from "@harnessd/shared";
+import {
+  ConfigError,
+  type HarnessAdapter,
+  type HarnessId,
+  type MergedConfig,
+} from "@harnessd/shared";
 import { UI_DIR } from "@harnessd/ui";
 import { type RunChecks, refusalLines, statusOptions } from "./doctor.ts";
 
@@ -207,6 +213,26 @@ async function findBlocker(
   return { config, teamId, team };
 }
 
+/**
+ * The harness adapters the loop dispatches to, by `agents.<name>.harness`.
+ * The path set in Settings → Harnesses wins over HARNESSD_<HARNESS>_BIN and PATH.
+ * `--permission-mode` is a Claude Code flag; Codex runs use their own sandbox flags (D-032).
+ */
+export function harnessAdapters(
+  config: MergedConfig,
+  permissionMode: string,
+): Partial<Record<HarnessId, HarnessAdapter>> {
+  const claudeBin = config.harnesses["claude-code"]?.bin;
+  const codexBin = config.harnesses.codex?.bin;
+  return {
+    "claude-code": createClaudeCodeAdapter({
+      permissionMode,
+      ...(claudeBin ? { bin: claudeBin } : {}),
+    }),
+    codex: createCodexAdapter(codexBin ? { bin: codexBin } : {}),
+  };
+}
+
 /** Builds the loop from the config and the Linear key, or says what blocks it. */
 async function buildLoop(deps: Deps): Promise<Built | Blocker> {
   const { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log } = deps;
@@ -233,15 +259,7 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
   loop = createCoordinatorLoop({
     config,
     linear,
-    adapters: {
-      "claude-code": createClaudeCodeAdapter({
-        permissionMode: parsed.permissionMode,
-        // The path set in Settings → Harnesses wins over HARNESSD_CLAUDE_BIN and PATH.
-        ...(config.harnesses["claude-code"]?.bin
-          ? { bin: config.harnesses["claude-code"].bin }
-          : {}),
-      }),
-    },
+    adapters: harnessAdapters(config, parsed.permissionMode),
     worktrees: createGitWorktrees({ repoDir, root: join(globalDir, "worktrees") }),
     github: createGhCli({ cwd: repoDir }),
     store: createFileLoopStore(repoDir),
