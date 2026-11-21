@@ -47,6 +47,8 @@ if (cmd === "pr" && sub === "list") {
       pr(12, "Mentions MET-4 only", "met-4"),
     ]),
   );
+} else if (cmd === "pr" && sub === "create") {
+  process.stdout.write("https://github.test/o/r/pull/99\n");
 } else if (cmd === "pr" && sub === "view" && argv.at(-1)?.includes("statusCheckRollup")) {
   process.stdout.write(
     JSON.stringify({

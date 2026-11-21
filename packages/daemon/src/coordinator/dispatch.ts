@@ -52,19 +52,18 @@ export function agentPromptHeader(agent: ResolvedAgentConfig, issue: LinkedIssue
   return parts;
 }
 
-function shipSteps(issue: LinkedIssue, branch: string, what: string, review?: QaFeedback): string {
-  const open = review?.prUrl
-    ? `4. Your PR is already open (${review.prUrl}). Pushing updates it; do not open another.`
-    : `4. Open a PR: \`gh pr create --title "${issue.key}: ${issue.title.replaceAll('"', "'")}" --body "<summary and how it was checked>"\`.`;
+function shipSteps(branch: string, what: string, review?: QaFeedback): string {
+  const ship = review?.prUrl
+    ? `harnessd pushes your work to the open PR (${review.prUrl}) and updates it; do not open another.`
+    : "harnessd pushes the branch and opens the PR after your run.";
   return [
     "## When you are done",
-    `You are in a git worktree on branch \`${branch}\`. Work only here. Use CLIs only (git, gh); no SDKs.`,
+    `You are in a git worktree on branch \`${branch}\`. Edit and test only in this worktree.`,
     `1. Make sure ${what} and the repo's checks pass.`,
-    "2. Commit your changes.",
-    `3. Push the branch: \`git push -u origin ${branch}\`.`,
-    open,
-    "Do not merge. Do not touch protected paths (auth, payments, secrets, release config, merge-gate config). " +
-      "End with one line: the PR URL.",
+    "2. Do not run `git commit`, `git push` or `gh pr create`. harnessd ships the work after your run.",
+    ship,
+    "End with a last message: a summary of the change, and one line on how you checked it. " +
+      "Do not merge. Do not touch protected paths (auth, payments, secrets, release config, merge-gate config).",
   ].join("\n");
 }
 
@@ -82,8 +81,6 @@ export function buildPartPrompt({ agent, issue, branch, review, memory }: PartPr
     );
   }
   if (memory) parts.push(memorySection(memory));
-  parts.push(
-    shipSteps(issue, branch, 'every "Done when" item in your brief is met, with tests,', review),
-  );
+  parts.push(shipSteps(branch, 'every "Done when" item in your brief is met, with tests,', review));
   return `${parts.join("\n\n")}\n`;
 }

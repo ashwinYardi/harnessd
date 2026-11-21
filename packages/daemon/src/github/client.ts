@@ -63,10 +63,23 @@ export interface MergeInput {
   matchHeadCommit: string;
 }
 
+export interface CreatePrInput {
+  /** The default branch the PR targets. */
+  base: string;
+  /** The branch the run pushed. */
+  head: string;
+  /** `<KEY>: <title>`. */
+  title: string;
+  /** Markdown, sent on stdin through `--body-file -`. */
+  body: string;
+}
+
 /** The GitHub calls harnessd makes. `createGhCli` implements it; tests use a fake. */
 export interface GitHub {
   /** The newest open PR whose title carries the issue key ("MET-41"), if any. */
   findPrForIssue(issueKey: string): Promise<PullRequest | undefined>;
+  /** Opens a PR for a pushed branch and returns its URL. */
+  createPr(input: CreatePrInput): Promise<string>;
   /** Files the PR changes, for the QA prompt's diff summary. */
   prFiles(number: number): Promise<PullRequestFile[]>;
   /** Posts one review and returns its URL. */
@@ -326,6 +339,27 @@ export function createGhCli(options: GhCliOptions): GitHub {
       ]);
       const matches = parsePullRequests(stdout).filter((pr) => titleHasKey(pr.title, issueKey));
       return matches.sort((a, b) => b.number - a.number)[0];
+    },
+
+    async createPr(input) {
+      const { stdout } = await gh(
+        [
+          "pr",
+          "create",
+          "--base",
+          input.base,
+          "--head",
+          input.head,
+          "--title",
+          input.title,
+          "--body-file",
+          "-",
+        ],
+        input.body,
+      );
+      const url = stdout.trim().split("\n").at(-1)?.trim() ?? "";
+      if (url === "") throw new GitHubError("gh pr create: no pull request URL in the output");
+      return url;
     },
 
     async prFiles(number) {
