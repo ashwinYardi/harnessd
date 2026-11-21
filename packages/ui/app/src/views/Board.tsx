@@ -29,6 +29,8 @@ const PRIORITY: Record<number, string> = { 1: "Urgent", 2: "High" };
 type Lane = Omit<Column, "issues"> & { rows: BoardIssue[] };
 
 const issueKey = (issue: BoardIssue) => issue.key;
+// Cards change height (an agent label, a blocked line), so the cards above a pinned card hold.
+const PIN = { holdSizes: true };
 
 function IssueRow({
   issue,
@@ -201,7 +203,7 @@ export function Board({
       groupBoard(snapshot.issues).map(({ issues, ...c }): Lane => ({ ...c, rows: issues })),
     [snapshot],
   );
-  const { shown: columns, rowProps } = usePin(lanes, issueKey);
+  const { shown: columns, rowProps } = usePin(lanes, issueKey, PIN);
   // No good read of Linear yet: an empty board would claim nothing needs you.
   const neverRead = snapshot?.fetchedAt === null && snapshot.error !== undefined;
 

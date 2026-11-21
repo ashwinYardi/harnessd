@@ -15,6 +15,12 @@ export interface PinOptions {
    * holds.
    */
   stacked?: boolean;
+  /**
+   * Rows can change height, such as Board cards. Then the rows held above a pinned row keep
+   * their last contents too, so a card above cannot grow and push the pinned row down. Their
+   * new contents apply at release. The pinned row itself always shows its new contents.
+   */
+  holdSizes?: boolean;
 }
 
 /**
@@ -22,7 +28,8 @@ export interface PinOptions {
  * (the one under the pointer, the one with focus) stays in the group and at the index it has
  * in `shown`, with its contents from `next`. To keep that index, the rows above it in its
  * group hold too (and, when `stacked`, all rows of the groups above). Held rows show their
- * contents from `next`, or their last contents if they left it. The other rows take their new
+ * contents from `next`, or their last contents if they left it (or, with `holdSizes`, until
+ * release). The other rows take their new
  * places below the held rows. A held group that left `next` stays at its index. Release (no
  * pinned keys) restores the true order.
  */
@@ -44,11 +51,14 @@ export function pin<T, G extends Group<T>>(
     return { group: g, groupIndex, count: frozen ? g.rows.length : Math.max(0, ...cuts), frozen };
   });
 
+  const pinnedKeys = new Set(pinned);
+  const contents = (r: T) =>
+    options.holdSizes === true && !pinnedKeys.has(key(r)) ? r : (find(next, key, key(r))?.row ?? r);
   const held = new Set(holds.flatMap((h) => h.group.rows.slice(0, h.count).map(key)));
   const groups = next.map((g) => ({ ...g, rows: g.rows.filter((r) => !held.has(key(r))) }));
   for (const h of holds) {
     if (h.count === 0 && !h.frozen) continue;
-    const rows = h.group.rows.slice(0, h.count).map((r) => find(next, key, key(r))?.row ?? r);
+    const rows = h.group.rows.slice(0, h.count).map(contents);
     let index = groups.findIndex((g) => g.id === h.group.id);
     if (index < 0) {
       index = Math.min(h.groupIndex, groups.length);

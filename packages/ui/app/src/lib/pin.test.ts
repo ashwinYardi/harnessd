@@ -116,3 +116,21 @@ test("a pinned Idle row keeps its place when its agent starts a run", () => {
     "coder:coder,coder/MET-1",
   ]);
 });
+
+test("with holdSizes, a card above the pinned card keeps its contents, so its height holds", () => {
+  const shown = [group("ready", run("MET-1"), run("MET-2"))];
+  const next = [group("ready", run("MET-1", "Gains an agent label"), run("MET-2", "Edit"))];
+  const out = pin(shown, next, key, ["MET-2"], { holdSizes: true });
+  assert.deepEqual(keys(out), ["ready:MET-1,MET-2"]);
+  assert.equal(out[0]?.rows[0]?.lastAction, "Read", "the card above holds its contents");
+  assert.equal(out[0]?.rows[1]?.lastAction, "Edit", "the pinned card updates");
+  const released = pin(out, next, key, [], { holdSizes: true });
+  assert.equal(released[0]?.rows[0]?.lastAction, "Gains an agent label", "release applies it");
+});
+
+test("without holdSizes, a row above the pinned row updates its contents", () => {
+  const shown = [group("coder", run("coder/MET-1"), run("coder/MET-2"))];
+  const next = [group("coder", run("coder/MET-1", "Edit"), run("coder/MET-2"))];
+  const out = pin(shown, next, key, ["coder/MET-2"]);
+  assert.equal(out[0]?.rows[0]?.lastAction, "Edit");
+});
