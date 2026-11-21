@@ -341,6 +341,8 @@ test("classifyLimit ignores ordinary failures", () => {
     "API Error: 500 internal server error",
     "Error: invalid model name",
     "Tests failed: 429 passed, 3 failed",
+    "Added rate limit handling to the API client",
+    "The rate limiter test failed",
     "",
   ]) {
     assert.equal(classifyLimit(line), undefined, line);
@@ -353,6 +355,11 @@ test("parseResetAt reads a unix epoch after a pipe", () => {
     parseResetAt("Claude AI usage limit reached|1763660400", now),
     new Date(1763660400 * 1000).toISOString(),
   );
+});
+
+test("parseResetAt reads a millisecond epoch too", () => {
+  const now = new Date("2026-11-20T17:37:00Z");
+  assert.equal(parseResetAt("limit|1763660400000", now), new Date(1763660400000).toISOString());
 });
 
 test("parseResetAt reads a clock time as the next one after now", () => {
@@ -401,6 +408,13 @@ test("a retried rate limit in a run that succeeds stays ok", async () => {
   const result = await r.result;
   assert.equal(result.status, "ok");
   assert.equal(result.error, undefined);
+});
+
+test("an earlier retried 429 on stderr does not hide a real failure", async () => {
+  const { run: r } = run("rate-limit-then-error");
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "Error: invalid model name");
 });
 
 test("a budget timeout beats a limit", async () => {

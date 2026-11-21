@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Stand-in for `claude -p ... --output-format stream-json --verbose` in adapter tests.
 // FAKE_CLAUDE_MODE: ok (default) | error | malformed | hang | hang-stubborn | limit-result |
-// limit-stderr | limit-hang | rate-limit-ok | error-success | error-stderr
+// limit-stderr | limit-hang | rate-limit-ok | error-success | error-stderr |
+// rate-limit-then-error
 // FAKE_CLAUDE_RECORD: file to write {argv, cwd, grandchildPid?, probe?, inspect?} into.
 // FAKE_CLAUDE_PROBE: copied into the record as `probe`, to see the child's environment.
 // FAKE_CLAUDE_INSPECT=1: also records what the run sees in its cwd: the skill folders in
@@ -128,6 +129,11 @@ if (mode === "ok" || mode === "malformed") {
   process.stderr.write("API Error: 429 rate_limit_error, retrying in 2s\n");
   result({ subtype: "success", is_error: false, result: "Done.", usage: usage(1, 1, 0, 0) });
   process.exitCode = 0;
+} else if (mode === "rate-limit-then-error") {
+  // A retried 429, then a real failure: the failure is the reason.
+  process.stderr.write("API Error: 429 rate_limit_error, retrying in 2s\n");
+  process.stderr.write("Error: invalid model name\n");
+  process.exitCode = 1;
 } else if (mode === "error-success") {
   init();
   result({ subtype: "success", is_error: true, result: "API Error: 500 internal server error" });
