@@ -44,7 +44,7 @@ opencode run --format json --standalone --auto [-m <provider>/<model>[#variant]]
 - OpenCode 2.0.20 exits before it prints the `step_finish` of the last step. So the run counts a step at `step_start`. The run is ok with at least one step, no `error` event and exit code 0. The last step's tokens and cost are lost; the totals are low by that step.
 
 **Usage and cost.**
-- Input tokens exclude cache reads. `cacheRead` and `cacheWrite` come from `tokens.cache`. Output tokens include reasoning tokens.
+- `tokens.input` already excludes cache reads, so the adapter takes it as it is. A real 2.0.20 run showed it: a step with 11968 cached tokens reported fewer input tokens than that. The brief said to subtract cache reads; that would count the input twice down to zero. `cacheRead` and `cacheWrite` come from `tokens.cache`. Output tokens include reasoning tokens.
 - When a step reports `cost`, the adapter sums it into `costUsd` on each `usage` event and on `RunResult`. With no cost, `costUsd` stays unset. There is no price table.
 
 **Failure reasons.**
@@ -58,7 +58,7 @@ opencode run --format json --standalone --auto [-m <provider>/<model>[#variant]]
 - A team row with `harness = "opencode"` takes a model `<provider>/<model>` with an optional `#variant`. No model means OpenCode's default.
 
 **Version.**
-- The minimum tested version is OpenCode 2.0.20. The fixtures come from a 2.0.20 run.
+- The minimum tested version is OpenCode 2.0.20. `success` and `text-only` are lines from real 2.0.20 runs, with ids and paths scrubbed. The other fixtures follow the 2.0.20 event shapes from the CLI source.
 
 Why:
 - OpenCode reaches DeepSeek, GLM and other open models. They cost far less than Claude for builder work.

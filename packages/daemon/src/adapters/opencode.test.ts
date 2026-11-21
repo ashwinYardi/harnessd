@@ -150,7 +150,7 @@ test("a real 2.0.20 run streams tool, usage and text, with cost and the session 
   assert.deepEqual(events[1], { type: "tool", name: "read", summary: "/worktree/note.txt" });
   assert.deepEqual(events[2], {
     type: "usage",
-    tokens: { input: 9309, output: 47, cacheRead: 512, cacheWrite: 0 },
+    tokens: { input: 9821, output: 47, cacheRead: 512, cacheWrite: 0 },
     costUsd: 0.001502886,
   });
   assert.deepEqual(events[3], { type: "text", text: "hello" });
@@ -222,18 +222,18 @@ test("tool calls show once per call id, and usage keeps running totals and cost"
     { type: "tool", name: "edit", summary: "src/a.ts (error: oldString not found)" },
     {
       type: "usage",
-      tokens: { input: 1000, output: 40, cacheRead: 200, cacheWrite: 50 },
+      tokens: { input: 1200, output: 40, cacheRead: 200, cacheWrite: 50 },
       costUsd: 0.25,
     },
     { type: "tool", name: "harnessd-memory_search_notes", summary: "adapters" },
     {
       type: "usage",
-      tokens: { input: 1200, output: 60, cacheRead: 500, cacheWrite: 50 },
+      tokens: { input: 1700, output: 60, cacheRead: 500, cacheWrite: 50 },
       costUsd: 0.75,
     },
   ]);
   assert.equal(result.status, "ok");
-  assert.deepEqual(result.tokens, { input: 1200, output: 60, cacheRead: 500, cacheWrite: 50 });
+  assert.deepEqual(result.tokens, { input: 1700, output: 60, cacheRead: 500, cacheWrite: 50 });
   assert.equal(result.costUsd, 0.75);
   assert.equal(result.finalText, "Tests pass.");
 });

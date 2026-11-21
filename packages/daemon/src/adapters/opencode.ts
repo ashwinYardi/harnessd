@@ -161,13 +161,10 @@ class OpenCodeJsonParser implements LineParser {
     if (this.#cost !== undefined) out.costUsd = this.#cost;
     if (this.#sessionId !== undefined) out.sessionId = this.#sessionId;
     if (this.#finalText !== undefined) out.finalText = this.#finalText;
-    const failure: Failure | undefined =
-      this.#failure ??
-      (!ok || exitCode !== 0
-        ? this.#lastStderr === undefined
-          ? undefined
-          : { message: this.#lastStderr }
-        : undefined);
+    let failure = this.#failure;
+    if (failure === undefined && (!ok || exitCode !== 0) && this.#lastStderr !== undefined) {
+      failure = { message: this.#lastStderr };
+    }
     if (failure === undefined) {
       if (exitCode !== 0) out.error = `exited with code ${exitCode}`;
       else if (this.#steps === 0) out.error = "no step event";
@@ -242,11 +239,11 @@ class OpenCodeJsonParser implements LineParser {
   #usage(part: Record<string, unknown>): void {
     const t = isRecord(part.tokens) ? part.tokens : {};
     const cache = isRecord(t.cache) ? t.cache : {};
-    const cacheRead = count(cache.read);
+    // OpenCode's input already excludes cache reads: a cached step reports less input than read.
     const add: TokenUsage = {
-      input: Math.max(0, count(t.input) - cacheRead),
+      input: count(t.input),
       output: count(t.output) + count(t.reasoning),
-      cacheRead,
+      cacheRead: count(cache.read),
       cacheWrite: count(cache.write),
     };
     this.#tokens = {
