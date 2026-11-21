@@ -4,10 +4,12 @@ import type { AgentView } from "@harnessd/shared";
 import {
   activeLimits,
   agentLimit,
+  applyLiveLoop,
+  applyLoopRead,
+  emptyLoop,
   type HarnessLimit,
   limitParts,
   limitText,
-  mergeLoop,
 } from "./limits.ts";
 import type { LoopState } from "./route.ts";
 
@@ -97,16 +99,37 @@ test("an agent that runs while its harness is held runs on its fallback: nothing
 const running: LoopState = { state: "running", blocking: [], limits: [claude] };
 
 test("a live loop event with no limits removes the text", () => {
-  const next = mergeLoop(running, { state: "running", blocking: [], limits: [] });
+  const next = applyLiveLoop(applyLoopRead(emptyLoop, running, 0), { limits: [] }, 1).loop;
   assert.deepEqual(holdTexts(next?.limits, now), []);
 });
 
 test("a live event that carries only limits keeps the loop state", () => {
-  const next = mergeLoop(running, { limits: [codex] });
+  const next = applyLiveLoop(applyLoopRead(emptyLoop, running, 0), { limits: [codex] }, 1).loop;
   assert.deepEqual(next, { state: "running", blocking: [], limits: [codex] });
 });
 
 test("a limits-only event before the first loop read waits for that read", () => {
-  assert.equal(mergeLoop(undefined, { limits: [claude] }), undefined);
-  assert.deepEqual(mergeLoop(undefined, running), running);
+  const early = applyLiveLoop(emptyLoop, { limits: [claude] }, 1);
+  assert.equal(early.loop, undefined);
+  assert.deepEqual(applyLoopRead(early, { state: "running", blocking: [] }, 0).loop, running);
+});
+
+test("a hold sent after the read started survives the older read", () => {
+  // The read leaves at seq 0, the agents stream pushes a hold, then the read lands with none.
+  const early = applyLiveLoop(emptyLoop, { limits: [claude] }, 1);
+  const loop = applyLoopRead(early, { state: "running", blocking: [], limits: [] }, 0).loop;
+  assert.deepEqual(holdTexts(loop?.limits, now), ["Claude Code limited until 18:37"]);
+});
+
+test("a read that started after the live hold is newer and wins", () => {
+  const early = applyLiveLoop(emptyLoop, { limits: [claude] }, 1);
+  const loop = applyLoopRead(early, { state: "running", blocking: [], limits: [codex] }, 1).loop;
+  assert.deepEqual(loop?.limits, [codex]);
+});
+
+test("a newer live field wins only that field; the read keeps the rest", () => {
+  let s = applyLiveLoop(emptyLoop, { state: "setup", blocking: ["x"] }, 1);
+  s = applyLiveLoop(s, { limits: [claude] }, 2);
+  const loop = applyLoopRead(s, { state: "running", blocking: [], limits: [] }, 1).loop;
+  assert.deepEqual(loop, { state: "running", blocking: [], limits: [claude] });
 });

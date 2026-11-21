@@ -65,16 +65,44 @@ export function agentLimit(
   return holds.find((l) => l.harness === agent.harness);
 }
 
+type Stamped = { [K in keyof LoopState]?: { seq: number; value: LoopState[K] } };
+
 /**
- * Apply a live update to the loop state. An update with only `limits` waits for the first
- * GET /api/loop, which carries the limits too, so it never stands in for the setup state
- * that opens Settings (MET-28).
+ * The loop state, plus each live field with the stream sequence it arrived at. A read
+ * (GET /api/loop or POST /api/start) and the event stream can land in any order, so a field
+ * pushed after a read left beats that read's older copy (MET-70: a hold from the agents
+ * stream must not be lost to a slower first read).
  */
-export function mergeLoop(
-  prev: LoopState | undefined,
-  next: Partial<LoopState>,
-): LoopState | undefined {
-  if (prev) return { ...prev, ...next };
-  if (next.state && next.blocking) return { ...next, state: next.state, blocking: next.blocking };
-  return undefined;
+export interface LoopStore {
+  loop: LoopState | undefined;
+  live: Stamped;
+}
+
+export const emptyLoop: LoopStore = { loop: undefined, live: {} };
+
+/**
+ * Apply a live update, stamped with its stream sequence. An update with only `limits`
+ * before the first read never stands in for the setup state that opens Settings (MET-28);
+ * the read applies it when it lands.
+ */
+export function applyLiveLoop(store: LoopStore, next: Partial<LoopState>, seq: number): LoopStore {
+  const live: Stamped = { ...store.live };
+  for (const key of Object.keys(next) as (keyof LoopState)[]) {
+    Object.assign(live, { [key]: { seq, value: next[key] } });
+  }
+  const { loop } = store;
+  if (loop) return { loop: { ...loop, ...next }, live };
+  if (next.state && next.blocking) {
+    return { loop: { ...next, state: next.state, blocking: next.blocking }, live };
+  }
+  return { loop: undefined, live };
+}
+
+/** Apply a read that left at stream sequence `sentAt`. Live fields pushed after it win. */
+export function applyLoopRead(store: LoopStore, read: LoopState, sentAt: number): LoopStore {
+  const loop: LoopState = { ...read };
+  for (const [key, field] of Object.entries(store.live)) {
+    if (field && field.seq > sentAt) Object.assign(loop, { [key]: field.value });
+  }
+  return { loop, live: store.live };
 }
