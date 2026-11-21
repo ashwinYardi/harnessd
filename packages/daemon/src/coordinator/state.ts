@@ -111,7 +111,7 @@ export interface LoopState {
   /** PR URL to the time its needs-human ping went out, so it goes out once. */
   humanPings: Record<string, string>;
   /** Target commit to the time its blocked or failed notice went out, so it goes out once. */
-  selfUpdatePings: Record<string, string>;
+  selfUpdateNotices: Record<string, string>;
   /** The last self-update, if any. */
   selfUpdate?: SelfUpdateRecord;
 }
@@ -128,7 +128,7 @@ export function emptyLoopState(): LoopState {
     merges: [],
     gateFailures: {},
     humanPings: {},
-    selfUpdatePings: {},
+    selfUpdateNotices: {},
   };
 }
 
@@ -310,7 +310,7 @@ export function parseLoopState(text: string): LoopState {
     merges: merges(raw.merges),
     gateFailures: counts(raw.gateFailures),
     humanPings: strings(raw.humanPings),
-    selfUpdatePings: strings(raw.selfUpdatePings),
+    selfUpdateNotices: strings(raw.selfUpdateNotices),
     ...(update ? { selfUpdate: update } : {}),
   };
 }

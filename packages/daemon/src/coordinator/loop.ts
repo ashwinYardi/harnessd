@@ -23,7 +23,12 @@ import {
 import { resolveAgentConfig } from "../config/merge.ts";
 import type { GitHub } from "../github/client.ts";
 import type { LinearClient, ListReadyOptions } from "../linear/client.ts";
-import { lastLines, type SelfUpdateResult, type SelfUpdater, short } from "../selfupdate/index.ts";
+import {
+  lastLines,
+  type SelfUpdateResult,
+  type SelfUpdater,
+  shortSha,
+} from "../selfupdate/index.ts";
 import type { TaskWorktrees } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
 import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
@@ -316,7 +321,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       const u = state.selfUpdate;
       if (u?.state === "applying") {
         // The previous process built this version and restarted into it.
-        log(`self-update: ${short(u.from)} -> ${short(u.to)}`);
+        log(`self-update: ${shortSha(u.from)} -> ${shortSha(u.to)}`);
         u.state = "done";
         u.at = clock.now().toISOString();
         await save();
@@ -900,14 +905,34 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   async function pauseRuns(): Promise<string[]> {
     for (const run of coordinatorRuns) void run.cancel();
     const fresh = [...live.values()].filter((l) => l.entry.pausedAt === undefined);
-    if (fresh.length > 0) {
-      const stamp = clock.now().toISOString();
-      for (const l of fresh) l.entry.pausedAt = stamp;
-      // Marked before the kill, so a crash from here on still keeps the worktrees.
-      await save();
-      log(`pause: cancelling ${fresh.map((l) => l.key).join(", ")}`);
+    await markStopped(fresh, "pause");
+    await awaitStopped([...live.values()].filter((l) => l.entry.pausedAt !== undefined));
+    return fresh.map((l) => l.key);
+  }
+
+  /**
+   * Marks runs as stopped with their worktree kept, before the kill, so a crash from here
+   * on still keeps the worktrees. `stopReason` is unset for a pause.
+   */
+  async function markStopped(runs: LiveRun[], why: "pause" | "self-update"): Promise<void> {
+    if (runs.length === 0) return;
+    const stamp = clock.now().toISOString();
+    for (const l of runs) {
+      l.entry.pausedAt = stamp;
+      if (why === "self-update") l.entry.stopReason = "self-update";
+      else delete l.entry.stopReason;
     }
-    const stopping = [...live.values()].filter((l) => l.entry.pausedAt !== undefined);
+    await save();
+    const keys = runs.map((l) => l.key).join(", ");
+    log(
+      why === "pause"
+        ? `pause: cancelling ${keys}`
+        : `self-update: cancelling ${keys}, over budget`,
+    );
+  }
+
+  /** Cancels marked runs and waits until each has exited and been recorded. */
+  async function awaitStopped(stopping: LiveRun[]): Promise<void> {
     await Promise.all(
       stopping.map(async (l) => {
         // A QA round between agent runs has no run: aborting stops its tests and reviews.
@@ -916,7 +941,6 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         await l.done;
       }),
     );
-    return fresh.map((l) => l.key);
   }
 
   /** While runs are in flight, the flag is re-read every watchMs, so a pause lands within 10 s. */
@@ -959,8 +983,15 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       log(`self-update: check failed: ${oneLine(message(error))}`);
       return;
     }
-    if (target === undefined) return;
     const u = s.selfUpdate;
+    if (target === undefined) {
+      if (u?.state === "pending") {
+        // Updated another way since: nothing is left to apply.
+        delete s.selfUpdate;
+        await save();
+      }
+      return;
+    }
     if (u?.state === "pending" && u.to === target.to) return;
     const record: SelfUpdateRecord = {
       from: target.from,
@@ -968,10 +999,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       at: clock.now().toISOString(),
       state: "pending",
     };
-    if (trigger !== undefined) record.trigger = trigger;
+    const cause = trigger ?? u?.trigger;
+    if (cause !== undefined) record.trigger = cause;
     s.selfUpdate = record;
     await save();
-    log(`self-update: ${short(target.from)} -> ${short(target.to)} waits for a safe point`);
+    log(`self-update: ${shortSha(target.from)} -> ${shortSha(target.to)} waits for a safe point`);
   }
 
   /**
@@ -983,22 +1015,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const over = [...live.values()].filter(
       (l) => l.entry.pausedAt === undefined && now - Date.parse(l.entry.startedAt) > l.budgetMs,
     );
-    if (over.length > 0) {
-      const stamp = clock.now().toISOString();
-      for (const l of over) {
-        l.entry.pausedAt = stamp;
-        l.entry.stopReason = "self-update";
-      }
-      await save();
-      log(`self-update: cancelling ${over.map((l) => l.key).join(", ")}, over budget`);
-      await Promise.all(
-        over.map(async (l) => {
-          l.abort?.abort();
-          await l.run?.cancel();
-          await l.done;
-        }),
-      );
-    }
+    await markStopped(over, "self-update");
+    await awaitStopped(over);
     if (s.inFlight.length > 0) return;
     await applyUpdate(s, up);
   }
@@ -1006,7 +1024,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   async function applyUpdate(s: LoopState, up: LoopSelfUpdate): Promise<void> {
     const u = s.selfUpdate;
     if (u === undefined) return;
-    const span = `${short(u.from)} -> ${short(u.to)}`;
+    const span = `${shortSha(u.from)} -> ${shortSha(u.to)}`;
     u.state = "applying";
     u.at = clock.now().toISOString();
     delete u.error;
@@ -1025,34 +1043,32 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       return;
     }
     const blocked = result.status === "blocked";
+    const step = result.status === "failed" ? result.step : undefined;
+    /** The step's output, for the comment's code block. */
+    const output = result.status === "blocked" ? "" : lastLines(result.error);
     const detail =
-      result.status === "blocked"
-        ? result.reason
-        : result.status === "failed"
-          ? `${result.step}: ${lastLines(result.error)}`
-          : lastLines(result.error);
+      result.status === "blocked" ? result.reason : step ? `${step}: ${output}` : output;
     const reason = `self-update ${blocked ? "blocked" : "failed"}: ${detail}`;
     u.state = blocked ? "blocked" : "failed";
     u.error = detail;
     u.at = clock.now().toISOString();
+    // pausedSeen is set by the next tick that reads the flag. When the write fails, no
+    // tick sees a resume, so the same build is not retried every tick.
     pausedNow = true;
-    pausedSeen = true;
     await safely("pause the loop", () => up.pause(reason));
     log(`${oneLine(reason)}; the old build keeps running, the loop is paused`);
-    if (s.selfUpdatePings[u.to] !== undefined) {
+    if (s.selfUpdateNotices[u.to] !== undefined) {
       // The same target failed before: the owner already knows.
       await save();
       return;
     }
-    s.selfUpdatePings[u.to] = clock.now().toISOString();
+    s.selfUpdateNotices[u.to] = clock.now().toISOString();
     await save();
-    const what = blocked ? `is blocked: ${detail}` : `failed at ${detail.split(":")[0]}`;
+    const what = blocked ? `is blocked: ${detail}` : `failed${step ? ` at ${step}` : ""}`;
     const body = [
-      `**harnessd self-update**: the update from \`${short(u.from)}\` to \`${short(u.to)}\` ${what}. ` +
+      `**harnessd self-update**: the update from \`${shortSha(u.from)}\` to \`${shortSha(u.to)}\` ${what}. ` +
         "harnessd keeps the old build and is paused. Fix it, then run `harnessd resume`.",
-      ...(blocked
-        ? []
-        : ["", "```", lastLines(result.status === "failed" ? result.error : detail), "```"]),
+      ...(blocked ? [] : ["", "```", output, "```"]),
     ].join("\n");
     const trigger = u.trigger;
     if (trigger !== undefined) {
@@ -1070,7 +1086,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         issue,
         prs: [],
         reason: `self-update ${blocked ? "blocked" : "failed"}`,
-        detail: `${short(u.from)} -> ${short(u.to)}: ${detail}`,
+        detail: `${shortSha(u.from)} -> ${shortSha(u.to)}: ${detail}`,
       }),
     );
   }
@@ -1139,16 +1155,20 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         log,
       });
       report.merged = merges.merged;
+      // A merge to the default branch, by harnessd or a human, may change harnessd itself.
+      // Remembered first, so a pause in the same pass does not lose it.
+      const landed = merges.landed.at(-1);
+      if (up !== undefined && landed !== undefined) checkWanted = { trigger: landed };
       if (merges.paused) {
         report.paused = true;
         await pauseRuns();
         await save();
         return report;
       }
-      // A merge to the default branch, by harnessd or a human, may change harnessd itself.
-      const landed = merges.landed.at(-1);
-      if (up !== undefined && landed !== undefined) {
-        await checkUpdate(s, up, landed);
+      if (up !== undefined && checkWanted !== undefined) {
+        const wanted = checkWanted;
+        checkWanted = undefined;
+        await checkUpdate(s, up, wanted.trigger);
         if (await holdForUpdate(s)) {
           await save();
           report.paused = pausedNow;

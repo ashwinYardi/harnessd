@@ -52,6 +52,6 @@ export function lastLines(text: string, n = SELF_UPDATE_ERROR_LINES): string {
 }
 
 /** The first 7 characters of a commit, as git shows it. */
-export function short(sha: string): string {
+export function shortSha(sha: string): string {
   return sha.slice(0, 7);
 }
