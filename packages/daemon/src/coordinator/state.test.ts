@@ -84,6 +84,13 @@ const state: LoopState = {
     error: "build: tsc exited 2",
     trigger: { id: "parent-1", key: "MET-40", url: "https://linear.test/MET-40" },
   },
+  limits: {
+    "claude-code": {
+      until: "2026-11-19T12:00:00.000Z",
+      since: "2026-11-19T10:04:00.000Z",
+      backoffMs: 900_000,
+    },
+  },
 };
 
 test("a missing file loads as the empty state", async () => {
@@ -107,6 +114,7 @@ test("save writes loop.json atomically with a .gitignore, and load reads it back
   assert.deepEqual(loaded.humanPings, state.humanPings);
   assert.deepEqual(loaded.selfUpdateNotices, state.selfUpdateNotices);
   assert.deepEqual(loaded.selfUpdate, state.selfUpdate);
+  assert.deepEqual(loaded.limits, state.limits, "a harness hold survives a reload");
   const files = (await readdir(join(dir, ".harnessd", "state"))).sort();
   assert.deepEqual(files, [".gitignore", "loop.json"], "no tmp files left behind");
   assert.equal(await readFile(join(dir, ".harnessd", "state", ".gitignore"), "utf8"), "*\n");
@@ -140,6 +148,12 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
       ],
       gateFailures: { p: 2, q: 0 },
       humanPings: { u: "t", v: 1 },
+      limits: {
+        "claude-code": state.limits["claude-code"],
+        codex: { until: "2026-11-19T12:00:00.000Z", since: 3 },
+        nope: { until: "x", since: "y" },
+        cursor: { until: "a", since: "b", backoffMs: "1", endedAt: "c" },
+      },
     }),
   );
   assert.deepEqual(parsed, {
@@ -154,6 +168,10 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
     gateFailures: { p: 2 },
     humanPings: { u: "t" },
     selfUpdateNotices: {},
+    limits: {
+      "claude-code": state.limits["claude-code"],
+      cursor: { until: "a", since: "b", endedAt: "c" },
+    },
   });
   assert.deepEqual(
     parseLoopState('{"inFlight":[]}'),

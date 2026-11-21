@@ -14,6 +14,8 @@ import {
   type HarnessId,
   type Issue,
   type LinkedIssue,
+  limitAvailableLine,
+  limitHoldLine,
   type MergedConfig,
   type ResolvedAgentConfig,
   type RunResult,
@@ -33,6 +35,7 @@ import type { TaskWorktrees } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
 import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
 import { grillIssue } from "./grill.ts";
+import { afterLimited, afterOk, isHeld, releaseExpired } from "./limits.ts";
 import { advanceMerges, pendingMerge } from "./merge.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
 import { planIssue, type SplitPlan } from "./plan.ts";
@@ -47,6 +50,7 @@ import {
   splitIssue,
 } from "./split.ts";
 import type {
+  HarnessHold,
   InFlightRun,
   LoopState,
   LoopStore,
@@ -358,6 +362,47 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     }
   }
 
+  // --- usage limits (MET-70) ---------------------------------------------
+
+  /** Records what a run's end says about its harness: a limit starts a hold, ok clears the backoff. */
+  function noteRun(harness: HarnessId, result: RunResult): void {
+    const s = state;
+    if (s === undefined) return;
+    const prev = s.limits[harness];
+    if (result.status === "limited") {
+      const next = afterLimited(prev, result.resetAt, clock.now());
+      s.limits[harness] = next;
+      if (!isHeld(prev, clock.now()) || prev?.until !== next.until) {
+        const fromReset =
+          result.resetAt !== undefined && Date.parse(result.resetAt) === Date.parse(next.until);
+        log(limitHoldLine(harness, next.until, !fromReset));
+      }
+    } else if (result.status === "ok" && prev !== undefined) {
+      const next = afterOk(prev);
+      if (next === undefined) delete s.limits[harness];
+      else s.limits[harness] = next;
+    }
+  }
+
+  /** True while a limit holds the harness: nothing starts on it. */
+  function held(harness: HarnessId): boolean {
+    return isHeld(state?.limits[harness], clock.now());
+  }
+
+  /** Ends the holds whose time has come, with one log line each. */
+  async function releaseHolds(s: LoopState): Promise<void> {
+    let changed = false;
+    for (const [harness, hold] of Object.entries(s.limits) as Array<[HarnessId, HarnessHold]>) {
+      const released = releaseExpired(hold, clock.now());
+      if (!released.ended) continue;
+      changed = true;
+      if (released.hold === undefined) delete s.limits[harness];
+      else s.limits[harness] = released.hold;
+      log(limitAvailableLine(harness));
+    }
+    if (changed) await save();
+  }
+
   // --- re-queue -----------------------------------------------------------
 
   /** Re-queues entries with no live run, including stopped runs whose Ready move failed. */
@@ -462,7 +507,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       await safely(`move ${entry.issueKey} to In Review`, () => linear.moveTo(id, "In Review"));
       log(`${entry.issueKey}: done, In Review`);
     } else if (result.status === "cancelled" || result.status === "limited") {
-      // A usage limit is no task failure: no attempt counted (MET-70; part 2 pauses the harness).
+      // A usage limit is no task failure: no attempt counted, no comment. noteRun held the harness (MET-70).
       await safely(`re-queue ${entry.issueKey}`, () => linear.moveTo(id, "Ready"));
       log(`${entry.issueKey}: ${result.status}, re-queued`);
     } else {
@@ -511,6 +556,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       log(`${issue.key}: no adapter for harness ${agent.harness}`);
       return;
     }
+    // A held harness starts nothing; the issue waits in Ready (MET-70).
+    if (held(agent.harness)) return;
     const budget = budgetMs(issue.size, config.limits);
     if (budget === undefined) {
       await escalate(
@@ -611,7 +658,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     }
     log(`${issue.key}: ${agentName} started (${issue.size ?? "M"}, ${budget / 60_000} min)`);
     const done = run.result.then(
-      (result) => finish(s, entry, result),
+      (result) => {
+        noteRun(agent.harness, result);
+        return finish(s, entry, result);
+      },
       (error) => fail(error),
     );
     const l: LiveRun = {
@@ -663,6 +713,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         const run = adapter.start(task, cwd);
         l.run = run;
         follow(l, run);
+        void run.result.then(
+          (result) => noteRun(adapter.id, result),
+          () => undefined,
+        );
         const clear = (): void => {
           if (l.run === run) delete l.run;
         };
@@ -726,6 +780,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       syncWatch();
       if (result.cancelled === true) return;
       s.inFlight = s.inFlight.filter((e) => e !== entry);
+      if (result.limited === true) {
+        // The QA agent's harness hit a usage limit: no review, no QA failure (MET-70).
+        await safely(`re-queue ${issue.key}`, () => linear.moveTo(issue.id, "Ready"));
+        log(`${issue.key}: QA limited, re-queued`);
+        await save();
+        return;
+      }
       const settled = await settleQa(s, { qa: issue, parent: qa.parent }, result, {
         linear,
         notifier,
@@ -792,6 +853,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       log(`${issue.key}: no adapter for harness ${agent.harness}`);
       return;
     }
+    if (held(agent.harness)) return;
     const adapter = tracked(harness);
 
     const children = await linear.listChildren(issue.id);
@@ -811,6 +873,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         log(`${issue.key}: paused, split skipped`);
         return;
       }
+      if (grill.outcome === "limited") {
+        log(`${issue.key}: grill limited, the issue stays Ready`);
+        return;
+      }
       if (grill.outcome === "needs_input") {
         report.escalated.push(issue.key);
         log(`${issue.key}: grill escalated, Needs input`);
@@ -823,6 +889,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       plan = await planIssue(issue, { adapter, agent, context, cwd: repoDir, calls: grill.calls });
       if (pausedNow) {
         log(`${issue.key}: paused, split skipped`);
+        return;
+      }
+      if (plan.source === "limited") {
+        log(`${issue.key}: plan limited, the issue stays Ready`);
         return;
       }
       if (plan.source === "fallback") log(`${issue.key}: plan fallback: ${plan.error ?? ""}`);
@@ -845,7 +915,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
 
     const result = await splitIssue(issue, plan.parts, linear, children);
     if (result.created.length > 0) {
-      await linear.comment(issue.id, formatSplitComment(result, plan.source));
+      await linear.comment(
+        issue.id,
+        formatSplitComment(result, plan.source === "fallback" ? "fallback" : "model"),
+      );
     }
     await linear.moveTo(issue.id, "In Progress");
     report.split.push(issue.key);
@@ -880,10 +953,18 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         const run = adapter.start(task, cwd);
         coordinatorRuns.add(run);
         syncWatch();
-        void run.result.finally(() => {
-          coordinatorRuns.delete(run);
-          syncWatch();
-        });
+        void run.result
+          .then(
+            (result) => {
+              noteRun(adapter.id, result);
+              if (result.status === "limited" || result.status === "ok") return save();
+            },
+            () => undefined,
+          )
+          .finally(() => {
+            coordinatorRuns.delete(run);
+            syncWatch();
+          });
         if (pausedNow) void run.cancel();
         return run;
       },
@@ -1126,6 +1207,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       return report;
     }
     s.lastPollAt = clock.now().toISOString();
+    await releaseHolds(s);
     const up = options.selfUpdate;
     if (pausedSeen) {
       pausedSeen = false;

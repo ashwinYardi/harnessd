@@ -1,0 +1,34 @@
+// The words for a harness usage limit (MET-70). The loop log, the daily summary and
+// the app use these, so the text matches everywhere.
+import type { HarnessId } from "./index.ts";
+
+const HARNESS_NAMES: Record<HarnessId, string> = {
+  "claude-code": "Claude Code",
+  codex: "Codex",
+  antigravity: "Antigravity",
+  opencode: "OpenCode",
+  cursor: "Cursor",
+  grok: "Grok",
+};
+
+/** The display name of a harness, such as "Claude Code". */
+export function harnessName(id: HarnessId): string {
+  return HARNESS_NAMES[id] ?? id;
+}
+
+/** HH:MM in the local time of the process that formats it. */
+function localClock(time: Date | string): string {
+  const at = typeof time === "string" ? new Date(time) : time;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
+/** "Claude Code limited until 18:37", with " (backoff)" when the harness gave no reset time. */
+export function limitHoldLine(id: HarnessId, until: Date | string, backoff = false): string {
+  return `${harnessName(id)} limited until ${localClock(until)}${backoff ? " (backoff)" : ""}`;
+}
+
+/** "Claude Code available again". */
+export function limitAvailableLine(id: HarnessId): string {
+  return `${harnessName(id)} available again`;
+}

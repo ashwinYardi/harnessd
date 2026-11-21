@@ -568,3 +568,16 @@ test("a failed prepare is an error review: no agent runs, nothing is posted", as
   assert.equal(h.reviews.length, 0);
   assert.deepEqual(h.removed, ["/wt/qa-sha7"]);
 });
+
+test("a limited QA run stops the round: no review, the worktree is removed, no more parts run (MET-70)", async () => {
+  const h = harness({
+    replies: [{ status: "limited", error: "usage limit reached" }, verdict([true, true])],
+    prs: { [backend.key]: pr(7, backend.key), [frontend.key]: pr(8, frontend.key) },
+  });
+  const result = await runQa({ ...h.input, parts: [backend, frontend] }, h.deps);
+  assert.equal(result.limited, true);
+  assert.equal(result.outcome, "error");
+  assert.equal(h.tasks.length, 1, "the next part waits for the harness");
+  assert.equal(h.reviews.length, 0);
+  assert.deepEqual(h.removed, ["/wt/qa-sha7"]);
+});

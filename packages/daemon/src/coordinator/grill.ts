@@ -230,12 +230,15 @@ export function noteTitle(question: string): string {
   return title.length <= 80 ? title : `${title.slice(0, 79)}…`;
 }
 
+/** A run's reply. `limited` is set when the harness hit a usage limit (MET-70). */
+export type RunReply = { ok: true; text: string } | { ok: false; error: string; limited?: true };
+
 /** Runs one task to the end and returns the final assistant text, or why there is none. */
 export async function runForReply(
   adapter: HarnessAdapter,
   task: Task,
   cwd: string,
-): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+): Promise<RunReply> {
   let lastText: string | undefined;
   let finalText: string | undefined;
   let status: string | undefined;
@@ -254,10 +257,8 @@ export async function runForReply(
     return { ok: false, error: `harness run failed: ${(error as Error).message}` };
   }
   if (status !== "ok") {
-    return {
-      ok: false,
-      error: `harness run ${status ?? "ended without a result"}${runError ? `: ${runError}` : ""}`,
-    };
+    const error = `harness run ${status ?? "ended without a result"}${runError ? `: ${runError}` : ""}`;
+    return status === "limited" ? { ok: false, error, limited: true } : { ok: false, error };
   }
   const text = finalText ?? lastText;
   if (text === undefined || text.trim() === "") return { ok: false, error: "empty reply" };
@@ -303,6 +304,10 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
         ? prompt
         : `${prompt}\nYour previous reply was rejected (${parsed.ok ? "" : parsed.error}). Reply again with only the JSON object.\n`;
     const reply = await runForReply(deps.adapter, task(attempt, text), deps.cwd);
+    if (!reply.ok && reply.limited) {
+      // A usage limit is no bad reply: no retry, nothing written, the issue stays (MET-70).
+      return { calls: [], escalation: null, outcome: "limited", error: reply.error };
+    }
     parsed = reply.ok ? parseGrillReply(reply.text) : reply;
     if (parsed.ok) break;
   }

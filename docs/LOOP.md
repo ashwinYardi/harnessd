@@ -19,9 +19,10 @@ harnessd run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
 ## One tick
 1. **Re-queue.** Any run recorded in `loop.json` that this process does not own was left by a previous process. Its worktree is removed and its sub-issue goes back to Ready, with no attempt counted. A run a pause had already marked keeps its worktree (see Pause).
 2. **Pause check.** The pause flag is re-read. If it is set, anything still running is cancelled and the tick stops.
-3. **Merge.** Every QA approval recorded in `loop.json` goes one step through the merge gate (see Merge).
-4. **Dispatch** eligible sub-issues, then **split** Ready issues, then **dispatch** again.
-5. **Save** `loop.json`.
+3. **Release holds.** A usage-limit hold whose time has passed ends (see Usage limits).
+4. **Merge.** Every QA approval recorded in `loop.json` goes one step through the merge gate (see Merge).
+5. **Dispatch** eligible sub-issues, then **split** Ready issues, then **dispatch** again.
+6. **Save** `loop.json`.
 
 ## Split
 Every Ready issue without a part marker is first grilled (docs/COORDINATOR.md).
@@ -155,7 +156,33 @@ After the round:
 | QA could not judge a PR, first failure | QA goes back to Ready and runs again. |
 | second failure | QA and the parent move to Needs input. One comment goes on the parent and one notice is sent. Nothing is sent back again (D-014). |
 
+A QA agent run that ends `limited` stops the round. No review is posted, no QA failure is counted and QA goes back to Ready.
+
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
+
+## Usage limits
+A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70).
+
+- **Part run.** The worktree is removed and the sub-issue goes back to Ready. No attempt is counted and no comment is posted.
+- **QA run.** See QA: no review and no QA failure.
+- **Grill or plan run.** Nothing is written, nothing escalates and the issue stays in Ready. A limited plan is not replaced by the fallback plan.
+
+The limit also starts a **hold** on that harness, kept in `loop.json` under `limits`:
+
+| The harness says | The hold ends |
+|---|---|
+| a reset time | at the reset time |
+| no reset time | after a backoff: 15 minutes, doubled after each hold that ended, at most 2 hours |
+
+While a hold lasts, no part, QA, grill or plan run starts on that harness. The issue waits in Ready and nothing is logged per tick. Agents on other harnesses dispatch as usual. Runs in flight are not cancelled. More limited runs during a hold do not double it. An ok run on the harness clears the backoff.
+
+The log gets one line when a hold starts and one when it ends, in the daemon's local time:
+
+```
+Claude Code limited until 18:37
+Claude Code limited until 17:52 (backoff)
+Claude Code available again
+```
 
 ## Merge
 The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR merges only when **all** of these hold:
@@ -216,9 +243,9 @@ daemon start and loop ticks ──┴─► check ─► pending ─► safe poi
 `<repo>/.harnessd/state/loop.json` is written atomically (temp file, fsync, rename). The folder has its own `.gitignore`.
 
 ```json
-{ "version": 1, "lastPollAt": "…", "inFlight": [{ "issueId": "…", "issueKey": "MET-41", "role": "backend", "agent": "backend", "worktree": "…", "branch": "…", "startedAt": "…", "pid": 123, "pausedAt": "…", "stopReason": "self-update" }], "interrupted": [{ "issueId": "…", "issueKey": "MET-42", "role": "frontend", "agent": "frontend", "worktree": "…", "branch": "…", "interruptedAt": "…", "reason": "paused" }], "attempts": { "<issueId>": 1 }, "qaFailures": { "<parentId>": 1 }, "qaFeedback": { "<partId>": { "prUrl": "…", "reviewUrl": "…", "failing": ["…"] } }, "merges": [{ "qaId": "…", "qaKey": "MET-43", "parentId": "…", "parentKey": "MET-40", "parentUrl": "…", "approvedAt": "…", "prs": [{ "partId": "…", "partKey": "MET-41", "number": 7, "url": "…", "sha": "…", "mergedAt": "…", "needsHuman": "…", "labeled": true, "closedAt": "…" }] }], "gateFailures": { "<parentId>": 1 }, "humanPings": { "<prUrl>": "…" }, "selfUpdateNotices": { "<sha>": "…" }, "selfUpdate": { "from": "<sha>", "to": "<sha>", "at": "…", "state": "pending", "error": "…", "trigger": { "id": "…", "key": "MET-40", "url": "…" } } }
+{ "version": 1, "lastPollAt": "…", "inFlight": [{ "issueId": "…", "issueKey": "MET-41", "role": "backend", "agent": "backend", "worktree": "…", "branch": "…", "startedAt": "…", "pid": 123, "pausedAt": "…", "stopReason": "self-update" }], "interrupted": [{ "issueId": "…", "issueKey": "MET-42", "role": "frontend", "agent": "frontend", "worktree": "…", "branch": "…", "interruptedAt": "…", "reason": "paused" }], "attempts": { "<issueId>": 1 }, "qaFailures": { "<parentId>": 1 }, "qaFeedback": { "<partId>": { "prUrl": "…", "reviewUrl": "…", "failing": ["…"] } }, "merges": [{ "qaId": "…", "qaKey": "MET-43", "parentId": "…", "parentKey": "MET-40", "parentUrl": "…", "approvedAt": "…", "prs": [{ "partId": "…", "partKey": "MET-41", "number": 7, "url": "…", "sha": "…", "mergedAt": "…", "needsHuman": "…", "labeled": true, "closedAt": "…" }] }], "gateFailures": { "<parentId>": 1 }, "humanPings": { "<prUrl>": "…" }, "selfUpdateNotices": { "<sha>": "…" }, "selfUpdate": { "from": "<sha>", "to": "<sha>", "at": "…", "state": "pending", "error": "…", "trigger": { "id": "…", "key": "MET-40", "url": "…" } }, "limits": { "claude-code": { "until": "…", "since": "…", "backoffMs": 900000, "endedAt": "…" } } }
 ```
 
-`pausedAt` is set only on an in-flight run that a pause is cancelling. `stopReason: "self-update"` is set with it when a waiting self-update stops the run. `interrupted[].reason` is `paused` or `self-update`. `selfUpdate.state` is `pending`, `applying`, `done`, `blocked` or `failed`.
+`pausedAt` is set only on an in-flight run that a pause is cancelling. `stopReason: "self-update"` is set with it when a waiting self-update stops the run. `interrupted[].reason` is `paused` or `self-update`. `selfUpdate.state` is `pending`, `applying`, `done`, `blocked` or `failed`. `endedAt` is set only on an ended hold kept for its backoff.
 
-Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the QA approvals waiting to merge and the needs-human notices already sent. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.
+Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the QA approvals waiting to merge, the needs-human notices already sent and the usage-limit holds. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.

@@ -187,3 +187,15 @@ test("planIssue falls back on a bad reply, a failed run or a harness mismatch", 
   assert.match(mismatch.error ?? "", /does not match/);
   assert.equal(other.tasks.length, 0);
 });
+
+test("a limited plan run is no plan and no fallback (MET-70)", async () => {
+  const plan = await planIssue(issue(), {
+    agent,
+    context: { spec: "", decisions: [] },
+    cwd: "/repo",
+    adapter: adapterReplying({ status: "limited", error: "usage limit reached" }).adapter,
+  });
+  assert.equal(plan.source, "limited");
+  assert.deepEqual(plan.parts, []);
+  assert.match(plan.error ?? "", /usage limit reached/);
+});
