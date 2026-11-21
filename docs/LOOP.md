@@ -161,7 +161,7 @@ A QA agent run that ends `limited` stops the round. No review is posted, no QA f
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
 
 ## Usage limits
-A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70).
+A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff.
 
 - **Part run.** The worktree is removed and the sub-issue goes back to Ready. No attempt is counted and no comment is posted.
 - **QA run.** See QA: no review and no QA failure.
