@@ -10,7 +10,9 @@
 
 ## QA
 - QA checks the result, not only the diff. Run the tests, then check each "Done when" item and each item of the build plan.
-- **For a change to the UI or the API, check it in a browser.** Build the PR's worktree. Start it as a second daemon with its own `HARNESSD_HOME` (a temp folder) and a free `daemon.port`, such as 4748. Open the changed screens with the browser tool your harness has (Claude: Playwright MCP; Codex: its browser tool). Check them at 1280x800 and 390x844.
+- **For a change to the UI or the API, check it in a browser, only when your harness gives you a working browser tool** (Claude: Playwright MCP). Build the PR's worktree. Start it as a second daemon with its own `HARNESSD_HOME` (a temp folder) and a free `daemon.port`, such as 4748. Check the changed screens at 1280x800 and 390x844.
+- **On Codex, do not start a browser.** Chrome cannot start inside the Codex sandbox: it aborts, and each abort shows a crash dialog on the owner's screen. Do not use `agent-browser`, Puppeteer, Playwright or any other Chrome launcher from a Codex run. Check UI changes with the tests and the static demo build instead, and write "browser check skipped: no browser in this harness" in the PR comment. MET-74 adds a browser that works for every harness.
+- Never try a browser launch more than once. If it fails, stop and report it.
 - **Never restart the main harnessd service during QA.** It runs the loop, and QA runs inside that loop. After the merge, the main service updates itself (MET-63). Until then, a human pulls, builds and restarts it.
 - Put screenshots and the checked items in the PR comment. Stop the side daemon and delete its temp folder when you finish, also after a failure.
 
