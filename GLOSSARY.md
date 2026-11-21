@@ -67,3 +67,5 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Brand token**: the `--brand` line in `index.css` that holds the accent for light and dark. Primary and ring read it (D-029). _Avoid_: theme color.
 >>>>>>> origin/main
+
+**Self-update**: the daemon moves its own install to the new default-branch commit, builds it and restarts through launchd at a safe point.

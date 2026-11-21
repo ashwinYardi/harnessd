@@ -30,6 +30,7 @@ time_zone = "Asia/Kolkata"  # an IANA time zone
 
 [daemon]
 port = 4747                 # the local API on 127.0.0.1 (docs/API.md); 0 picks a free port
+self_update = true          # allow self-update for a source install that runs under launchd
 
 [harnesses.claude-code]     # Settings → Harnesses writes this in ~/.harnessd/config.toml
 bin = "/opt/homebrew/bin/claude"   # absolute path; wins over HARNESSD_CLAUDE_BIN and PATH

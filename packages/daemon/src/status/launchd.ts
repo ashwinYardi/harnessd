@@ -2,6 +2,7 @@
 // plist; this module only reads it, to find the Node the service will run.
 
 import { join } from "node:path";
+import type { Exec } from "./detect.ts";
 
 /** The launchd label, also the plist's file name. Shared with `harnessd init`. */
 export const LAUNCHD_LABEL = "dev.harnessd.daemon";
@@ -50,4 +51,16 @@ export function wrapperExecPath(text: string): string | undefined {
     if (m) return m[1] ?? m[2] ?? m[3];
   }
   return undefined;
+}
+
+/** A loaded job alone does not mean this process belongs to it. Match the job PID. */
+export async function isLaunchdServiceProcess(
+  exec: Exec,
+  uid: number,
+  pid: number,
+): Promise<boolean> {
+  const target = `gui/${uid}/${LAUNCHD_LABEL}`;
+  const result = await exec("launchctl", ["print", target], { timeoutMs: 5_000 });
+  const servicePid = /^\s*pid = (\d+)\s*$/m.exec(result.stdout)?.[1];
+  return result.code === 0 && servicePid === String(pid);
 }
