@@ -125,8 +125,8 @@ function inlineToml(value: unknown): string {
 
 /** Codex prints these while it retries; the run goes on, so they are logs, not failures. */
 const TRANSIENT_ERROR = /^Reconnecting\.\.\./;
-const USAGE_LIMIT =
-  /usage limit|usage_limit|rate limit|rate_limit|quota|too many requests|\b429\b/i;
+/** Codex retries a short rate limit itself, so only a spent plan or quota counts. */
+const USAGE_LIMIT = /usage limit|usage_limit|quota/i;
 const AUTH =
   /\b401\b|unauthori[sz]ed|not (logged|signed) in|log ?in again|codex login|authenticat|api key|token (has )?expired/i;
 
@@ -141,6 +141,8 @@ const REASON_PREFIX: Record<RunFailureReason, string> = {
   usage_limit: "usage limit reached",
   auth: "not signed in",
 };
+
+type ItemPhase = "item.started" | "item.updated" | "item.completed";
 
 /** Turns `codex exec --json` lines into adapter events and tracks run totals. */
 class CodexJsonParser implements LineParser {
@@ -216,13 +218,13 @@ class CodexJsonParser implements LineParser {
         return true;
       case "turn.failed": {
         const error = isRecord(value.error) ? value.error.message : undefined;
+        // The turn's own message is the final word, over an earlier error event.
         this.#failure = typeof error === "string" && error !== "" ? error : "turn failed";
         return true;
       }
       case "error": {
         const message = typeof value.message === "string" ? value.message : "";
         if (TRANSIENT_ERROR.test(message)) return false;
-        // turn.failed usually follows with the same message; the first one stays.
         this.#failure ??= message || "harness reported an error";
         return true;
       }
@@ -235,7 +237,7 @@ class CodexJsonParser implements LineParser {
     }
   }
 
-  #item(phase: string, item: Record<string, unknown>): boolean {
+  #item(phase: ItemPhase, item: Record<string, unknown>): boolean {
     const id = typeof item.id === "string" ? item.id : undefined;
     switch (item.type) {
       case "agent_message":
@@ -282,7 +284,7 @@ class CodexJsonParser implements LineParser {
   }
 
   /** Shows a tool once per item, at whichever of started or completed comes first. */
-  #once(id: string | undefined, phase: string, name: string, summary: string): void {
+  #once(id: string | undefined, phase: ItemPhase, name: string, summary: string): void {
     if (phase === "item.updated") return;
     if (id !== undefined) {
       if (this.#shown.has(id)) return;
@@ -297,11 +299,12 @@ class CodexJsonParser implements LineParser {
 
   #turn(usage: unknown): void {
     this.#turns++;
-    if (!isRecord(usage)) return;
-    const cached = count(usage.cached_input_tokens);
+    // A turn with no usage still emits the running totals.
+    const u = isRecord(usage) ? usage : {};
+    const cached = count(u.cached_input_tokens);
     const add: TokenUsage = {
-      input: Math.max(0, count(usage.input_tokens) - cached),
-      output: count(usage.output_tokens),
+      input: Math.max(0, count(u.input_tokens) - cached),
+      output: count(u.output_tokens),
       cacheRead: cached,
       cacheWrite: 0,
     };

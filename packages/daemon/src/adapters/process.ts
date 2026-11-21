@@ -15,7 +15,7 @@ import type {
 const DEFAULT_KILL_GRACE_MS = 5_000;
 /** setTimeout overflows past this and fires at once. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
-export const SUMMARY_MAX = 120;
+const SUMMARY_MAX = 120;
 
 /** What a harness reported once its process has exited. */
 export interface ParsedOutcome {
@@ -54,7 +54,7 @@ export interface ProcessRunOptions {
 }
 
 /** Append-only event log; every iterator replays from the first event and ends after close(). */
-export class EventLog implements AsyncIterable<AdapterEvent> {
+class EventLog implements AsyncIterable<AdapterEvent> {
   #events: AdapterEvent[] = [];
   #closed = false;
   #waiters: Array<() => void> = [];
@@ -253,7 +253,7 @@ export function oneLine(text: string): string {
   return flat.length > SUMMARY_MAX ? `${flat.slice(0, SUMMARY_MAX - 1)}…` : flat;
 }
 
-export function readLines(stream: Readable, onLine: (line: string) => void): void {
+function readLines(stream: Readable, onLine: (line: string) => void): void {
   let buffer = "";
   stream.setEncoding("utf8");
   stream.on("data", (chunk: string) => {
