@@ -66,7 +66,7 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 | `config` | loads global and workspace config.toml | `fail` with the file and key |
 | `harness.<id>.cli` | `[harnesses.<id>] bin` in the config, else `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, on PATH; then `--version` | `missing` when not found |
 | `harness.<id>.auth` | `claude auth status --json`; `codex login status` | `fail` when signed out; `warn` when the status cannot be read |
-| `harness.<id>.version` | the version against a list of known-bad releases | `warn` |
+| `harness.<id>.version` | the version against a list of known-bad releases; for Codex, also against the minimum tested version 0.171.0 (D-032) | `warn` |
 | `github.cli` | `$HARNESSD_GH_BIN` or `gh` on PATH | `missing` |
 | `github.auth` | `gh auth status --active` | `fail`: run `gh auth login` |
 | `github.push` | `gh repo view --json viewerPermission` | `fail` below WRITE, or with no GitHub remote |
@@ -80,6 +80,14 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 | `skills.pack` | each default skill in `~/.harnessd/skills/` | `warn`: run `harnessd init` |
 
 Harnesses are checked once for each harness an agent uses. Checks run in parallel. No command runs past 5 s, so `doctor` returns within a few seconds. No check spends tokens. Sign-in checks read only the exit code and named JSON fields, never the account or the token. Output never shows a key, a token or a webhook: each value of 6 characters or more of an environment variable with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in its name, and each value read from the secret store, is replaced by `***`. The loop and the Slack notifier read through the same lookup (D-030).
+
+## Codex
+An agent with `harness = "codex"` runs on the Codex CLI (D-032, docs/CONFIG.md "Codex agents").
+1. Install it: `npm install -g @openai/codex`.
+2. Sign in: `codex login`.
+3. Check the sign-in: `codex login status`. `harnessd doctor` runs the same check as `harness.codex.auth`.
+
+The minimum tested version is 0.171.0. Below it, `harness.codex.version` is `warn`. The loop still runs. Update with `npm install -g @openai/codex@latest`.
 
 ## The launchd service
 | | |

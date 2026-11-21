@@ -96,6 +96,12 @@ A worktree is cut from `origin/main`, so it holds only what the repo commits. ha
   - user MCP servers.
 
   So a key goes in through `claude login` or an environment variable.
+- **Codex runs.** An agent with `harness = "codex"` runs `codex exec --json` with `--ignore-user-config --ignore-rules`, in the `workspace-write` sandbox with no approval prompts (docs/decisions/D-032-codex-adapter.md). It sees these files from the same sync:
+  - `AGENTS.md`: the instructions and the merged rules;
+  - `.agents/skills/`: the skill pack;
+  - `.codex/config.toml`: the MCP servers, with `harnessd-memory`;
+  - `.codex/hooks.json`: the skills' Codex hooks. `--dangerously-bypass-hook-trust` lets them run with no `/hooks` approval.
+- **The Codex gap.** Codex has no flag that skips `$CODEX_HOME/AGENTS.md` or the user-level skills. `CODEX_HOME` stays, because `auth.json` lives there. So a Codex run can still see the owner's `$CODEX_HOME/AGENTS.md` and user skills. A follow-up issue tracks this.
 - **Memory.** The prompt has a Memory section. It names `search_notes`, `read_note` and `write_note`, and the two vaults: `<repo>/.harnessd/vault/` and `$HARNESSD_HOME/vault/` (docs/MEMORY.md). The worktree's `.mcp.json` runs `harnessd mcp memory --workspace <main repo>`, so notes outlive the worktree.
 - **Hand-vendored skills.** A skill folder that sync did not generate stays as it is (D-020). Sync prints `kept <folder>` and does not write into it.
 
