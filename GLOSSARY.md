@@ -56,6 +56,8 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Setup command**: one fixed command the app runs for a harness: install, update or sign in. Nothing from the request reaches it (D-026). _Avoid_: script, action.
 
+**Login prompt**: the first `https://` URL and device code that a harness CLI's sign-in prints, kept on the job as `url` and `code` for the app to show (D-031). _Avoid_: auth link, OTP.
+
 <<<<<<< HEAD
 **Secret store**: the folder `~/.harnessd/secrets/`, one owner-only file per secret, with fixed ids such as `linear.api_key` (D-030). _Avoid_: vault (the vault is memory), keychain.
 

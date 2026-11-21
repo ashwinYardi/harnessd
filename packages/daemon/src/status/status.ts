@@ -183,7 +183,7 @@ function run(
  * `bin` on PATH; or why there is none.
  */
 async function locate(
-  ctx: Ctx,
+  ctx: Pick<Ctx, "config" | "env" | "isExec">,
   bin: string,
   envBin: string,
   harness?: HarnessId,
@@ -296,6 +296,8 @@ interface HarnessSpec {
   status: string[];
   signedIn: (stdout: string, code: number) => { state: "ok" | "fail" | "warn"; detail: string };
   login: string;
+  /** argv of the CLI's own login, run by Settings sign-in (D-031). */
+  loginArgs: string[];
 }
 
 const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
@@ -316,6 +318,7 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
       return { state: "ok", detail: `signed in${method}` };
     },
     login: "Run: claude auth login",
+    loginArgs: ["auth", "login"],
   },
   codex: {
     bin: "codex",
@@ -328,6 +331,7 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
         ? { state: "ok", detail: "signed in" }
         : { state: "fail", detail: "not signed in" },
     login: "Run: codex login",
+    loginArgs: ["login"],
   },
 };
 
@@ -337,11 +341,29 @@ const HARNESS_SPECS: Partial<Record<HarnessId, HarnessSpec>> = {
  */
 export function harnessSetupSpec(
   harness: HarnessId,
-): { pkg: string; login: string; bin: string } | undefined {
+): { pkg: string; login: string; loginArgs: string[]; bin: string } | undefined {
   const spec = HARNESS_SPECS[harness];
-  return spec
-    ? { pkg: spec.pkg, login: spec.login.replace(/^Run: /, ""), bin: spec.bin }
-    : undefined;
+  if (!spec) return undefined;
+  const login = spec.login.replace(/^Run: /, "");
+  return { pkg: spec.pkg, login, loginArgs: [...spec.loginArgs], bin: spec.bin };
+}
+
+/**
+ * Finds a harness CLI the way the status engine does: `[harnesses.<id>] bin`, then the
+ * `HARNESSD_*_BIN` variable, then PATH (D-026). Sign-in runs this same file (D-031).
+ */
+export async function locateHarness(
+  harness: HarnessId,
+  o: {
+    config: MergedConfig | undefined;
+    env: NodeJS.ProcessEnv;
+    isExecutable?: (path: string) => Promise<boolean>;
+  },
+): Promise<{ path: string } | { absent: string }> {
+  const spec = HARNESS_SPECS[harness];
+  if (!spec) return { absent: `harnessd has no checks for ${harness} yet` };
+  const ctx = { config: o.config, env: o.env, isExec: o.isExecutable ?? isExecutableFile };
+  return locate(ctx, spec.bin, spec.envBin, harness);
 }
 
 function harnessGroup(ctx: Ctx, harness: HarnessId): Group {
@@ -892,6 +914,11 @@ function secretsIn(env: NodeJS.ProcessEnv): string[] {
     )
     .map(([, v]) => (v ?? "").trim())
     .sort((a, b) => b.length - a.length);
+}
+
+/** Replaces each env secret value in `text` with `***`, as the checks do (MET-58). */
+export function maskEnvSecrets(text: string, env: NodeJS.ProcessEnv): string {
+  return redact(text, secretsIn(env));
 }
 
 function redact(text: string, secrets: readonly string[]): string {
