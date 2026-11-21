@@ -30,8 +30,8 @@ const PRIORITY: Record<number, string> = { 1: "Urgent", 2: "High" };
 type Lane = Omit<Column, "issues"> & { rows: BoardIssue[] };
 
 const issueKey = (issue: BoardIssue) => issue.key;
-// Cards change height, and a card that turns loud must reach Needs you (lib/pin.ts).
-const PIN: PinOptions<BoardIssue> = { holdSizes: true, neverHold: needsYou };
+// Cards change height, so the cards above a pinned card keep their contents (lib/pin.ts).
+const PIN: PinOptions = { holdSizes: true };
 
 function IssueRow({
   issue,

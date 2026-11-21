@@ -17,7 +17,7 @@ const OUTSIDE: Inside = { pointer: null, focus: null };
 export function usePin<T, G extends Group<T>>(
   next: readonly G[] | undefined,
   key: (row: T) => string,
-  options: PinOptions<T> = {},
+  options: PinOptions = {},
 ) {
   const [inside, setInside] = useState<Inside>(OUTSIDE);
   // With no rows on screen, no row can hold the pointer or focus (no leave or blur fires).

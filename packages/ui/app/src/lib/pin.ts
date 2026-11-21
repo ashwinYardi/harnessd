@@ -7,7 +7,7 @@ export interface Group<T> {
   rows: readonly T[];
 }
 
-export interface PinOptions<T = unknown> {
+export interface PinOptions {
   /**
    * The groups stack in one list, such as the parts of one table. Then the rows of the groups
    * above a pinned row also hold, because a change there moves the pinned row too. Without it,
@@ -21,13 +21,6 @@ export interface PinOptions<T = unknown> {
    * new contents apply at release. The pinned row itself always shows its new contents.
    */
   holdSizes?: boolean;
-  /**
-   * A row that this marks in `next`, but not in `shown`, never holds, unless it is pinned
-   * itself: it takes its true place at once, and the pinned row moves up one row. The Board
-   * uses it, so a card that turns Blocked or Needs input reaches Needs you at once (PRODUCT.md:
-   * they are the loudest things on screen).
-   */
-  neverHold?: (row: T) => boolean;
 }
 
 /**
@@ -44,7 +37,7 @@ export function pin<T, G extends Group<T>>(
   next: readonly G[],
   key: (row: T) => string,
   pinned: readonly string[],
-  options: PinOptions<T> = {},
+  options: PinOptions = {},
 ): G[] {
   const spots = pinned.map((k) => find(shown, key, k)).filter((at) => at !== undefined);
   if (spots.length === 0) return [...next];
@@ -60,13 +53,7 @@ export function pin<T, G extends Group<T>>(
   const pinnedKeys = new Set(pinned);
   const contents = (r: T) =>
     options.holdSizes === true && !pinnedKeys.has(key(r)) ? r : (find(next, key, key(r))?.row ?? r);
-  const holdable = (r: T) => {
-    if (pinnedKeys.has(key(r)) || !options.neverHold) return true;
-    const fresh = find(next, key, key(r))?.row;
-    // Only a row that turns loud goes: a row that was loud already keeps the pinned row's place.
-    return fresh === undefined || options.neverHold(r) || !options.neverHold(fresh);
-  };
-  const heldRows = holds.map((h) => h.group.rows.slice(0, h.count).filter(holdable));
+  const heldRows = holds.map((h) => h.group.rows.slice(0, h.count));
   const held = new Set(heldRows.flat().map(key));
   const groups = next.map((g) => ({ ...g, rows: g.rows.filter((r) => !held.has(key(r))) }));
   for (const [i, h] of holds.entries()) {
