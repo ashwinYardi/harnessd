@@ -1,5 +1,6 @@
 // Settings (MET-28): Harnesses, Connections and Team, under one sub-nav.
 // While the loop is in setup, a banner says what blocks it, or offers Start.
+// After a self-update (MET-63), one quiet line names the old and new commit.
 import { CircleAlertIcon, PlayIcon } from "lucide-react";
 import { Button } from "../../components/ui/button.tsx";
 import { Spinner } from "../../components/ui/spinner.tsx";
@@ -8,6 +9,7 @@ import type { Status } from "../../hooks/useStatus.ts";
 import type { Check } from "../../lib/checks.ts";
 import { cn } from "../../lib/cn.ts";
 import { hrefFor, type SettingsPage } from "../../lib/route.ts";
+import { type SelfUpdate, selfUpdateLine } from "../../lib/selfUpdate.ts";
 import { startState, worst } from "../../lib/setup.ts";
 import { Connections } from "./Connections.tsx";
 import { Harnesses } from "./Harnesses.tsx";
@@ -23,8 +25,39 @@ const PAGES: ReadonlyArray<{ page: SettingsPage; title: string; about: string }>
   { page: "team", title: "Team", about: "Each agent's role, harness and model." },
 ];
 
+/** "Updated 1a2b3c4 -> 5d6e7f8, 14:02". Renders nothing when the loop has no self-update. */
+function SelfUpdateNote({
+  update,
+  className,
+}: {
+  update: SelfUpdate | undefined;
+  className: string;
+}) {
+  const line = selfUpdateLine(update);
+  if (!line) return null;
+  return (
+    <p className={cn("text-muted-foreground text-xs tabular-nums", className)}>
+      {line.label && <>{line.label} </>}
+      <span className="whitespace-nowrap font-mono">
+        {line.from}
+        <span aria-hidden="true"> -&gt; </span>
+        <span className="sr-only"> to </span>
+        {line.to}
+        {line.time && update && (
+          <>
+            , <time dateTime={update.at}>{line.time}</time>
+          </>
+        )}
+      </span>
+    </p>
+  );
+}
+
 function StartBanner({ loop, checks }: { loop: Loop; checks: readonly Check[] | undefined }) {
-  if (loop.loop?.state !== "setup") return null;
+  if (!loop.loop) return null;
+  if (loop.loop.state !== "setup") {
+    return <SelfUpdateNote className="mb-3" update={loop.loop.selfUpdate} />;
+  }
   const { ready, areas, loading } = startState(checks, loop.loop);
   return (
     <div
@@ -40,13 +73,16 @@ function StartBanner({ loop, checks }: { loop: Loop; checks: readonly Check[] | 
           className="size-4 shrink-0 text-destructive-foreground"
         />
       )}
-      <p className="min-w-0 flex-1 text-sm">
-        {loading
-          ? "Running the checks."
-          : ready
-            ? "Every required check passes. Start the loop to pick up Ready issues."
-            : `The loop waits. Fix ${areas.length === 1 ? "one thing" : `${areas.length} things`}: ${areas.join(", ")}.`}
-      </p>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm">
+          {loading
+            ? "Running the checks."
+            : ready
+              ? "Every required check passes. Start the loop to pick up Ready issues."
+              : `The loop waits. Fix ${areas.length === 1 ? "one thing" : `${areas.length} things`}: ${areas.join(", ")}.`}
+        </p>
+        <SelfUpdateNote className="mt-0.5" update={loop.loop.selfUpdate} />
+      </div>
       <Button disabled={!ready || loop.starting} onClick={() => void loop.start()}>
         {loop.starting ? <Spinner /> : <PlayIcon aria-hidden="true" />}
         Start

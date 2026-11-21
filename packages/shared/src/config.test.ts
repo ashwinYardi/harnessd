@@ -276,3 +276,11 @@ test("parseConfigFile reads [secrets.<service>] references, never a value (MET-3
     (e: unknown) => e instanceof ConfigError && /expected a reference/.test(e.message),
   );
 });
+
+test("self-update defaults to on and requires a boolean", () => {
+  assert.equal(DEFAULT_SETTINGS.daemon.self_update, true);
+  rejects(
+    { daemon: { self_update: "false" } },
+    `${FILE}: daemon.self_update: expected true or false, got "false"`,
+  );
+});

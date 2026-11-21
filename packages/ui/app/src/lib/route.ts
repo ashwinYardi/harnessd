@@ -1,5 +1,4 @@
 // The app's views live in the hash, so the daemon serves one page and Back works.
-
 import type { SelfUpdateView } from "@harnessd/shared";
 
 export type View = "board" | "agents" | "logs" | "settings";

@@ -33,5 +33,5 @@ Settings has a sub-nav and one card per harness or connection. Each card shows t
 ## UX rules
 - Every view has loading, empty and error states.
 - Every action works by keyboard, and focus is always visible.
-- Live updates never move content under the cursor.
+- Live updates apply in place. The row under the pointer or focus keeps its place, and its contents update. Only the log holds new lines while scrolled up, and offers Jump to latest.
 - Blocked and Needs input items are the loudest things on screen, because they are the only things that need the human.

@@ -1,16 +1,19 @@
 // The board (MET-18 behaviour, rebuilt on the primitives): Needs you first and loudest, then
-// each state in flow order. Live changes wait while the pointer or focus is inside.
+// each state in flow order. Live changes apply in place; the card under the pointer or focus
+// keeps its column and its place until both leave it (MET-61).
 import type { BoardIssue, BoardSnapshot } from "@harnessd/shared";
 import { CircleAlertIcon, ExternalLinkIcon } from "lucide-react";
+import { useMemo } from "react";
 import type { Load } from "../api.ts";
 import { Badge } from "../components/ui/badge.tsx";
 import { ScrollArea } from "../components/ui/scroll-area.tsx";
 import { Skeleton } from "../components/ui/skeleton.tsx";
-import { useHold } from "../hooks/useHold.ts";
+import { type RowProps, usePin } from "../hooks/usePin.ts";
 import { type Column, type ColumnId, groupBoard, needsYou } from "../lib/board.ts";
 import { cn } from "../lib/cn.ts";
 import { sinceText } from "../lib/format.ts";
-import { ErrorState, HeldUpdates, ViewToolbar } from "./common.tsx";
+import type { PinOptions } from "../lib/pin.ts";
+import { ErrorState, ViewToolbar } from "./common.tsx";
 
 const EMPTY: Record<ColumnId, string> = {
   "needs-you": "Nothing needs you.",
@@ -23,10 +26,25 @@ const EMPTY: Record<ColumnId, string> = {
 
 const PRIORITY: Record<number, string> = { 1: "Urgent", 2: "High" };
 
-function IssueRow({ issue, paused }: { issue: BoardIssue; paused: boolean }) {
+/** A column with its cards as the rows that pin. */
+type Lane = Omit<Column, "issues"> & { rows: BoardIssue[] };
+
+const issueKey = (issue: BoardIssue) => issue.key;
+// Cards change height, so the cards above a pinned card keep their contents (lib/pin.ts).
+const PIN: PinOptions = { holdSizes: true };
+
+function IssueRow({
+  issue,
+  paused,
+  rowProps,
+}: {
+  issue: BoardIssue;
+  paused: boolean;
+  rowProps: RowProps;
+}) {
   const loud = needsYou(issue);
   return (
-    <li>
+    <li {...rowProps(issue.key)}>
       <a
         className={cn(
           "group flex flex-col gap-1 rounded-lg border bg-card px-2.5 py-2 text-sm shadow-xs/5 outline-none transition-colors duration-100 not-dark:bg-clip-padding hover:bg-accent/50 focus-visible:ring-2 focus-visible:ring-ring dark:hover:bg-accent",
@@ -93,10 +111,18 @@ function IssueRow({ issue, paused }: { issue: BoardIssue; paused: boolean }) {
   );
 }
 
-function BoardColumn({ column, paused }: { column: Column; paused: boolean }) {
+function BoardColumn({
+  column,
+  paused,
+  rowProps,
+}: {
+  column: Lane;
+  paused: boolean;
+  rowProps: RowProps;
+}) {
   const id = `col-${column.id}`;
   const loud = column.id === "needs-you";
-  const hasIssues = column.issues.length > 0;
+  const hasIssues = column.rows.length > 0;
   const alarm = loud && hasIssues;
   return (
     <section
@@ -117,13 +143,13 @@ function BoardColumn({ column, paused }: { column: Column; paused: boolean }) {
         {alarm && <CircleAlertIcon aria-hidden="true" className="size-4" />}
         <span>{column.title}</span>
         <Badge size="sm" variant={alarm ? "destructive" : "secondary"}>
-          {column.issues.length}
+          {column.rows.length}
         </Badge>
       </h2>
       {hasIssues ? (
         <ul className="flex min-h-0 flex-1 flex-col gap-1.5 overflow-y-auto px-2 pb-2">
-          {column.issues.map((issue) => (
-            <IssueRow issue={issue} key={issue.id} paused={paused} />
+          {column.rows.map((issue) => (
+            <IssueRow issue={issue} key={issue.id} paused={paused} rowProps={rowProps} />
           ))}
         </ul>
       ) : (
@@ -172,44 +198,48 @@ export function Board({
   paused: boolean;
 }) {
   const snapshot = board.status === "ready" ? board.data : undefined;
-  const { shown, pending, apply, regionProps } = useHold(snapshot);
+  const lanes = useMemo(
+    () =>
+      snapshot &&
+      groupBoard(snapshot.issues).map(({ issues, ...c }): Lane => ({ ...c, rows: issues })),
+    [snapshot],
+  );
+  const { shown: columns, rowProps } = usePin(lanes, issueKey, PIN);
   // No good read of Linear yet: an empty board would claim nothing needs you.
-  const neverRead = shown?.fetchedAt === null && shown.error !== undefined;
+  const neverRead = snapshot?.fetchedAt === null && snapshot.error !== undefined;
 
   return (
     <section
       aria-busy={board.status === "loading"}
       aria-label="Board"
       className="flex min-h-0 flex-1 flex-col"
-      {...regionProps}
     >
       <ViewToolbar>
-        {shown && (
+        {snapshot && (
           <span>
-            {shown.fetchedAt
-              ? `Linear, read ${sinceText(shown.fetchedAt, now)}`
+            {snapshot.fetchedAt
+              ? `Linear, read ${sinceText(snapshot.fetchedAt, now)}`
               : "Not read from Linear yet"}
           </span>
         )}
-        {shown?.error && !neverRead && (
+        {snapshot?.error && !neverRead && (
           <span className="text-warning-foreground">
-            Last read failed: {shown.error}. Showing the last good read.
+            Last read failed: {snapshot.error}. Showing the last good read.
           </span>
         )}
-        <HeldUpdates pending={pending} onApply={apply} />
       </ViewToolbar>
-      {board.status === "loading" && !shown && <BoardSkeleton />}
-      {((board.status === "error" && !shown) || neverRead) && (
+      {board.status === "loading" && !snapshot && <BoardSkeleton />}
+      {((board.status === "error" && !snapshot) || neverRead) && (
         <ErrorState
           onRetry={retry}
-          text={`Could not read the board from Linear. ${board.status === "error" ? board.error : (shown?.error ?? "")}`}
+          text={`Could not read the board from Linear. ${board.status === "error" ? board.error : (snapshot?.error ?? "")}`}
         />
       )}
-      {shown && !neverRead && (
+      {snapshot && !neverRead && (
         <ScrollArea className="min-h-0 flex-1">
           <div className="flex h-full items-start gap-3 px-4 pb-4">
-            {groupBoard(shown.issues).map((column) => (
-              <BoardColumn column={column} key={column.id} paused={paused} />
+            {columns?.map((column) => (
+              <BoardColumn column={column} key={column.id} paused={paused} rowProps={rowProps} />
             ))}
           </div>
         </ScrollArea>

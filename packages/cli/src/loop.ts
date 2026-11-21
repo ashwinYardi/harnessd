@@ -20,6 +20,7 @@ import {
   type DaemonInfo,
   DEFAULT_LOOP_INTERVAL_MS,
   defaultGlobalDir,
+  detectSelfUpdate,
   HttpError,
   isBlocking,
   LinearClient,
@@ -31,6 +32,7 @@ import {
   runStatus,
   SecretError,
   type SecretStore,
+  type SelfUpdateRunner,
   type SelfUpdater,
   type SetupRunner,
   type SlackFetch,
@@ -117,6 +119,10 @@ export interface LoopIO {
    * `[daemon] self_update = false`. Default: none, so the loop never updates itself.
    */
   selfUpdater?: SelfUpdater;
+  /** URL of the CLI entry point. */
+  cliUrl?: string;
+  /** Runs the startup self-update checks. Default: the real machine. */
+  selfUpdateRunner?: SelfUpdateRunner;
 }
 
 /** How often a due daily summary is looked for. */
@@ -337,9 +343,11 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
   // The port is read on its own, so a missing key or team still serves the app.
   let port: number;
   let fallback: MergedConfig;
+  let selfUpdate: boolean | undefined;
   try {
     fallback = await loadConfig({ globalDir, workspaceDir: join(repoDir, ".harnessd") });
     port = fallback.daemon.port;
+    selfUpdate = fallback.daemon.self_update;
   } catch (e) {
     if (parsed.once) {
       io.err(`harnessd run: ${e instanceof ConfigError ? e.message : (e as Error).message}`);
@@ -438,6 +446,22 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     },
   ];
 
+  let selfUpdateLine = "Self-update is off. Cannot read the daemon config.";
+  if (selfUpdate !== undefined) {
+    const update = await detectSelfUpdate(
+      {
+        cliUrl: io.cliUrl ?? import.meta.url,
+        workspace: repoDir,
+        selfUpdate,
+        log: (line) => {
+          selfUpdateLine = line;
+        },
+      },
+      io.selfUpdateRunner,
+    );
+    if (update.kind === "on") selfUpdateLine = "Self-update detected the install clone.";
+  }
+
   let daemon: Daemon;
   let page: Awaited<ReturnType<typeof staticRoutes>>;
   try {
@@ -483,6 +507,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     );
     const paused = await pauseStore.read();
     if (paused.paused) io.out(pausedLine(paused.since, paused.reason));
+    log(selfUpdateLine);
     if (blocking.length === 0 && !isBlocker(built)) {
       active = built;
       loops.push(built.loop);

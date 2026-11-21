@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { after, test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   agentForRole,
   type Check,
@@ -94,6 +95,43 @@ test("parseRunArgs reads the dir, --once, --interval and --permission-mode", () 
 
 const PAUSED_CONFIG = '[linear]\nteam_id = "MET"\n\n[daemon]\nport = 0\n';
 
+test("run detects its install once at daemon startup", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  const cliUrl = new URL("install/packages/cli/dist/bin.js", `file://${s.root}/`).href;
+  let rootChecks = 0;
+  const io = {
+    ...s.io,
+    cliUrl,
+    selfUpdateRunner: {
+      async exec(command: string, args: readonly string[], options?: { cwd?: string }) {
+        if (command === "launchctl") return { code: 0, stdout: `pid = ${process.pid}`, stderr: "" };
+        if (args[0] === "rev-parse") {
+          assert.equal(options?.cwd, dirname(fileURLToPath(cliUrl)));
+          rootChecks++;
+        } else {
+          assert.equal(args[0], "remote");
+          assert.ok(options?.cwd === s.root || options?.cwd === s.repo);
+        }
+        return {
+          code: 0,
+          stdout: args[0] === "rev-parse" ? s.root : "https://github.com/acme/harnessd.git",
+          stderr: "",
+        };
+      },
+      async pathKind() {
+        return "directory" as const;
+      },
+    },
+  };
+  assert.equal(await run(["run", "--once"], io), 0);
+  assert.equal(rootChecks, 1);
+  assert.equal(
+    s.out.filter((line) => line.endsWith("Self-update detected the install clone.")).length,
+    1,
+  );
+});
+
 test("run while paused starts the API, says it is paused and dispatches nothing", async () => {
   const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
   await createFilePauseStore(s.home).pause("deploy");
@@ -145,7 +183,7 @@ test("run fails clearly when the API port is taken", async () => {
 });
 
 test("run serves the UI and its read routes next to the pause API", async () => {
-  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  const s = await setup({ LINEAR_API_KEY: "k" }, `${PAUSED_CONFIG}self_update = false\n`);
   await createFilePauseStore(s.home).pause();
   const uiDir = join(s.root, "ui");
   await mkdir(uiDir);
@@ -156,6 +194,14 @@ test("run serves the UI and its read routes next to the pause API", async () => 
   const code = await runLoop([], {
     ...s.io,
     uiDir,
+    selfUpdateRunner: {
+      async exec() {
+        assert.fail("disabled self-update must not run commands");
+      },
+      async pathKind() {
+        assert.fail("disabled self-update must not inspect paths");
+      },
+    },
     stopSignal: async () => {
       const url = (await readDaemonInfo(s.home))?.url ?? "";
       page = await (await fetch(`${url}/`)).text();
@@ -171,7 +217,10 @@ test("run serves the UI and its read routes next to the pause API", async () => 
     (agents as { agents: { name: string }[] }).agents.map((a) => a.name),
     ["coordinator", "backend", "frontend", "qa"],
   );
-  assert.deepEqual(logs, { lines: [] });
+  assert.deepEqual(
+    (logs as { lines: { text: string }[] }).lines.map(({ text }) => text),
+    ["Self-update is off. daemon.self_update is false."],
+  );
 });
 
 test("run without a built UI still serves the API and says so", async () => {
