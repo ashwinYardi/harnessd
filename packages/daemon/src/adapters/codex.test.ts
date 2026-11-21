@@ -1,0 +1,344 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import type { AdapterEvent, AdapterRun, Task } from "@harnessd/shared";
+import { type CodexOptions, codexArgs, createCodexAdapter } from "./codex.ts";
+
+const FIXTURES = join(import.meta.dirname, "../../test/fixtures/codex");
+const scratch = realpathSync(mkdtempSync(join(tmpdir(), "harnessd-codex-")));
+after(() => rmSync(scratch, { recursive: true, force: true }));
+
+// The fake codex: records its argv and cwd, prints one fixture, writes stderr, exits with a code.
+const FAKE = join(scratch, "codex");
+writeFileSync(
+  FAKE,
+  `#!/usr/bin/env node
+const fs = require("node:fs");
+const env = process.env;
+if (env.FAKE_CODEX_RECORD) {
+  fs.writeFileSync(env.FAKE_CODEX_RECORD, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));
+}
+if (env.FAKE_CODEX_FIXTURE) process.stdout.write(fs.readFileSync(env.FAKE_CODEX_FIXTURE, "utf8"));
+if (env.FAKE_CODEX_STDERR) process.stderr.write(env.FAKE_CODEX_STDERR + "\\n");
+if (env.FAKE_CODEX_HANG === "1") setInterval(() => {}, 1000);
+else process.exitCode = Number(env.FAKE_CODEX_EXIT ?? "0");
+`,
+);
+chmodSync(FAKE, 0o755);
+
+// The worktree is a git repo, so the run can reach the git common dir.
+const repo = join(scratch, "repo");
+mkdirSync(repo);
+execFileSync("git", ["init", "-q"], { cwd: repo });
+const commonDir = join(repo, ".git");
+
+function task(overrides: Partial<Task> = {}): Task {
+  return { id: "MET-75", title: "Codex", prompt: "Say hi", budgetMs: 10_000, ...overrides };
+}
+
+interface Fake {
+  fixture?: string;
+  exit?: number;
+  stderr?: string;
+  hang?: boolean;
+}
+
+function run(fake: Fake, t: Task = task(), options: CodexOptions = {}) {
+  const record = join(scratch, `record-${Math.random().toString(36).slice(2)}.json`);
+  const env: Record<string, string> = { FAKE_CODEX_RECORD: record };
+  if (fake.fixture) env.FAKE_CODEX_FIXTURE = join(FIXTURES, `${fake.fixture}.jsonl`);
+  if (fake.exit !== undefined) env.FAKE_CODEX_EXIT = String(fake.exit);
+  if (fake.stderr) env.FAKE_CODEX_STDERR = fake.stderr;
+  if (fake.hang) env.FAKE_CODEX_HANG = "1";
+  const adapter = createCodexAdapter({ bin: FAKE, ...options, env: { ...env, ...options.env } });
+  return { adapter, run: adapter.start(t, repo), record };
+}
+
+async function collect(r: AdapterRun): Promise<AdapterEvent[]> {
+  const events: AdapterEvent[] = [];
+  for await (const event of r.events) events.push(event);
+  return events;
+}
+
+function readRecord(path: string): { argv: string[]; cwd: string } {
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+const BASE = (dir: string) => [
+  "exec",
+  "--json",
+  "--ignore-user-config",
+  "--ignore-rules",
+  "--dangerously-bypass-hook-trust",
+  "--sandbox",
+  "workspace-write",
+  "--add-dir",
+  dir,
+  "-c",
+  'approval_policy="never"',
+  "-c",
+  "sandbox_workspace_write.network_access=true",
+];
+
+test("codexArgs runs exec --json in workspace-write with no approvals", () => {
+  assert.deepEqual(codexArgs(task(), {}, repo), [...BASE(commonDir), "--", "Say hi"]);
+});
+
+test("codexArgs passes --model from the task, then the options, and omits it when unset", () => {
+  const tail = (argv: string[]) => argv.slice(BASE(commonDir).length);
+  assert.deepEqual(tail(codexArgs(task({ model: "gpt-5.5" }), { model: "o3" }, repo)), [
+    "--model",
+    "gpt-5.5",
+    "--",
+    "Say hi",
+  ]);
+  assert.deepEqual(tail(codexArgs(task(), { model: "o3" }, repo)), [
+    "--model",
+    "o3",
+    "--",
+    "Say hi",
+  ]);
+  assert.ok(!codexArgs(task(), {}, repo).includes("--model"));
+});
+
+test("codexArgs never widens the sandbox or persists trust", () => {
+  const argv = codexArgs(task({ model: "m" }), {}, repo);
+  for (const flag of ["--trust", "--dangerously-bypass-approvals-and-sandbox"]) {
+    assert.ok(!argv.includes(flag), flag);
+  }
+  assert.ok(!argv.some((a) => a.includes("danger-full-access")));
+});
+
+test("codexArgs keeps a prompt that starts with a dash after --", () => {
+  const argv = codexArgs(task({ prompt: "--help me" }), {}, repo);
+  assert.deepEqual(argv.slice(-2), ["--", "--help me"]);
+});
+
+test("codexArgs from a linked worktree adds the main repo's git dir", () => {
+  execFileSync(
+    "git",
+    ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"],
+    {
+      cwd: repo,
+    },
+  );
+  const linked = join(scratch, "linked");
+  execFileSync("git", ["worktree", "add", "-q", "-b", "linked", linked], { cwd: repo });
+  const argv = codexArgs(task(), {}, linked);
+  assert.equal(argv[argv.indexOf("--add-dir") + 1], commonDir);
+});
+
+test("codexArgs leaves out --add-dir outside a git repo", () => {
+  const plain = mkdtempSync(join(scratch, "plain-"));
+  assert.ok(!codexArgs(task(), {}, plain).includes("--add-dir"));
+});
+
+test("codexArgs passes the synced .codex/config.toml MCP servers as -c overrides", () => {
+  // Codex ignores project config in an untrusted worktree, so the adapter passes it.
+  const dir = mkdtempSync(join(scratch, "mcp-"));
+  mkdirSync(join(dir, ".codex"));
+  writeFileSync(
+    join(dir, ".codex", "config.toml"),
+    [
+      "# generated",
+      "",
+      "[mcp_servers.harnessd-memory]",
+      'command = "node"',
+      'args = ["server.js", "--vault", "a \\"b\\""]',
+      'env = { VAULT = "/v", "odd key" = "x" }',
+      "",
+    ].join("\n"),
+  );
+  const argv = codexArgs(task(), {}, dir);
+  const at = argv.indexOf("--");
+  assert.deepEqual(argv.slice(at - 2, at), [
+    "-c",
+    'mcp_servers.harnessd-memory={ command = "node", args = ["server.js", "--vault", "a \\"b\\""], env = { VAULT = "/v", "odd key" = "x" } }',
+  ]);
+});
+
+test("a success run streams text and usage, and keeps the thread id", async () => {
+  const { adapter, run: r, record } = run({ fixture: "success" });
+  assert.equal(adapter.id, "codex");
+  const events = await collect(r);
+  const result = await r.result;
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ["start", "text", "text", "usage", "end"],
+  );
+  assert.deepEqual(events[1], { type: "text", text: "Looking at the code." });
+  assert.deepEqual(events[3], {
+    type: "usage",
+    tokens: { input: 200, output: 40, cacheRead: 1000, cacheWrite: 0 },
+  });
+  assert.deepEqual(events.at(-1), { type: "end", result });
+  assert.equal(result.status, "ok");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.sessionId, "thread-fake-1");
+  assert.equal(result.finalText, "Done.");
+  assert.equal(result.costUsd, undefined);
+  assert.equal(result.error, undefined);
+  assert.equal(result.reason, undefined);
+
+  const { argv, cwd } = readRecord(record);
+  assert.deepEqual(argv, codexArgs(task(), {}, repo));
+  assert.equal(realpathSync(cwd), repo);
+  const start = events[0];
+  assert.ok(start?.type === "start");
+  assert.deepEqual(start.argv, [FAKE, ...argv]);
+  assert.equal(start.cwd, repo);
+});
+
+test("tool calls, file edits and usage totals map to tool and usage events", async () => {
+  const { run: r } = run({ fixture: "tools" });
+  const events = await collect(r);
+  const result = await r.result;
+  const shown = events.filter((e) => e.type === "tool" || e.type === "usage");
+  assert.deepEqual(shown, [
+    { type: "tool", name: "shell", summary: "bash -lc 'pnpm test'" },
+    { type: "tool", name: "shell", summary: "bash -lc 'pnpm test' (exit 0)" },
+    { type: "tool", name: "edit", summary: "src/a.ts, src/b.ts" },
+    { type: "tool", name: "harnessd-memory.search_notes", summary: '{"query":"adapters"}' },
+    { type: "tool", name: "web_search", summary: "codex exec json events" },
+    { type: "tool", name: "todo", summary: "1/2 done: Write the test; Make it pass" },
+    { type: "usage", tokens: { input: 400, output: 20, cacheRead: 100, cacheWrite: 0 } },
+    { type: "usage", tokens: { input: 500, output: 30, cacheRead: 300, cacheWrite: 0 } },
+  ]);
+  assert.equal(result.status, "ok");
+  assert.deepEqual(result.tokens, { input: 500, output: 30, cacheRead: 300, cacheWrite: 0 });
+  assert.equal(result.finalText, "Tests pass.");
+});
+
+test("tool summaries stay on one line of at most 120 characters", async () => {
+  const dir = mkdtempSync(join(scratch, "long-"));
+  const fixture = join(dir, "long.jsonl");
+  const command = `echo ${"x".repeat(300)}\nsecond line`;
+  writeFileSync(
+    fixture,
+    `${JSON.stringify({ type: "item.started", item: { id: "i", type: "command_execution", command } })}\n`,
+  );
+  const r = createCodexAdapter({ bin: FAKE, env: { FAKE_CODEX_FIXTURE: fixture } }).start(
+    task(),
+    repo,
+  );
+  const tool = (await collect(r)).find((e) => e.type === "tool");
+  assert.ok(tool?.type === "tool");
+  assert.equal(tool.summary.length, 120);
+  assert.ok(!tool.summary.includes("\n"));
+});
+
+test("reasoning, unknown events, warnings and bad JSON become raw stdout logs", async () => {
+  const { run: r } = run({ fixture: "unknown" });
+  const events = await collect(r);
+  const result = await r.result;
+  const lines = readFileSync(join(FIXTURES, "unknown.jsonl"), "utf8").trim().split("\n");
+  const logs = events.filter((e) => e.type === "log" && e.stream === "stdout");
+  assert.deepEqual(
+    logs.map((e) => (e.type === "log" ? e.line : "")),
+    [lines[1], lines[3], lines[4], lines[5], lines[6], lines[7], lines[8]],
+  );
+  // A reconnect notice and an item warning do not fail a run that completes its turn.
+  assert.equal(result.status, "ok");
+  assert.equal(result.finalText, "Still done.");
+});
+
+test("a usage limit ends with a clear error and reason usage_limit", async () => {
+  const { run: r } = run({ fixture: "usage-limit", exit: 1 });
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.reason, "usage_limit");
+  assert.equal(
+    result.error,
+    "usage limit reached: You've hit your usage limit. Try again in 2 hours.",
+  );
+});
+
+test("an auth failure ends with a clear error and reason auth", async () => {
+  // Codex can exit 0 after a failed turn; the turn.failed still makes the run an error.
+  const { run: r } = run({ fixture: "auth", exit: 0 });
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.reason, "auth");
+  assert.match(result.error ?? "", /^not signed in: unexpected status 401 Unauthorized/);
+});
+
+test("any other failed turn keeps its message and sets no reason", async () => {
+  const { run: r } = run({ fixture: "failed", exit: 1 });
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "stream closed before response.completed");
+  assert.equal(result.reason, undefined);
+});
+
+test("a non-zero exit with no events reads the reason from stderr", async () => {
+  const auth = await run({
+    fixture: "empty",
+    exit: 1,
+    stderr: "Error: Not logged in. Run codex login.",
+  }).run.result;
+  assert.equal(auth.status, "error");
+  assert.equal(auth.reason, "auth");
+  assert.equal(auth.error, "not signed in: Error: Not logged in. Run codex login.");
+
+  const other = await run({ fixture: "empty", exit: 2, stderr: "error: unexpected argument" }).run
+    .result;
+  assert.equal(other.status, "error");
+  assert.equal(other.reason, undefined);
+  assert.equal(other.error, "exited with code 2");
+});
+
+test("exit 0 with no completed turn is not ok", async () => {
+  const result = await run({ fixture: "empty", exit: 0 }).run.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "no turn.completed event");
+});
+
+test("HARNESSD_CODEX_BIN picks the binary when no bin option is given", async () => {
+  const previous = process.env.HARNESSD_CODEX_BIN;
+  process.env.HARNESSD_CODEX_BIN = FAKE;
+  try {
+    const r = createCodexAdapter({
+      env: { FAKE_CODEX_FIXTURE: join(FIXTURES, "success.jsonl") },
+    }).start(task(), repo);
+    assert.equal((await r.result).status, "ok");
+  } finally {
+    if (previous === undefined) delete process.env.HARNESSD_CODEX_BIN;
+    else process.env.HARNESSD_CODEX_BIN = previous;
+  }
+});
+
+test("the budget timeout kills the run and reports timeout", async () => {
+  const { run: r } = run({ fixture: "success", hang: true }, task({ budgetMs: 500 }), {
+    killGraceMs: 500,
+  });
+  const result = await r.result;
+  assert.equal(result.status, "timeout");
+  assert.equal(result.error, "budget of 500ms exceeded");
+  assert.equal(result.reason, undefined);
+});
+
+test("cancel() stops the run and reports cancelled", async () => {
+  const { run: r } = run({ fixture: "success", hang: true }, task({ budgetMs: 30_000 }));
+  for await (const event of r.events) {
+    if (event.type === "text") await r.cancel();
+  }
+  assert.equal((await r.result).status, "cancelled");
+});
+
+test("a missing binary is an error, not a throw", async () => {
+  const r = createCodexAdapter({ bin: join(scratch, "no-such-codex") }).start(task(), repo);
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /ENOENT/);
+});

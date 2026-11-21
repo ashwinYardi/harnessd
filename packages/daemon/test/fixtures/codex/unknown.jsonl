@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"thread-fake-3"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"a non-fatal warning"}}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_1","type":"reasoning","text":"Thinking about it."}}
+{"type":"future.event","detail":1}
+{"type":"item.completed","item":{"id":"item_2","type":"future_item"}}
+{"type":"error","message":"Reconnecting... 1/5 (stream disconnected)"}
+this is not json
+[1,2]
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Still done."}}
+{"type":"turn.completed","usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":5}}

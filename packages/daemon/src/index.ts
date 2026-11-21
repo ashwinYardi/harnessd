@@ -3,6 +3,12 @@ export {
   claudeArgs,
   createClaudeCodeAdapter,
 } from "./adapters/claude-code.ts";
+export {
+  type CodexOptions,
+  codexArgs,
+  createCodexAdapter,
+  failureReason,
+} from "./adapters/codex.ts";
 export * from "./config/load.ts";
 export * from "./config/merge.ts";
 export * from "./config/team.ts";

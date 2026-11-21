@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thread-fake-6"}
+{"type":"turn.started"}
+{"type":"error","message":"stream closed before response.completed"}
+{"type":"turn.failed","error":{"message":"stream closed before response.completed"}}
