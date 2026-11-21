@@ -1,10 +1,19 @@
 // Settings → Harnesses (MET-28): one card per harness CLI, with its maker's logo. The card
-// shows what the status engine found and runs the fixed setup commands.
-import { CopyIcon, DownloadIcon, LogInIcon, RefreshCwIcon, RotateCwIcon } from "lucide-react";
+// shows what the status engine found and runs the fixed setup commands. During a sign-in it
+// shows the login link and device code, or the one command to copy (MET-59, part of MET-48).
+import {
+  CheckIcon,
+  CopyIcon,
+  DownloadIcon,
+  ExternalLinkIcon,
+  LogInIcon,
+  RefreshCwIcon,
+  RotateCwIcon,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Load } from "../../api.ts";
 import { ServiceLogo } from "../../components/service-logo.tsx";
-import { Button } from "../../components/ui/button.tsx";
+import { Button, buttonVariants } from "../../components/ui/button.tsx";
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "../../components/ui/card.tsx";
 import { Input } from "../../components/ui/input.tsx";
 import { Skeleton } from "../../components/ui/skeleton.tsx";
@@ -12,6 +21,7 @@ import { Spinner } from "../../components/ui/spinner.tsx";
 import { toast } from "../../components/ui/toast.tsx";
 import { harnessService } from "../../lib/services.ts";
 import { harnessSummary } from "../../lib/setup.ts";
+import { copyText, jobStream, signinPanel } from "../../lib/signin.ts";
 import {
   type HarnessAction,
   type HarnessCard,
@@ -31,10 +41,107 @@ const ACTION_TEXT: Record<HarnessAction, string> = {
   signin: "Sign in",
 };
 
-function copy(text: string) {
-  void navigator.clipboard?.writeText(text).then(
-    () => toast.add({ type: "success", title: "Copied", description: text }),
-    () => toast.add({ type: "error", title: "Could not copy", description: text }),
+/** Copy with a quiet confirmation: the label reads "Copied" for a moment. */
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  useEffect(() => () => clearTimeout(timer.current), []);
+  async function onCopy() {
+    if (await copyText(navigator.clipboard, text)) {
+      setCopied(true);
+      clearTimeout(timer.current);
+      timer.current = setTimeout(() => setCopied(false), 1500);
+    } else {
+      toast.add({
+        type: "error",
+        title: "Could not copy",
+        description: "Select the text and copy it.",
+      });
+    }
+  }
+  return (
+    <Button aria-label={`Copy ${label}`} onClick={() => void onCopy()} size="sm" variant="outline">
+      {copied ? <CheckIcon aria-hidden="true" /> : <CopyIcon aria-hidden="true" />}
+      <span aria-hidden="true">{copied ? "Copied" : "Copy"}</span>
+      <span aria-live="polite" className="sr-only">
+        {copied ? "Copied" : ""}
+      </span>
+    </Button>
+  );
+}
+
+/** A value to copy by hand: a device code or a command. */
+function CopyField({ text, label }: { text: string; label: string }) {
+  return (
+    <div className="flex min-w-0 items-center gap-2">
+      <code className="block h-7 min-w-0 select-all truncate leading-[26px] rounded-[var(--control-radius)] border bg-background px-2.5 font-mono text-xs">
+        {text}
+      </code>
+      <CopyButton label={label} text={text} />
+    </div>
+  );
+}
+
+function SigninPrompt({
+  card,
+  job,
+  signedIn,
+  onRecheck,
+  checking,
+}: {
+  card: HarnessCard;
+  job: Job | null;
+  signedIn: boolean;
+  onRecheck: () => void;
+  checking: boolean;
+}) {
+  const { link, code, fallback } = signinPanel(job, signedIn);
+  if (!link && !code && !fallback) return null;
+  return (
+    <div className="grid gap-2 pt-1">
+      {link && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <a
+            className={buttonVariants({ size: "sm" })}
+            href={link.href}
+            rel={link.rel}
+            target={link.target}
+          >
+            <ExternalLinkIcon aria-hidden="true" />
+            Open sign-in page
+          </a>
+          <span className="text-muted-foreground text-xs">
+            Opens <span className="font-mono">{link.host}</span> in your browser.
+          </span>
+        </div>
+      )}
+      {code && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span className="w-20 text-muted-foreground text-xs">Device code</span>
+          <CopyField label="the device code" text={code} />
+        </div>
+      )}
+      {fallback && (
+        <>
+          <p className="text-muted-foreground text-xs">
+            Run this in a terminal, then press Recheck.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <CopyField label="the command" text={card.commands.signin} />
+            <Button
+              disabled={checking}
+              focusableWhenDisabled
+              onClick={onRecheck}
+              size="sm"
+              variant="outline"
+            >
+              {checking ? <Spinner /> : <RotateCwIcon aria-hidden="true" />}
+              Recheck
+            </Button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -57,19 +164,13 @@ function JobOutput({ job }: { job: Job }) {
           {job.lines.join("\n")}
         </pre>
       )}
-      {job.state === "failed" && (
+      {job.state === "failed" && job.action !== "signin" && (
         <div className="flex items-center gap-2 border-t px-3 py-2 text-xs">
           <span className="text-muted-foreground">Run it yourself in a terminal:</span>
-          <code className="font-mono">{job.command}</code>
-          <Button
-            aria-label="Copy the command"
-            className="ms-auto"
-            onClick={() => copy(job.command)}
-            size="icon-sm"
-            variant="ghost"
-          >
-            <CopyIcon />
-          </Button>
+          <code className="min-w-0 truncate font-mono">{job.command}</code>
+          <span className="ms-auto">
+            <CopyButton label="the command" text={job.command} />
+          </span>
         </div>
       )}
     </div>
@@ -250,7 +351,7 @@ function HarnessCardView({
               key={action}
               onClick={() => onAction(action)}
               size="sm"
-              variant={action === primary ? "default" : "outline"}
+              variant={action === primary && !busy ? "default" : "outline"}
             >
               {busy && job?.action === action ? <Spinner /> : <Icon aria-hidden="true" />}
               {ACTION_TEXT[action]}
@@ -258,15 +359,22 @@ function HarnessCardView({
           );
         })}
         <span className="ms-auto text-muted-foreground text-xs">
-          {s.found ? "Sign in opens Terminal with " : "Runs "}
+          {s.found ? "Sign in runs " : "Runs "}
           <code className="font-mono">
             {s.found ? card.commands.signin : card.commands.install}
           </code>
         </span>
       </CardFooter>
       {job && (
-        <div className="px-4 pb-3">
+        <div className="grid gap-2 px-4 pb-3">
           <JobOutput job={job} />
+          <SigninPrompt
+            card={card}
+            checking={checking}
+            job={job}
+            onRecheck={onRecheck}
+            signedIn={s.signedIn}
+          />
         </div>
       )}
     </Card>
@@ -296,36 +404,34 @@ export function Harnesses({ onChecksChanged }: { onChecksChanged: () => void }) 
 
   const changed = useRef(onChecksChanged);
   changed.current = onChecksChanged;
+  // The harness list runs the sign-in checks first; the status and loop state load after it.
   const recheck = useCallback(() => {
-    void load();
-    changed.current();
+    void load().then(() => changed.current());
   }, [load]);
 
-  // One stream for the page. A job's result is announced once, when it leaves "running";
-  // jobs replayed on connect are shown but not announced again.
-  const seen = useRef(new Map<string, Job["state"]>());
+  // One stream for the page. A job ends once, when it leaves "running": then the card and the
+  // checks load again, and the loop state after them (MET-41). Replayed jobs are not announced.
+  const stream = useRef<ReturnType<typeof jobStream>>(undefined);
   useEffect(() => {
     void load();
+    const onJob = jobStream({
+      show: (job) => setJobs((j) => ({ ...j, [job.harness]: job })),
+      ended: (job) =>
+        toast.add(
+          job.state === "ok"
+            ? { type: "success", title: `${job.command} finished` }
+            : {
+                type: "error",
+                title: "The command failed",
+                description: "The card shows its output and the command to run.",
+              },
+        ),
+      recheck,
+    });
+    stream.current = onJob;
     const events = new EventSource("/api/setup/events");
     events.addEventListener("job", (e) => {
-      const job = JSON.parse((e as MessageEvent<string>).data) as Job;
-      const before = seen.current.get(job.id);
-      seen.current.set(job.id, job.state);
-      setJobs((j) => ({ ...j, [job.harness]: job }));
-      if (before !== "running" || job.state === "running") return;
-      if (job.state === "ok") {
-        toast.add({
-          type: "success",
-          title: job.action === "signin" ? "Terminal opened" : `${job.command} finished`,
-        });
-        if (job.action !== "signin") recheck();
-      } else {
-        toast.add({
-          type: "error",
-          title: "The command failed",
-          description: "The card shows its output and the command to run.",
-        });
-      }
+      onJob(JSON.parse((e as MessageEvent<string>).data) as Job);
     });
     return () => events.close();
   }, [load, recheck]);
@@ -333,7 +439,7 @@ export function Harnesses({ onChecksChanged }: { onChecksChanged: () => void }) 
   async function act(card: HarnessCard, action: HarnessAction) {
     try {
       const job = await runHarnessAction(card.id, action);
-      seen.current.set(job.id, "running");
+      stream.current?.started(job);
       setJobs((j) => ({ ...j, [card.id]: job }));
     } catch (e) {
       toast.add({
