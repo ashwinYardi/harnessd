@@ -6,7 +6,13 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { createSecretStore } from "../secrets/store.ts";
 import type { ExecOptions, ExecResult } from "./detect.ts";
-import { type Check, isBlocking, runStatus, type StatusOptions } from "./status.ts";
+import {
+  type Check,
+  CODEX_MIN_VERSION,
+  isBlocking,
+  runStatus,
+  type StatusOptions,
+} from "./status.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -39,7 +45,7 @@ async function world(config = '[linear]\nteam_id = "MET"\n') {
       "/bin/claude auth status --json",
       ok(JSON.stringify({ loggedIn: true, authMethod: "oauth_token", email: "me@example.com" })),
     ],
-    ["/bin/codex --version", ok("codex-cli 0.60.0\n")],
+    ["/bin/codex --version", ok("codex-cli 0.171.0\n")],
     ["/bin/codex login status", ok("Logged in using an API key - sk-proj-***SECRET\n")],
     ["/bin/gh --version", ok("gh version 2.89.0 (2026-03-26)\n")],
     ["/bin/gh auth status --active", ok("Logged in to github.com account me (keyring)\n")],
@@ -345,7 +351,7 @@ test("a known-bad harness version is a warning with the reason", async () => {
 test("Codex is checked only when an agent uses it, through `codex login status`", async () => {
   const w = await world('[linear]\nteam_id = "MET"\n\n[agents.qa]\nharness = "codex"\n');
   const checks = await runStatus(w.options);
-  assert.equal(byId(checks, "harness.codex.cli").detail, "codex-cli 0.60.0 (/bin/codex)");
+  assert.equal(byId(checks, "harness.codex.cli").detail, "codex-cli 0.171.0 (/bin/codex)");
   assert.equal(byId(checks, "harness.codex.auth").state, "ok");
   assert.doesNotMatch(JSON.stringify(checks), /sk-proj/);
 
@@ -353,6 +359,39 @@ test("Codex is checked only when an agent uses it, through `codex login status`"
   const auth = byId(await runStatus(w.options), "harness.codex.auth");
   assert.equal(auth.state, "fail");
   assert.match(auth.fix, /codex login/);
+});
+
+test("Codex below the minimum version is a warning that names both versions", async () => {
+  assert.equal(CODEX_MIN_VERSION, "0.171.0");
+  const w = await world('[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "codex"\n');
+  w.replies.set("/bin/codex --version", ok("codex-cli 0.170.9\n"));
+  const checks = await runStatus(w.options);
+  const v = byId(checks, "harness.codex.version");
+  assert.equal(v.state, "warn");
+  assert.equal(v.detail, "0.170.9 is below the minimum 0.171.0");
+  assert.equal(v.fix, "Run npm install -g @openai/codex@latest.");
+  assert.ok(!isBlocking(v), "a version warning never blocks");
+});
+
+test("Codex at or above the minimum version is ok", async () => {
+  for (const found of ["0.171.0", "0.171.1", "0.200.0", "1.0.0"]) {
+    const w = await world('[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "codex"\n');
+    w.replies.set("/bin/codex --version", ok(`codex-cli ${found}\n`));
+    const v = byId(await runStatus(w.options), "harness.codex.version");
+    assert.equal(v.state, "ok", found);
+    assert.equal(v.fix, "", found);
+  }
+});
+
+test("an unparseable Codex version is a warning that names the minimum", async () => {
+  const w = await world('[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "codex"\n');
+  w.replies.set("/bin/codex --version", ok("codex-cli dev\n"));
+  const checks = await runStatus(w.options);
+  const v = byId(checks, "harness.codex.version");
+  assert.equal(v.state, "warn");
+  assert.equal(v.detail, "version unknown; the minimum is 0.171.0");
+  assert.equal(v.fix, "Run npm install -g @openai/codex@latest.");
+  assert.ok(!isBlocking(v));
 });
 
 test("GitHub: signed out, read-only access and no required checks", async () => {

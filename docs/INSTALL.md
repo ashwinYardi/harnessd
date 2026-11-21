@@ -66,7 +66,7 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 | `config` | loads global and workspace config.toml | `fail` with the file and key |
 | `harness.<id>.cli` | `[harnesses.<id>] bin` in the config, else `$HARNESSD_CLAUDE_BIN` or `claude`, `$HARNESSD_CODEX_BIN` or `codex`, on PATH; then `--version` | `missing` when not found |
 | `harness.<id>.auth` | `claude auth status --json`; `codex login status` | `fail` when signed out; `warn` when the status cannot be read |
-| `harness.<id>.version` | the version against a list of known-bad releases; for Codex, also against the minimum tested version 0.171.0 (D-032) | `warn` |
+| `harness.<id>.version` | the version against a list of known-bad releases; for Codex, also against the minimum tested version (`CODEX_MIN_VERSION`, 0.171.0, D-032) | `warn` |
 | `github.cli` | `$HARNESSD_GH_BIN` or `gh` on PATH | `missing` |
 | `github.auth` | `gh auth status --active` | `fail`: run `gh auth login` |
 | `github.push` | `gh repo view --json viewerPermission` | `fail` below WRITE, or with no GitHub remote |
