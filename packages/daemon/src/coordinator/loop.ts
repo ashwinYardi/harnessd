@@ -391,6 +391,25 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     return isHeld(state?.limits[harness], clock.now());
   }
 
+  /** The hold can start while a task is being prepared. Check at the adapter boundary. */
+  function deferWhileHeld(harness: HarnessId): AdapterRun | undefined {
+    if (!held(harness)) return undefined;
+    const result: RunResult = {
+      status: "limited",
+      exitCode: null,
+      durationMs: 0,
+      tokens: emptyTokenUsage(),
+      error: "harness is on hold",
+    };
+    return {
+      result: Promise.resolve(result),
+      events: (async function* () {
+        yield { type: "end" as const, result };
+      })(),
+      async cancel() {},
+    };
+  }
+
   /** Ends the holds whose time has come, with one log line each. */
   async function releaseHolds(s: LoopState): Promise<void> {
     let changed = false;
@@ -489,7 +508,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     return true;
   }
 
-  async function finish(s: LoopState, entry: InFlightRun, result: RunResult): Promise<void> {
+  async function finish(
+    s: LoopState,
+    entry: InFlightRun,
+    result: RunResult,
+    deferred = false,
+  ): Promise<void> {
     // Keep the live entry during the move so a tick cannot try to re-queue it in parallel.
     const stopped = entry.pausedAt !== undefined && result.status !== "ok";
     if (stopped) await requeueStopped(s, entry);
@@ -511,7 +535,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     } else if (result.status === "cancelled" || result.status === "limited") {
       // A usage limit is no task failure: no attempt counted, no comment. noteRun held the harness (MET-70).
       await safely(`re-queue ${entry.issueKey}`, () => linear.moveTo(id, "Ready"));
-      log(`${entry.issueKey}: ${result.status}, re-queued`);
+      if (!deferred) log(`${entry.issueKey}: ${result.status}, re-queued`);
     } else {
       const failures = (s.attempts[id] ?? 0) + 1;
       const why = `${result.status}${result.error ? `: ${oneLine(result.error)}` : ""}`;
@@ -588,7 +612,6 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       pid,
     };
     s.inFlight.push(entry);
-    report.dispatched.push(issue.key);
     const fail = (error: unknown): Promise<void> =>
       finish(s, entry, {
         status: "error",
@@ -611,6 +634,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         );
         await save();
       }
+      report.dispatched.push(issue.key);
       startQa(s, entry, issue, qa, agent, adapter, budget);
       log(`${issue.key}: ${agentName} started QA of ${qa.parts.map((p) => p.key).join(", ")}`);
       return;
@@ -653,7 +677,27 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       };
       if (agent.model !== undefined) task.model = agent.model;
       if (env !== undefined) task.env = env;
+      if (held(agent.harness)) {
+        // Keep a previously paused worktree available for the eventual retry.
+        if (kept?.worktree === entry.worktree) {
+          s.interrupted.push(kept);
+          entry.worktree = "";
+        }
+        await finish(
+          s,
+          entry,
+          {
+            status: "cancelled",
+            exitCode: null,
+            durationMs: 0,
+            tokens: emptyTokenUsage(),
+          },
+          true,
+        );
+        return;
+      }
       run = adapter.start(task, worktree.path);
+      report.dispatched.push(issue.key);
     } catch (error) {
       await fail(error);
       return;
@@ -712,6 +756,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const qaAdapter: HarnessAdapter = {
       id: adapter.id,
       start(task, cwd) {
+        const deferred = deferWhileHeld(adapter.id);
+        if (deferred !== undefined) return deferred;
         const run = adapter.start(task, cwd);
         l.run = run;
         follow(l, run);
@@ -952,6 +998,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     return {
       id: adapter.id,
       start(task, cwd) {
+        const deferred = deferWhileHeld(adapter.id);
+        if (deferred !== undefined) return deferred;
         const run = adapter.start(task, cwd);
         coordinatorRuns.add(run);
         syncWatch();

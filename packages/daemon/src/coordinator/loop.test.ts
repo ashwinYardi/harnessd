@@ -772,6 +772,51 @@ function part(t: ReturnType<typeof setup>, parentId: string, role: string, title
   return t.linear.add({ title, parentId, description: `${partMarker(role)}\n**Size**: S` });
 }
 
+function gate() {
+  let open = (): void => {};
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
+
+test("a hold that starts during worktree creation prevents the next adapter start", async () => {
+  const time = manualClock();
+  const adapter = fakeAdapter();
+  const wt = fakeWorktrees();
+  const preparing = gate();
+  const proceed = gate();
+  const t = setup({
+    adapter,
+    extra: { clock: time.clock },
+    worktrees: {
+      ...wt.worktrees,
+      async create(input) {
+        if (input.title === "Second") {
+          preparing.open();
+          await proceed.promise;
+        }
+        return wt.worktrees.create(input);
+      },
+    },
+  });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const first = part(t, parent.id, "backend", "First");
+  assert.deepEqual((await t.loop.tick()).dispatched, [first.key]);
+
+  const second = part(t, parent.id, "frontend", "Second");
+  const tick = t.loop.tick();
+  await preparing.promise;
+  adapter.pending[0]?.finish("limited", "usage limit reached", undefined, time.at(MINUTE));
+  await settle();
+  proceed.open();
+  assert.deepEqual((await tick).dispatched, []);
+  assert.equal(adapter.runs().length, 1);
+  assert.equal(second.state, "Ready");
+  assert.deepEqual(t.memory.state.attempts, {});
+  assert.ok(wt.removed.includes(`/wt/${second.key}`));
+});
+
 test("a limited run holds its harness until the reset while another harness keeps working", async () => {
   const time = manualClock();
   const codex = fakeAdapter({ id: "codex" });
@@ -855,6 +900,42 @@ test("no reset time: a 15 minute backoff that doubles, and an ok run clears it",
   assert.deepEqual(t.memory.state.limits, {}, "an ok run clears the backoff");
   assert.equal(a.state, "In Review");
   assert.equal(t.memory.state.attempts[a.id], undefined);
+});
+
+test("a hold that starts during QA checkout prevents the reviewer from starting", async () => {
+  const time = manualClock();
+  const wt = fakeWorktrees();
+  const preparing = gate();
+  const proceed = gate();
+  const t = setup({
+    extra: { clock: time.clock },
+    worktrees: {
+      ...wt.worktrees,
+      async checkout(input) {
+        preparing.open();
+        await proceed.promise;
+        return wt.worktrees.checkout(input);
+      },
+    },
+  });
+  const work = t.linear.add({ title: "Work", state: "In Progress" });
+  const first = part(t, work.id, "backend", "First");
+  assert.deepEqual((await t.loop.tick()).dispatched, [first.key]);
+
+  const { backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+  await t.loop.tick();
+  await preparing.promise;
+  t.adapter.pending[0]?.finish("limited", "usage limit reached", undefined, time.at(MINUTE));
+  await settle();
+  proceed.open();
+  await t.loop.idle();
+
+  assert.equal(t.adapter.runs().length, 1);
+  assert.equal(qa.state, "Ready");
+  assert.deepEqual(t.memory.state.qaFailures, {});
+  assert.deepEqual(t.gh.reviews, []);
+  assert.ok(wt.removed.includes(`/wt/${qa.key}-sha7`));
 });
 
 test("a limited QA run counts no QA failure and goes back to Ready", async () => {

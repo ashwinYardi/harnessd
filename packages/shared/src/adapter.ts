@@ -37,7 +37,7 @@ export interface RunResult {
   finalText?: string;
   /** Short reason when status is not `ok`. */
   error?: string;
-  /** Why an `error` run failed, when the harness said it was out of quota or not signed in. */
+  /** Machine-readable reason when the harness reports a usage limit or a sign-in failure. */
   reason?: RunFailureReason;
   /** ISO time the limit resets, when status is `limited` and the harness said when. */
   resetAt?: string;

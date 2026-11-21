@@ -249,7 +249,7 @@ export function setupRoutes(options: SetupOptions): { routes: Route[] } {
       throw new HttpError(
         400,
         "not_installed",
-        `${found.absent}. Install ${NAMES[harness]} first.`,
+        `${found.absent}. Install ${harnessName(harness)} first.`,
       );
     }
     return found.path;

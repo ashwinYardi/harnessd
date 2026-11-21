@@ -228,15 +228,38 @@ test("reasoning, unknown events, warnings and bad JSON become raw stdout logs", 
   assert.equal(result.finalText, "Still done.");
 });
 
-test("a usage limit ends with a clear error and reason usage_limit", async () => {
+test("a usage limit ends the run as limited with a reset time", async () => {
+  const started = Date.now();
   const { run: r } = run({ fixture: "usage-limit", exit: 1 });
   const result = await r.result;
-  assert.equal(result.status, "error");
+  assert.equal(result.status, "limited");
+  const reset = Date.parse(result.resetAt ?? "");
+  assert.ok(reset >= started + 7_200_000 && reset <= Date.now() + 7_200_000);
   assert.equal(result.reason, "usage_limit");
   assert.equal(
     result.error,
     "usage limit reached: You've hit your usage limit. Try again in 2 hours.",
   );
+});
+
+test("a terminal rate limit on stderr ends the run as limited", async () => {
+  const result = await run({
+    fixture: "empty",
+    exit: 1,
+    stderr: "Error: HTTP 429 Too Many Requests",
+  }).run.result;
+  assert.equal(result.status, "limited");
+  assert.equal(result.resetAt, undefined);
+});
+
+test("a dated Codex retry time is preserved as an ISO timestamp", async () => {
+  const result = await run({
+    fixture: "empty",
+    exit: 1,
+    stderr: "You've hit your usage limit. Try again at 2026-11-22T01:15:00Z.",
+  }).run.result;
+  assert.equal(result.status, "limited");
+  assert.equal(result.resetAt, "2026-11-22T01:15:00.000Z");
 });
 
 test("an auth failure ends with a clear error and reason auth", async () => {
@@ -270,7 +293,7 @@ test("a non-zero exit with no events reads the reason from stderr", async () => 
     .result;
   assert.equal(other.status, "error");
   assert.equal(other.reason, undefined);
-  assert.equal(other.error, "exited with code 2");
+  assert.equal(other.error, "error: unexpected argument");
 });
 
 test("exit 0 with no completed turn is not ok", async () => {
