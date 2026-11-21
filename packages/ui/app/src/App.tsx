@@ -11,6 +11,7 @@ import { useStatus } from "./hooks/useStatus.ts";
 import { type Theme, useTheme } from "./hooks/useTheme.ts";
 import { needsYou } from "./lib/board.ts";
 import type { Command } from "./lib/commands.ts";
+import { activeLimits } from "./lib/limits.ts";
 import type { View } from "./lib/route.ts";
 import { firstRoute, type SettingsPage } from "./lib/route.ts";
 import { blockingAreas, startState } from "./lib/setup.ts";
@@ -39,7 +40,7 @@ const IS_MAC = typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(naviga
 
 export function App() {
   const loop = useLoop();
-  const api = useHarnessd(loop.receive);
+  const api = useHarnessd(loop.applyLive);
   const now = useNow();
   const { route, go } = useRoute();
   const { theme, setTheme } = useTheme();
@@ -70,6 +71,8 @@ export function App() {
   const boardDown =
     api.board.status === "error" ||
     (api.board.status === "ready" && api.board.data.fetchedAt === null && !!api.board.data.error);
+  // Holds in force, on the clock every view shares (MET-70).
+  const holds = activeLimits(loop.loop?.limits, now);
   const lastPollAt = api.agents.status === "ready" ? api.agents.data.lastPollAt : undefined;
   const running =
     api.agents.status === "ready"
@@ -262,7 +265,7 @@ export function App() {
           boardDown={boardDown}
           connection={api.connection}
           lastPollAt={lastPollAt}
-          limits={loop.loop?.limits}
+          limits={holds}
           needsYou={waiting}
           now={now}
           onShowNeedsYou={() => goTo("board")}
@@ -300,12 +303,7 @@ export function App() {
             />
           )}
           {route.view === "agents" && (
-            <Agents
-              agents={api.agents}
-              limits={loop.loop?.limits}
-              now={now}
-              retry={api.retry.agents}
-            />
+            <Agents agents={api.agents} limits={holds} now={now} retry={api.retry.agents} />
           )}
           {route.view === "logs" && <Logs logs={api.logs} retry={api.retry.logs} />}
           {route.view === "settings" && <Settings loop={loop} page={route.page} status={status} />}

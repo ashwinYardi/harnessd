@@ -1,10 +1,9 @@
 // The daemon's API (docs/API.md): reads on load, then live changes from /api/events.
 import type { AgentsSnapshot, BoardSnapshot, LogLine, LogSnapshot } from "@harnessd/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { HarnessLimit } from "./lib/limits.ts";
 import { appendLines } from "./lib/log.ts";
 import type { PauseState } from "./lib/pause.ts";
-import type { LoopState } from "./lib/route.ts";
+import type { HarnessLimit, LoopState } from "./lib/route.ts";
 
 export type { PauseState };
 

@@ -11,13 +11,7 @@ import { Spinner } from "../components/ui/spinner.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { cn } from "../lib/cn.ts";
 import { clockTime, sinceText } from "../lib/format.ts";
-import {
-  activeLimits,
-  type HarnessLimit,
-  harnessName,
-  limitClock,
-  limitText,
-} from "../lib/limits.ts";
+import { type HarnessLimit, limitParts, limitText } from "../lib/limits.ts";
 import type { PauseView } from "../lib/pause.ts";
 import { harnessService } from "../lib/services.ts";
 import { PauseButton } from "./PauseButton.tsx";
@@ -39,8 +33,8 @@ interface AppHeaderProps {
   onTogglePause: () => void;
   connection: Connection;
   lastPollAt: string | null | undefined;
-  /** Harness holds from the loop state; one entry each while in force. */
-  limits: readonly HarnessLimit[] | undefined;
+  /** Harness holds in force; one entry each. */
+  limits: readonly HarnessLimit[];
   needsYou: number;
   boardDown: boolean;
   now: Date;
@@ -68,7 +62,6 @@ export function AppHeader({
   const paused = pause.shown.paused;
   const c = CONNECTION[connection];
   const since = pause.confirmed.paused ? pause.confirmed.since : undefined;
-  const holds = activeLimits(limits, now);
   return (
     <header
       className={cn(
@@ -90,7 +83,10 @@ export function AppHeader({
             aria-label={`Connection: ${c.text}. ${c.hint}`}
           >
             <span aria-hidden="true" className={cn("size-1.5 rounded-full", c.dot)} />
-            <span className="hidden sm:inline">{c.text}</span>
+            {/* While a hold shows, the dot and its tooltip carry the state below lg. */}
+            <span className={cn("hidden", limits.length > 0 ? "lg:inline" : "sm:inline")}>
+              {c.text}
+            </span>
           </TooltipTrigger>
           <TooltipContent side="bottom">{c.hint}</TooltipContent>
         </Tooltip>
@@ -106,15 +102,20 @@ export function AppHeader({
             <span className="text-warning-foreground">Pause state unknown: {pauseUnknown}</span>
           )}
         </p>
-        {/* Always in the tree, so a screen reader hears a hold start and end. */}
-        <p className="flex min-w-0 items-center gap-2 lg:gap-3" role="status">
-          {holds.map((h) => {
+        {/* Always in the tree, so a screen reader hears a hold start and end. Empty, it
+            gives back its flex gap, so the header does not move. */}
+        <p className="flex min-w-0 items-center gap-2 empty:-ml-3 lg:gap-3" role="status">
+          {limits.map((h) => {
             const service = harnessService(h.harness);
             const text = limitText(h);
+            const parts = limitParts(h);
+            // Below lg the logo names the harness: "until 18:37" shows. The title and a
+            // screen reader keep the whole text.
+            const narrow = service ? "sr-only lg:not-sr-only" : undefined;
             return (
               <span
                 className={cn(
-                  "inline-flex min-w-0 items-center gap-1.5 whitespace-nowrap",
+                  "inline-flex min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap lg:shrink",
                   paused && "text-warning-foreground",
                 )}
                 key={h.harness}
@@ -122,16 +123,10 @@ export function AppHeader({
                 title={text}
               >
                 {service && <ServiceLogo className="size-3.5" service={service} />}
-                {/* Below lg the logo and the reset time show; the title and a screen reader
-                    keep the whole text. */}
                 <span className="truncate">
-                  <span className={cn(service && "sr-only lg:not-sr-only")}>
-                    {harnessName(h.harness)} limited until{" "}
-                  </span>
-                  <span className="tabular-nums">{limitClock(h)}</span>
-                  {h.backoff && (
-                    <span className={cn(service && "sr-only lg:not-sr-only")}> (backoff)</span>
-                  )}
+                  <span className={narrow}>{parts.name}</span>
+                  <span className="tabular-nums">{parts.until}</span>
+                  {parts.backoff && <span className={narrow}>{parts.backoff}</span>}
                 </span>
               </span>
             );
@@ -139,7 +134,7 @@ export function AppHeader({
         </p>
         {/* Outside the live region: it changes every second. A hold needs the room more. */}
         {!paused && !pauseUnknown && (
-          <span className={cn("hidden truncate", holds.length > 0 ? "xl:inline" : "md:inline")}>
+          <span className={cn("hidden truncate", limits.length > 0 ? "xl:inline" : "md:inline")}>
             {lastPollAt ? `Last poll ${sinceText(lastPollAt, now)}` : "No poll yet"}
           </span>
         )}

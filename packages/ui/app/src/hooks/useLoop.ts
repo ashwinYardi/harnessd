@@ -21,7 +21,7 @@ export function useLoop() {
     void refresh();
   }, [refresh]);
   /** A live update from the event stream, such as a new set of harness holds (MET-70). */
-  const receive = useCallback((next: Partial<LoopState>) => {
+  const applyLive = useCallback((next: Partial<LoopState>) => {
     setLoop((prev) => mergeLoop(prev, next));
   }, []);
   const start = useCallback(async () => {
@@ -45,7 +45,7 @@ export function useLoop() {
       setStarting(false);
     }
   }, [refresh]);
-  return { loop, starting, start, refresh, receive };
+  return { loop, starting, start, refresh, applyLive };
 }
 
 export type Loop = ReturnType<typeof useLoop>;

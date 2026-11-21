@@ -1,6 +1,5 @@
 // The app's views live in the hash, so the daemon serves one page and Back works.
-import type { SelfUpdateView } from "@harnessd/shared";
-import type { HarnessLimit } from "./limits.ts";
+import type { HarnessId, SelfUpdateView } from "@harnessd/shared";
 
 export type View = "board" | "agents" | "logs" | "settings";
 export type SettingsPage = "harnesses" | "connections" | "team";
@@ -25,6 +24,14 @@ export function hrefFor(route: Route | { view: View }): string {
     return `#/settings/${"page" in route ? route.page : "harnesses"}`;
   }
   return `#/${route.view}`;
+}
+
+/** One held harness (MET-70). `backoff` is true when the harness gave no reset time. */
+export interface HarnessLimit {
+  harness: HarnessId;
+  /** ISO time the hold ends. */
+  until: string;
+  backoff: boolean;
 }
 
 /** The daemon's loop state (GET /api/loop). */

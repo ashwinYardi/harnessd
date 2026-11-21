@@ -5,8 +5,7 @@ import {
   activeLimits,
   agentLimit,
   type HarnessLimit,
-  holdTexts,
-  limitClock,
+  limitParts,
   limitText,
   mergeLoop,
 } from "./limits.ts";
@@ -29,10 +28,17 @@ test("limitText adds (backoff) when the harness gave no reset time", () => {
   );
 });
 
-test("limitClock is the reset time a narrow header shows next to the logo", () => {
-  assert.equal(limitClock(claude), "18:37");
-  assert.equal(limitClock({ ...claude, backoff: true }), "18:37");
+test("limitParts splits the text so a narrow header can drop the name", () => {
+  assert.deepEqual(limitParts({ ...claude, backoff: true }), {
+    name: "Claude Code limited ",
+    until: "until 18:37",
+    backoff: " (backoff)",
+  });
 });
+
+/** The header's entries: one text per hold in force. */
+const holdTexts = (limits: HarnessLimit[] | undefined, at: Date) =>
+  activeLimits(limits, at).map(limitText);
 
 test("header text: no hold shows nothing", () => {
   assert.deepEqual(holdTexts(undefined, now), []);
@@ -79,13 +85,13 @@ const agent = (harness: AgentView["harness"], runs = 0): AgentView => ({
 });
 
 test("an agent row shows the hold only when its harness is held", () => {
-  assert.equal(agentLimit(agent("claude-code"), [claude], now), claude);
-  assert.equal(agentLimit(agent("codex"), [claude], now), undefined);
-  assert.equal(agentLimit(agent("claude-code"), [], now), undefined);
+  assert.equal(agentLimit(agent("claude-code"), [claude]), claude);
+  assert.equal(agentLimit(agent("codex"), [claude]), undefined);
+  assert.equal(agentLimit(agent("claude-code"), []), undefined);
 });
 
 test("an agent that runs while its harness is held runs on its fallback: nothing extra", () => {
-  assert.equal(agentLimit(agent("claude-code", 1), [claude], now), undefined);
+  assert.equal(agentLimit(agent("claude-code", 1), [claude]), undefined);
 });
 
 const running: LoopState = { state: "running", blocking: [], limits: [claude] };

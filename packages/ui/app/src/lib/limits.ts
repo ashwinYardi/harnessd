@@ -2,15 +2,9 @@
 // reset time. GET /api/loop and the event stream carry them as `limits`. The app shows each
 // one as a quiet status, "Claude Code limited until 18:37", in the header and on agent rows.
 import type { AgentView, HarnessId } from "@harnessd/shared";
-import type { LoopState } from "./route.ts";
+import type { HarnessLimit, LoopState } from "./route.ts";
 
-/** One held harness, as the daemon sends it. `backoff` is true when no reset time was given. */
-export interface HarnessLimit {
-  harness: HarnessId;
-  /** ISO time the hold ends. */
-  until: string;
-  backoff: boolean;
-}
+export type { HarnessLimit };
 
 const NAMES: Record<HarnessId, string> = {
   "claude-code": "Claude Code",
@@ -21,28 +15,36 @@ const NAMES: Record<HarnessId, string> = {
   grok: "Grok",
 };
 
-/** The display name of a harness, such as "Claude Code". */
-export function harnessName(id: HarnessId): string {
-  return NAMES[id] ?? id;
-}
-
 const pad = (n: number) => String(n).padStart(2, "0");
 
-/** The reset time, "18:37", in local time. */
-export function limitClock(limit: HarnessLimit): string {
-  const d = new Date(limit.until);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+/** The words of a hold, kept apart so a narrow header can drop the name next to its logo. */
+export interface LimitParts {
+  /** "Claude Code limited " */
+  name: string;
+  /** "until 18:37", in local time. */
+  until: string;
+  /** " (backoff)" when the harness gave no reset time, else "". */
+  backoff: string;
 }
 
-/** "Claude Code limited until 18:37", plus " (backoff)" when no reset time was given. */
+export function limitParts(limit: HarnessLimit): LimitParts {
+  const d = new Date(limit.until);
+  return {
+    name: `${NAMES[limit.harness]} limited `,
+    until: `until ${pad(d.getHours())}:${pad(d.getMinutes())}`,
+    backoff: limit.backoff ? " (backoff)" : "",
+  };
+}
+
+/** "Claude Code limited until 18:37", plus " (backoff)" with no reset time. */
 export function limitText(limit: HarnessLimit): string {
-  const backoff = limit.backoff ? " (backoff)" : "";
-  return `${harnessName(limit.harness)} limited until ${limitClock(limit)}${backoff}`;
+  const p = limitParts(limit);
+  return p.name + p.until + p.backoff;
 }
 
 /**
- * The holds still in force. A hold leaves at its reset time on the shared clock, so the
- * text goes once, before the daemon drops the hold on its next tick.
+ * The holds still in force, in the daemon's order. A hold leaves at its reset time on the
+ * shared clock, so the text goes once, before the daemon drops the hold on its next tick.
  */
 export function activeLimits(
   limits: readonly HarnessLimit[] | undefined,
@@ -51,27 +53,22 @@ export function activeLimits(
   return (limits ?? []).filter((l) => Date.parse(l.until) > now.getTime());
 }
 
-/** The header's entries: one text per held harness, in the daemon's order. */
-export function holdTexts(limits: readonly HarnessLimit[] | undefined, now: Date): string[] {
-  return activeLimits(limits, now).map(limitText);
-}
-
 /**
- * The hold an agent row shows. An agent that runs while its harness is held runs on its
- * fallback harness (MET-81), so that row shows nothing extra.
+ * The hold an agent row shows, from the holds in force. An agent that runs while its
+ * harness is held runs on its fallback harness (MET-81), so that row shows nothing extra.
  */
 export function agentLimit(
   agent: Pick<AgentView, "harness" | "runs">,
-  limits: readonly HarnessLimit[] | undefined,
-  now: Date,
+  holds: readonly HarnessLimit[],
 ): HarnessLimit | undefined {
   if (agent.runs.length > 0) return undefined;
-  return activeLimits(limits, now).find((l) => l.harness === agent.harness);
+  return holds.find((l) => l.harness === agent.harness);
 }
 
 /**
  * Apply a live update to the loop state. An update with only `limits` waits for the first
- * GET /api/loop, so it never stands in for the setup state that opens Settings (MET-28).
+ * GET /api/loop, which carries the limits too, so it never stands in for the setup state
+ * that opens Settings (MET-28).
  */
 export function mergeLoop(
   prev: LoopState | undefined,
