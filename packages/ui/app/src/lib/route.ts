@@ -1,4 +1,5 @@
 // The app's views live in the hash, so the daemon serves one page and Back works.
+import type { SelfUpdate } from "./selfUpdate.ts";
 
 export type View = "board" | "agents" | "logs" | "settings";
 export type SettingsPage = "harnesses" | "connections" | "team";
@@ -29,6 +30,8 @@ export function hrefFor(route: Route | { view: View }): string {
 export interface LoopState {
   state: "setup" | "running";
   blocking: string[];
+  /** The last self-update (MET-63); absent when there was none or it is off. */
+  selfUpdate?: SelfUpdate;
 }
 
 /**

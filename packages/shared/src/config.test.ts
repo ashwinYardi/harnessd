@@ -24,7 +24,7 @@ test("parseConfigFile accepts a full config", () => {
     slack: { channel: "#ops", summary_time: "18:30", time_zone: "Europe/Berlin" },
     merge: { protected_paths: ["infra/**"], label: "hold", method: "rebase" },
     qa: { setup_command: "", test_command: "make test" },
-    daemon: { port: 4800 },
+    daemon: { port: 4800, self_update: false },
     agents: {
       backend: {
         role: "backend",
@@ -270,5 +270,13 @@ test("parseConfigFile reads [secrets.<service>] references, never a value (MET-3
   assert.throws(
     () => parseConfigFile({ secrets: { linear: { api_key: 42 } } }, FILE),
     (e: unknown) => e instanceof ConfigError && /expected a reference/.test(e.message),
+  );
+});
+
+test("self-update defaults to on and requires a boolean", () => {
+  assert.equal(DEFAULT_SETTINGS.daemon.self_update, true);
+  rejects(
+    { daemon: { self_update: "false" } },
+    `${FILE}: daemon.self_update: expected true or false, got "false"`,
   );
 });

@@ -1,5 +1,5 @@
-// The live log (MET-18). It follows the end until the reader scrolls up or rests the pointer
-// in it; then it holds still and offers a button with the count of new lines.
+// The live log (MET-18). It follows the end, even under the pointer. When the reader scrolls
+// up, it keeps its lines and offers Jump to latest (MET-61). The rules live in lib/log.ts.
 import type { LogLine } from "@harnessd/shared";
 import { ArrowDownIcon } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
@@ -10,48 +10,25 @@ import { Card } from "../components/ui/card.tsx";
 import { Skeleton } from "../components/ui/skeleton.tsx";
 import { cn } from "../lib/cn.ts";
 import { clockTime } from "../lib/format.ts";
-import { isAtBottom } from "../lib/log.ts";
+import { FOLLOW, isAtBottom, scrollTail, type Tail, tailView } from "../lib/log.ts";
 import { EmptyState, ErrorState, ViewToolbar } from "./common.tsx";
 
 export function Logs({ logs, retry }: { logs: Load<LogLine[]>; retry: () => void }) {
   const body = useRef<HTMLDivElement>(null);
-  const [follow, setFollow] = useState(true);
-  // While the reader is scrolled up, the view keeps its lines: no new line moves them.
-  const [frozen, setFrozen] = useState<LogLine[] | null>(null);
+  const [tail, setTail] = useState<Tail>(FOLLOW);
   const lines = logs.status === "ready" ? logs.data : [];
-  const shown = frozen ?? lines;
-  const unseen = frozen ? lines.filter((l) => l.seq > (frozen.at(-1)?.seq ?? 0)).length : 0;
+  const { follow, lines: shown } = tailView(tail, lines);
 
   // Runs when lines arrive, not on every clock tick.
   // biome-ignore lint/correctness/useExhaustiveDependencies: re-run only when lines arrive
   useLayoutEffect(() => {
     const el = body.current;
     if (el && follow) el.scrollTop = el.scrollHeight;
-  }, [shown.length, follow]);
+  }, [shown.at(-1)?.seq, follow]);
 
   function onScroll() {
     const el = body.current;
-    if (!el) return;
-    const bottom = isAtBottom(el);
-    if (bottom && !follow) {
-      setFrozen(null);
-      setFollow(true);
-    } else if (!bottom && follow) {
-      setFrozen(lines);
-      setFollow(false);
-    }
-  }
-
-  const [resting, setResting] = useState(false);
-  function hold(on: boolean) {
-    setResting(on);
-    if (!follow) return;
-    setFrozen(on ? lines : null);
-  }
-
-  function jump() {
-    setFrozen(null);
-    setFollow(true);
+    if (el) setTail((t) => scrollTail(t, isAtBottom(el), lines));
   }
 
   return (
@@ -86,8 +63,6 @@ export function Logs({ logs, retry }: { logs: Load<LogLine[]>; retry: () => void
               aria-label="Live log"
               aria-live="off"
               className="h-full overflow-y-auto py-2 outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
-              onPointerEnter={() => hold(true)}
-              onPointerLeave={() => hold(false)}
               onScroll={onScroll}
               ref={body}
               role="log"
@@ -118,15 +93,19 @@ export function Logs({ logs, retry }: { logs: Load<LogLine[]>; retry: () => void
               </ol>
             </div>
           </Card>
-          {(!follow || (resting && unseen > 0)) && (
+          {!follow && (
             <Button
               className="absolute right-8 bottom-8 shadow-md/10"
-              onClick={jump}
+              onClick={() => {
+                // The button goes away, so focus moves to the log it scrolls.
+                body.current?.focus();
+                setTail(FOLLOW);
+              }}
               size="sm"
               variant="outline"
             >
               <ArrowDownIcon aria-hidden="true" />
-              {unseen > 0 ? `${unseen} new ${unseen === 1 ? "line" : "lines"}` : "Latest"}
+              Jump to latest
             </Button>
           )}
         </div>
