@@ -395,6 +395,14 @@ test("a limit in the result event ends the run as limited with the reset time", 
   assert.equal(result.error, "Claude AI usage limit reached|1763660400");
 });
 
+test("a reset time beyond the error summary survives a long limit message", async () => {
+  const { run: r } = run("limit-result-long");
+  const result = await r.result;
+  assert.equal(result.status, "limited");
+  assert.equal(result.resetAt, "2025-11-20T17:40:00.000Z");
+  assert.match(result.error ?? "", /…$/);
+});
+
 test("a limit on stderr ends the run as limited", async () => {
   const { run: r } = run("limit-stderr");
   const result = await r.result;
@@ -442,7 +450,7 @@ test("is_error with subtype success reports the result text, never 'success'", a
   assertRealReason(result.error);
 });
 
-test("an empty error result falls back to the last stderr line", async () => {
+test("stderr explains an empty error result with a generic failure subtype", async () => {
   const { run: r } = run("error-stderr");
   const result = await r.result;
   assert.equal(result.status, "error");

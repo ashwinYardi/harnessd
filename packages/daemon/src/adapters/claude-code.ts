@@ -170,8 +170,8 @@ class StreamJsonParser implements LineParser {
   #errorReason(exitCode: number | null): string {
     return (
       this.#errorResultText() ??
-      this.errorSubtype ??
       this.#lastStderr ??
+      this.errorSubtype ??
       (exitCode !== null && exitCode !== 0 ? `exited with code ${exitCode}` : undefined) ??
       (this.isError ? "harness reported an error" : "no result event")
     );
