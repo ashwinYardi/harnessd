@@ -1,9 +1,10 @@
 // Serves the built UI with synthetic data, so the UI can be checked without Linear or a
 // harness. The data is made up. Usage, after `pnpm build`:
 //   node scripts/demo.ts [--port 4848] [--empty] [--broken] [--slow] [--setup] [--static]
-//   [--self-update pending|done|failed|blocked]
+//   [--limited] [--self-update pending|done|failed|blocked]
 // --setup makes the harness checks fail, as on a fresh machine.
 // --self-update <pending|done|failed|blocked> adds the last self-update to GET /api/loop (MET-67).
+// --limited holds Claude Code until an hour from now and Codex on a backoff (MET-70).
 // --static serves no live event stream, so a page scanner such as `impeccable detect <url>`
 // sees the network go idle. The page loads its data once and shows the stream as down.
 
@@ -40,6 +41,7 @@ const empty = flag("empty");
 const broken = flag("broken");
 const slow = flag("slow");
 const setup = flag("setup");
+const limited = flag("limited");
 const staticMode = flag("static");
 
 const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
@@ -398,6 +400,7 @@ const selfUpdate = selfUpdateState
       ...(selfUpdateState === "failed" ? { error: "pnpm build exited 1" } : {}),
     }
   : undefined;
+const inMinutes = (m: number) => new Date(Date.now() + m * 60_000).toISOString();
 const loopRoutes: Route[] = [
   {
     method: "GET",
@@ -408,6 +411,12 @@ const loopRoutes: Route[] = [
         state: started ? "running" : "setup",
         blocking: started ? [] : blocking(),
         ...(selfUpdate ? { selfUpdate } : {}),
+        ...(limited && {
+          limits: [
+            { harness: "claude-code", until: inMinutes(60), backoff: false },
+            { harness: "codex", until: inMinutes(15), backoff: true },
+          ],
+        }),
       };
     },
   },

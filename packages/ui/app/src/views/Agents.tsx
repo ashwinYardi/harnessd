@@ -11,6 +11,7 @@ import { Skeleton } from "../components/ui/skeleton.tsx";
 import { type RowProps, usePin } from "../hooks/usePin.ts";
 import { cn } from "../lib/cn.ts";
 import { budgetText, budgetUsed, duration, tokens } from "../lib/format.ts";
+import { agentLimit, type HarnessLimit, limitText } from "../lib/limits.ts";
 import { EmptyState, ErrorState, ViewToolbar } from "./common.tsx";
 
 /** Past this share of its budget a run is marked, so a timeout is no surprise. */
@@ -86,11 +87,14 @@ function AgentName({ agent, rows }: { agent: AgentView; rows: number }) {
 
 function AgentRows({
   group,
+  limits,
   live,
   now,
   rowProps,
 }: {
   group: AgentGroup;
+  /** Holds in force. */
+  limits: readonly HarnessLimit[];
   /** Keys of the rows in the newest snapshot. A pinned run not in it has ended. */
   live: ReadonlySet<string>;
   now: Date;
@@ -107,11 +111,13 @@ function AgentRows({
       {rows.map(({ key, run }, i) => {
         const name = i === 0 && <AgentName agent={agent} rows={rows.length} />;
         if (!run) {
+          // A held harness says why the agent is idle (MET-70): a quiet state, not an error.
+          const hold = agentLimit(agent, limits);
           return (
             <tr className="border-t" key={key} {...rowProps(key)}>
               {name}
-              <td className="px-4 py-2.5 text-muted-foreground" colSpan={4}>
-                Idle
+              <td className="truncate px-4 py-2.5 text-muted-foreground" colSpan={4}>
+                {hold ? limitText(hold) : "Idle"}
               </td>
             </tr>
           );
@@ -162,10 +168,13 @@ function AgentRows({
 
 export function Agents({
   agents,
+  limits,
   retry,
   now,
 }: {
   agents: Load<AgentsSnapshot>;
+  /** Holds in force. */
+  limits: readonly HarnessLimit[];
   retry: () => void;
   now: Date;
 }) {
@@ -245,6 +254,7 @@ export function Agents({
                     <AgentRows
                       group={group}
                       key={group.id}
+                      limits={limits}
                       live={live}
                       now={now}
                       rowProps={rowProps}

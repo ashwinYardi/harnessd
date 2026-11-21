@@ -1,15 +1,19 @@
 // The header across the content: the view title, the live state and the kill switch.
 // While paused, it becomes an amber band, so the state shows from across the room.
+// A harness held by its usage limit shows as quiet text next to the loop state (MET-70).
 
 import { PlayIcon } from "lucide-react";
 import type { Connection } from "../api.ts";
+import { ServiceLogo } from "../components/service-logo.tsx";
 import { Badge } from "../components/ui/badge.tsx";
 import { Button } from "../components/ui/button.tsx";
 import { Spinner } from "../components/ui/spinner.tsx";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { cn } from "../lib/cn.ts";
 import { clockTime, sinceText } from "../lib/format.ts";
+import { type HarnessLimit, limitParts, limitText } from "../lib/limits.ts";
 import type { PauseView } from "../lib/pause.ts";
+import { harnessService } from "../lib/services.ts";
 import { PauseButton } from "./PauseButton.tsx";
 
 const CONNECTION: Record<Connection, { text: string; dot: string; hint: string }> = {
@@ -29,6 +33,8 @@ interface AppHeaderProps {
   onTogglePause: () => void;
   connection: Connection;
   lastPollAt: string | null | undefined;
+  /** Harness holds in force; one entry each. */
+  limits: readonly HarnessLimit[];
   needsYou: number;
   boardDown: boolean;
   now: Date;
@@ -46,6 +52,7 @@ export function AppHeader({
   onTogglePause,
   connection,
   lastPollAt,
+  limits,
   needsYou,
   boardDown,
   now,
@@ -70,13 +77,16 @@ export function AppHeader({
             render={
               <button
                 type="button"
-                className="inline-flex min-h-6 min-w-6 cursor-default items-center justify-center gap-1.5 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="inline-flex min-h-6 min-w-6 shrink-0 cursor-default items-center justify-center gap-1.5 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
               />
             }
             aria-label={`Connection: ${c.text}. ${c.hint}`}
           >
             <span aria-hidden="true" className={cn("size-1.5 rounded-full", c.dot)} />
-            <span className="hidden sm:inline">{c.text}</span>
+            {/* While a hold shows, the dot and its tooltip carry the state below lg. */}
+            <span className={cn("hidden", limits.length > 0 ? "lg:inline" : "sm:inline")}>
+              {c.text}
+            </span>
           </TooltipTrigger>
           <TooltipContent side="bottom">{c.hint}</TooltipContent>
         </Tooltip>
@@ -92,9 +102,39 @@ export function AppHeader({
             <span className="text-warning-foreground">Pause state unknown: {pauseUnknown}</span>
           )}
         </p>
-        {/* Outside the live region: it changes every second. */}
+        {/* Always in the tree, so a screen reader hears a hold start and end. Empty, it
+            gives back its flex gap, so the header does not move. */}
+        <p className="flex min-w-0 items-center gap-2 empty:-ml-3 lg:gap-3" role="status">
+          {limits.map((h) => {
+            const service = harnessService(h.harness);
+            const text = limitText(h);
+            const parts = limitParts(h);
+            // Below lg the logo names the harness: "until 18:37" shows. The title and a
+            // screen reader keep the whole text.
+            const narrow = service ? "sr-only lg:not-sr-only" : undefined;
+            return (
+              <span
+                className={cn(
+                  "inline-flex min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap lg:shrink",
+                  paused && "text-warning-foreground",
+                )}
+                key={h.harness}
+                // A narrow header cuts the text; the pointer gets it whole.
+                title={text}
+              >
+                {service && <ServiceLogo className="size-3.5" service={service} />}
+                <span className="truncate">
+                  <span className={narrow}>{parts.name}</span>
+                  <span className="tabular-nums">{parts.until}</span>
+                  {parts.backoff && <span className={narrow}>{parts.backoff}</span>}
+                </span>
+              </span>
+            );
+          })}
+        </p>
+        {/* Outside the live region: it changes every second. A hold needs the room more. */}
         {!paused && !pauseUnknown && (
-          <span className="hidden truncate md:inline">
+          <span className={cn("hidden truncate", limits.length > 0 ? "xl:inline" : "md:inline")}>
             {lastPollAt ? `Last poll ${sinceText(lastPollAt, now)}` : "No poll yet"}
           </span>
         )}
