@@ -45,7 +45,7 @@ import {
   systemClock,
 } from "./loop.ts";
 import { formatNotice } from "./notifier.ts";
-import { type ShipInput, type ShipRun, shipPart } from "./ship.ts";
+import { type ShipInput, type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import { partMarker, readPartMarker } from "./split.ts";
 import { createFileLoopStore, emptyLoopState, type LoopState, type LoopStore } from "./state.ts";
 
@@ -2918,6 +2918,59 @@ test("an open PR is pushed to and not created twice", async () => {
   assert.equal(t.gh.createdPrs.length, 0);
   const branch = `${part.key.toLowerCase()}-ship-the-run`;
   assert.notEqual(remoteGit(r.remote, "rev-parse", branch), localHead);
+});
+
+test("a self-update waits for the ship step to finish", async () => {
+  const f = fakeUpdater();
+  let release: (result: ShipResult) => void = () => {};
+  const held = new Promise<ShipResult>((resolve) => {
+    release = resolve;
+  });
+  let enterShip: () => void = () => {};
+  const started = new Promise<void>((resolve) => {
+    enterShip = resolve;
+  });
+  const ship: ShipRun = async () => {
+    enterShip();
+    return held;
+  };
+  const t = setup({ extra: { ...f.extra, ship } });
+  await approved(t);
+
+  const part = t.linear.add({
+    title: "Ship the run",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  // Keep the approved PR from merging in the dispatch tick.
+  t.gh.statuses[7] = { checks: [{ name: "CI / test", state: "pending", detail: "IN_PROGRESS" }] };
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+
+  // A merge to the default branch now asks for an update while the part runs.
+  f.u.target = { from: FROM, to: TO };
+  t.gh.statuses[7] = { state: "MERGED" };
+  await t.loop.tick();
+  assert.equal(t.memory.state.selfUpdate?.state, "pending");
+  assert.deepEqual(f.u.applied, [], "the part is in flight");
+
+  t.adapter.pending.at(-1)?.finish("ok", undefined, "Add it.");
+  await started; // the ship step is waiting on the push and the PR
+
+  // A tick during the ship must not restart the daemon.
+  await t.loop.tick();
+  assert.deepEqual(f.u.applied, [], "the run is still shipping");
+  assert.deepEqual(
+    t.memory.state.inFlight.map((e) => e.issueKey),
+    [part.key],
+    "the run stays in flight until its work is recorded",
+  );
+
+  // The ship returns: the run is recorded, then the next tick is the safe point.
+  release({ ok: true, committed: true, prUrl: "https://github.test/pr", created: true });
+  await t.loop.idle();
+  assert.equal(part.state, "In Review");
+  assert.deepEqual(t.memory.state.inFlight, []);
+  await t.loop.tick();
+  assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }]);
 });
 
 test("a synced file stays out of the daemon's commit", async () => {

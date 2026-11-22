@@ -572,82 +572,95 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     result: RunResult,
     deferred = false,
   ): Promise<void> {
-    // Keep the live entry during the move so a tick cannot try to re-queue it in parallel.
-    const stopped = entry.pausedAt !== undefined && result.status !== "ok";
-    if (stopped) await requeueStopped(s, entry);
-    live.delete(entry.issueId);
-    syncWatch();
-    if (stopped) return;
-    s.inFlight = s.inFlight.filter((e) => e !== entry);
+    // The run stays in flight until its work is recorded. A tick reads these entries before
+    // it re-queues a run or applies a self-update, so neither can restart the daemon under
+    // the ship step (MET-113, MET-109). The entry is dropped once, at the end.
     const id = entry.issueId;
-    // The daemon ships an ok part run: commit, push and open or update the PR (MET-109).
-    // It runs before the worktree is removed and before the move to In Review.
-    let outcome: RunResult = result;
-    if (result.status === "ok" && entry.role !== "qa" && entry.worktree !== "") {
-      const env = runEnvs.get(entry.issueId);
-      const title = runTitles.get(entry.issueId) ?? entry.issueKey;
-      let shipped: ShipResult;
-      try {
-        shipped = await ship({
-          worktree: entry.worktree,
-          branch: entry.branch,
-          issueKey: entry.issueKey,
-          title,
-          ...(entry.issueUrl ? { issueUrl: entry.issueUrl } : {}),
-          ...(result.finalText ? { finalText: result.finalText } : {}),
-          ...(env ? { env } : {}),
-          github,
-        });
-      } catch (error) {
-        shipped = { ok: false, error: `push failed: ${oneLine(message(error))}` };
+    let drop = true;
+    try {
+      const stopped = entry.pausedAt !== undefined && result.status !== "ok";
+      if (stopped) {
+        // A failed move keeps the entry: the next tick's re-queue tries again.
+        if (!(await requeueStopped(s, entry))) drop = false;
+        return;
       }
-      if (shipped.ok) {
-        log(`${entry.issueKey}: ${shipped.created ? "opened" : "updated"} PR ${shipped.prUrl}`);
-      } else {
-        outcome = { ...result, status: "error", error: shipped.error };
+      // The daemon ships an ok part run: commit, push and open or update the PR (MET-109).
+      // It runs before the worktree is removed and before the move to In Review.
+      let outcome: RunResult = result;
+      if (result.status === "ok" && entry.role !== "qa" && entry.worktree !== "") {
+        const env = runEnvs.get(entry.issueId);
+        const title = runTitles.get(entry.issueId) ?? entry.issueKey;
+        let shipped: ShipResult;
+        try {
+          shipped = await ship({
+            worktree: entry.worktree,
+            branch: entry.branch,
+            issueKey: entry.issueKey,
+            title,
+            ...(entry.issueUrl ? { issueUrl: entry.issueUrl } : {}),
+            ...(result.finalText ? { finalText: result.finalText } : {}),
+            ...(env ? { env } : {}),
+            github,
+          });
+        } catch (error) {
+          shipped = { ok: false, error: `push failed: ${oneLine(message(error))}` };
+        }
+        if (shipped.ok) {
+          log(`${entry.issueKey}: ${shipped.created ? "opened" : "updated"} PR ${shipped.prUrl}`);
+        } else {
+          outcome = { ...result, status: "error", error: shipped.error };
+        }
       }
-    }
-    runEnvs.delete(entry.issueId);
-    runTitles.delete(entry.issueId);
-    if (entry.worktree !== "") {
-      await safely(`remove the worktree of ${entry.issueKey}`, () =>
-        worktrees.remove(entry.worktree),
-      );
-    }
-    if (outcome.status === "ok") {
-      delete s.attempts[id];
-      delete s.qaFeedback[id];
-      await safely(`move ${entry.issueKey} to In Review`, () => linear.moveTo(id, "In Review"));
-      log(`${entry.issueKey}: done, In Review`);
-    } else if (outcome.status === "cancelled" || outcome.status === "limited") {
-      // A usage limit is no task failure: no attempt counted, no comment. noteRun held the harness (MET-70).
-      await safely(`re-queue ${entry.issueKey}`, () => linear.moveTo(id, "Ready"));
-      if (!deferred) log(`${entry.issueKey}: ${outcome.status}, re-queued`);
-    } else {
-      const failures = (s.attempts[id] ?? 0) + 1;
-      const why = `${outcome.status}${outcome.error ? `: ${oneLine(outcome.error)}` : ""}`;
-      if (failures >= MAX_RUN_ATTEMPTS) {
+      runEnvs.delete(entry.issueId);
+      runTitles.delete(entry.issueId);
+      if (entry.worktree !== "") {
+        await safely(`remove the worktree of ${entry.issueKey}`, () =>
+          worktrees.remove(entry.worktree),
+        );
+      }
+      if (outcome.status === "ok") {
         delete s.attempts[id];
-        await escalate(
-          { id, key: entry.issueKey, ...(entry.issueUrl ? { url: entry.issueUrl } : {}) },
-          "run failed",
-          `the ${entry.agent} run failed twice (${why})`,
-          `**harnessd**: the ${entry.agent} run failed twice (${why}), so this needs a human (D-014).`,
-        );
-        log(`${entry.issueKey}: failed twice (${why}), Needs input`);
-      } else {
-        s.attempts[id] = failures;
-        await safely(`comment on ${entry.issueKey}`, () =>
-          linear.comment(
-            id,
-            `**harnessd**: the ${entry.agent} run failed (${why}). Back to Ready for one retry (D-014).`,
-          ),
-        );
+        delete s.qaFeedback[id];
+        await safely(`move ${entry.issueKey} to In Review`, () => linear.moveTo(id, "In Review"));
+        log(`${entry.issueKey}: done, In Review`);
+      } else if (outcome.status === "cancelled" || outcome.status === "limited") {
+        // A usage limit is no task failure: no attempt counted, no comment. noteRun held the harness (MET-70).
         await safely(`re-queue ${entry.issueKey}`, () => linear.moveTo(id, "Ready"));
-        log(`${entry.issueKey}: failed (${why}), retrying once`);
+        if (!deferred) log(`${entry.issueKey}: ${outcome.status}, re-queued`);
+      } else {
+        const failures = (s.attempts[id] ?? 0) + 1;
+        const why = `${outcome.status}${outcome.error ? `: ${oneLine(outcome.error)}` : ""}`;
+        if (failures >= MAX_RUN_ATTEMPTS) {
+          delete s.attempts[id];
+          await escalate(
+            { id, key: entry.issueKey, ...(entry.issueUrl ? { url: entry.issueUrl } : {}) },
+            "run failed",
+            `the ${entry.agent} run failed twice (${why})`,
+            `**harnessd**: the ${entry.agent} run failed twice (${why}), so this needs a human (D-014).`,
+          );
+          log(`${entry.issueKey}: failed twice (${why}), Needs input`);
+        } else {
+          s.attempts[id] = failures;
+          await safely(`comment on ${entry.issueKey}`, () =>
+            linear.comment(
+              id,
+              `**harnessd**: the ${entry.agent} run failed (${why}). Back to Ready for one retry (D-014).`,
+            ),
+          );
+          await safely(`re-queue ${entry.issueKey}`, () => linear.moveTo(id, "Ready"));
+          log(`${entry.issueKey}: failed (${why}), retrying once`);
+        }
+      }
+    } finally {
+      // Drop the run last, after the ship and the Linear move. No await runs between the
+      // first three lines, so a tick cannot see half a finished run.
+      live.delete(id);
+      syncWatch();
+      if (drop) {
+        s.inFlight = s.inFlight.filter((e) => e !== entry);
+        await save();
       }
     }
-    await save();
   }
 
   async function dispatch(
