@@ -27,7 +27,10 @@ export interface SyncOptions {
   home?: string;
   /** The run agent’s OpenCode permission overrides, when syncing a worktree. */
   opencodePermission?: OpenCodePermission;
-  /** Skill names to leave out of this sync, such as impeccable for a non-UI run (D-040). */
+  /**
+   * Skill names to leave out of this sync, such as impeccable for a non-UI run (D-040).
+   * Sync only skips generating them; a worktree run also removes the folder (worktree-sync.ts).
+   */
   omitSkills?: readonly string[];
   /** Limit MCP servers to the built-in memory server, for a worktree run (D-040). */
   memoryMcpOnly?: boolean;

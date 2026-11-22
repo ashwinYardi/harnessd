@@ -210,6 +210,68 @@ test("a worktree run gets its role's skill set and only the memory MCP server", 
   assert.equal(await exists(skill("impeccable")), true, "the UI run gets the full pack");
 });
 
+test("a committed skill folder is withheld from a non-UI run and git stays clean", async () => {
+  // A worktree cut from main already holds the skills the repo commits, so omitting the
+  // skill from the generated pack is not enough (D-040).
+  const root = await mkdtemp(join(tmpdir(), "harnessd-wtsync-committed-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  const globalDir = join(root, "global");
+  await mkdir(join(repo, ".harnessd"), { recursive: true });
+  await writeFile(join(repo, ".harnessd", "AGENTS.md"), "Workspace rules.\n");
+  await mkdir(join(repo, ".claude", "skills", "impeccable"), { recursive: true });
+  await mkdir(join(repo, ".agents", "skills", "impeccable"), { recursive: true });
+  await mkdir(join(repo, ".claude", "skills", "tdd"), { recursive: true });
+  const skill = "---\nname: x\n---\nBody.\n";
+  await writeFile(join(repo, ".claude", "skills", "impeccable", "SKILL.md"), skill);
+  await writeFile(join(repo, ".agents", "skills", "impeccable", "SKILL.md"), skill);
+  await writeFile(join(repo, ".claude", "skills", "tdd", "SKILL.md"), skill);
+  await writeFile(join(repo, ".gitignore"), ".harnessd/\n");
+  // Ignore the run's own excludes env: it can hide `.agents/` from `git add`.
+  const cleanEnv = { ...process.env, GIT_CONFIG_COUNT: "0" };
+  git(repo, ["init", "-q", "-b", "main"], cleanEnv);
+  git(repo, ["add", "-A"], cleanEnv);
+  git(repo, ["commit", "-q", "-m", "init"], cleanEnv);
+  await mkdir(join(globalDir, "skills", "tdd"), { recursive: true });
+  await writeFile(join(globalDir, "skills", "tdd", "SKILL.md"), skill);
+
+  const backend = join(root, "wt-backend");
+  git(repo, ["worktree", "add", "-q", "-b", "met-3", backend], cleanEnv);
+  const { env, removed } = await syncWorktree({
+    repoDir: repo,
+    globalDir,
+    worktree: backend,
+    runId: "backend-run",
+    agent: { role: "backend" },
+  });
+  assert.deepEqual(removed, [".claude/skills/impeccable", ".agents/skills/impeccable"]);
+  const exists = (path: string) =>
+    readFile(path, "utf8").then(
+      () => true,
+      () => false,
+    );
+  for (const dir of [".claude/skills", ".agents/skills"]) {
+    assert.equal(await exists(join(backend, dir, "impeccable", "SKILL.md")), false, dir);
+  }
+  assert.equal(await exists(join(backend, ".claude/skills/tdd/SKILL.md")), true);
+  assert.equal(git(backend, ["status", "--porcelain", "--untracked-files=all"], env), "");
+  git(backend, ["add", "-A"], env);
+  assert.equal(git(backend, ["diff", "--cached", "--name-only"], env), "");
+  // The main checkout keeps the committed folder.
+  assert.equal(await exists(join(repo, ".claude/skills/impeccable/SKILL.md")), true);
+
+  // A later frontend run in the same worktree gets the committed folder back.
+  await syncWorktree({
+    repoDir: repo,
+    globalDir,
+    worktree: backend,
+    runId: "frontend-again",
+    agent: { role: "frontend" },
+  });
+  assert.equal(await exists(join(backend, ".claude/skills/impeccable/SKILL.md")), true);
+  assert.equal(git(backend, ["status", "--porcelain", "--untracked-files=all"], env), "");
+});
+
 test("worktree sync applies the run agent's OpenCode permissions", async () => {
   const f = await fixture();
   await syncWorktree({

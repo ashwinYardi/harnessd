@@ -3,14 +3,17 @@
 // layer, then the main repo's `.harnessd/`. The written files stay out of the agent's
 // commits: untracked ones through a per-run excludes file passed in the run's env, tracked
 // ones through `git update-index --skip-worktree` in that worktree only. The shared
-// `.git/info/exclude` and the repo config are never touched.
+// `.git/info/exclude` and the repo config are never touched. A skill the run's role leaves
+// out is removed from the worktree, committed or not, and the removal is hidden the same
+// way (D-040).
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import type { ResolvedAgentConfig } from "@harnessd/shared";
 import { globalStateDir } from "../control/files.ts";
+import { SKILL_ROOTS } from "../sync/generate.ts";
 import { syncRepo } from "../sync/sync.ts";
 import { excludesEnv } from "../worktrees/excludes.ts";
 
@@ -34,6 +37,8 @@ export interface WorktreeSyncInput {
 export interface WorktreeSyncResult {
   /** Paths sync wrote this time, relative to the worktree. */
   changed: string[];
+  /** Skill folders this run removed from the worktree, relative to it (D-040). */
+  removed: string[];
   /** The run's excludes file. */
   excludesFile: string;
   /** Merge into the run's env: points `core.excludesFile` at `excludesFile`. */
@@ -88,6 +93,62 @@ export function withheldSkills(role: ResolvedAgentConfig["role"] | undefined): s
   return role === "frontend" ? [] : [...SKILLS_WITHHELD_FROM_NON_UI_RUNS];
 }
 
+async function exists(path: string): Promise<boolean> {
+  return stat(path).then(
+    () => true,
+    () => false,
+  );
+}
+
+/** Every file git tracks under `folder`, so its removal can stay invisible. */
+async function trackedUnder(
+  worktree: string,
+  folder: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string[]> {
+  const listed = await git(worktree, ["ls-files", "-z", "--", folder], env);
+  return listed.split("\0").filter(Boolean);
+}
+
+/**
+ * Removes a withheld skill folder from the worktree, committed or not (D-040). A worktree
+ * cut from `main` already holds the skill folders the repo commits, so leaving the skill
+ * off the generated pack is not enough. The main checkout is never touched.
+ */
+async function withholdSkill(
+  worktree: string,
+  folder: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string | undefined> {
+  if (!(await exists(join(worktree, folder)))) return undefined;
+  const tracked = await trackedUnder(worktree, folder, env);
+  if (tracked.length > 0) {
+    await git(worktree, ["update-index", "--skip-worktree", "--", ...tracked], env);
+  }
+  await rm(join(worktree, folder), { recursive: true, force: true });
+  return folder;
+}
+
+/**
+ * Puts back a committed skill folder that an earlier withheld run removed, so a frontend
+ * run that reuses the worktree gets the full pack again.
+ */
+async function restoreSkill(
+  worktree: string,
+  folder: string,
+  env: NodeJS.ProcessEnv,
+): Promise<void> {
+  if (await exists(join(worktree, folder))) return;
+  const tracked = await trackedUnder(worktree, folder, env);
+  if (tracked.length === 0) return;
+  // The files stay skip-worktree: they equal HEAD, so git sees no change either way.
+  await git(
+    worktree,
+    ["checkout-index", "-f", "--ignore-skip-worktree-bits", "--", ...tracked],
+    env,
+  );
+}
+
 /**
  * Syncs the merged native files into `worktree` and hides them from git for this run.
  * Throws when sync fails; the caller fails the run before the agent starts.
@@ -96,16 +157,30 @@ export async function syncWorktree(input: WorktreeSyncInput): Promise<WorktreeSy
   const env = input.env ?? process.env;
   // Read before the run's env exists, so this is the owner's own setting.
   const owner = await ownerExcludes(input.worktree, env);
+  const withheld = withheldSkills(input.agent?.role);
+  // Before sync: a full-pack run may reuse a worktree that a withheld run cut down.
+  for (const name of SKILLS_WITHHELD_FROM_NON_UI_RUNS) {
+    if (withheld.includes(name)) continue;
+    for (const root of SKILL_ROOTS) await restoreSkill(input.worktree, `${root}/${name}`, env);
+  }
   const { changed, paths } = await syncRepo({
     repoDir: input.worktree,
     workspaceDir: join(input.repoDir, ".harnessd"),
     globalDir: input.globalDir,
-    omitSkills: withheldSkills(input.agent?.role),
+    omitSkills: withheld,
     memoryMcpOnly: true,
     ...(input.agent?.opencode_permission === undefined
       ? {}
       : { opencodePermission: input.agent.opencode_permission }),
   });
+  // After sync: remove the folders that are already in the worktree, committed or generated.
+  const removed: string[] = [];
+  for (const name of withheld) {
+    for (const root of SKILL_ROOTS) {
+      const folder = await withholdSkill(input.worktree, `${root}/${name}`, env);
+      if (folder !== undefined) removed.push(folder);
+    }
+  }
 
   const listed =
     paths.length === 0 ? "" : await git(input.worktree, ["ls-files", "-z", "--", ...paths], env);
@@ -123,5 +198,5 @@ export async function syncWorktree(input: WorktreeSyncInput): Promise<WorktreeSy
     excludesFile,
     `${owner}# harnessd: files sync wrote into ${input.worktree}\n${lines.join("\n")}\n`,
   );
-  return { changed, excludesFile, env: excludesEnv(excludesFile, env) };
+  return { changed, removed, excludesFile, env: excludesEnv(excludesFile, env) };
 }

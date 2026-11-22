@@ -1,7 +1,7 @@
 // Measures what one agent run loads (D-040). The numbers are reported in
 // docs/LOOP.md "What an agent run sees"; this test keeps them from drifting silently.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { ConfigLayer, Issue, LinkedIssue, ResolvedAgentConfig } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
@@ -10,6 +10,7 @@ import { buildPartPrompt } from "./dispatch.ts";
 import { buildPlanPrompt } from "./plan.ts";
 import { buildGrillPrompt, type GrillContext } from "./prompt.ts";
 import { buildQaPrompt } from "./qa.ts";
+import { withheldSkills } from "./worktree-sync.ts";
 
 const issues = JSON.parse(
   readFileSync(new URL("./fixtures/issues.json", import.meta.url), "utf8"),
@@ -79,6 +80,28 @@ test("the four prompt kinds stay within their measured size", () => {
   assert.ok(plan < 200_000, `plan ${plan}`);
   assert.ok(part < 20_000, `part ${part}`);
   assert.ok(qa < 60_000, `qa ${qa}`);
+});
+
+test("the committed skill pack a worktree loads loses impeccable for a non-UI run", () => {
+  // A worktree is cut from main, so it starts with the skill folders the repo commits.
+  // Count those, not only the files sync generates (D-040).
+  const dir = new URL("../../../../.claude/skills/", import.meta.url);
+  const names = readdirSync(dir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  const body = (name: string): string => readFileSync(new URL(`${name}/SKILL.md`, dir), "utf8");
+  const withheld = withheldSkills("backend");
+  assert.ok(names.includes("impeccable"));
+  const sum = (list: string[]): number => list.reduce((total, name) => total + size(body(name)), 0);
+
+  const full = report("committed SKILL.md bodies, frontend run", sum(names));
+  const nonUi = report(
+    "committed SKILL.md bodies, non-UI run",
+    sum(names.filter((name) => !withheld.includes(name))),
+  );
+  assert.equal(full - nonUi, size(body("impeccable")));
+  // A non-UI run must stay under the size docs/LOOP.md reports for this repo.
+  assert.ok(nonUi < 60_000, `non-UI skill bodies ${nonUi}`);
 });
 
 test("the worktree sync output is counted by file kind", () => {

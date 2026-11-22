@@ -122,8 +122,8 @@ A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch
 - **OpenCode runs.** An agent with `harness = "opencode"` runs `opencode run --format json --standalone --auto`. The CLI approves pending permission requests and keeps the session running (docs/decisions/D-036-opencode-adapter.md). `OPENCODE_CONFIG_DIR` points to an empty temp folder, so the owner's OpenCode config and global `AGENTS.md` do not load. The run reads `AGENTS.md` and the project skill folders.
 - **The OpenCode gap.** OpenCode 2.0.20 still loads skills from `~/.claude/skills` and `~/.agents/skills`. Impeccable hooks do not run, because OpenCode uses JS plugins, not `hooks.json`. Sync adds the `harnessd-memory` server to `opencode.json`.
 - **Memory.** The prompt has a Memory section. It names `search_notes`, `read_note` and `write_note`, and the two vaults: `<repo>/.harnessd/vault/` and `$HARNESSD_HOME/vault/` (docs/MEMORY.md). The worktree's `.mcp.json` runs `harnessd mcp memory --workspace <main repo>`, so notes outlive the worktree.
-- **Hand-vendored skills.** A skill folder that sync did not generate stays as it is (D-020). Sync prints `kept <folder>` and does not write into it.
-- **Role skill set (D-040).** A worktree run gets the pack for its role: the `frontend` role gets the full pack, and every other role gets the pack without impeccable. The map is built in, not config: `enabled = false` still turns a skill off for everyone. The D-028 hook stays for frontend runs.
+- **Hand-vendored skills.** A skill folder that sync did not generate stays as it is (D-020). Sync prints `kept <folder>` and does not write into it. A worktree run still withholds the skill its role leaves out, even when the repo commits that folder (see the role skill set below).
+- **Role skill set (D-040).** A worktree run gets the pack for its role: the `frontend` role gets the full pack, and every other role gets the pack without impeccable. The map is built in, not config: `enabled = false` still turns a skill off for everyone. A worktree cut from `main` already holds the skill folders the repo commits, so the loop removes a withheld folder from that worktree and marks its tracked files `skip-worktree`; git sees no deletion and the agent commits, pushes and opens the PR as usual. The main checkout is not touched. A later frontend run in the same worktree puts the committed folder back. The D-028 hook stays for frontend runs.
 - **MCP servers (D-040).** A worktree run gets only `harnessd-memory`. A `[mcp.<name>]` server in the config does not load into a worktree run, so its tool list is not sent.
 - **Measured size.** The base prompt is measured, not guessed. The numbers below are from `packages/daemon/src/coordinator/prompt-size.test.ts` and this repo's sync output. A character is about a quarter of a token.
 
@@ -134,8 +134,10 @@ A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch
   | Grill prompt (this repo: spec + 39 decision records) | about 70.7k chars | unchanged: the coordinator needs the spec and the decisions |
   | Plan prompt (this repo) | about 60.2k chars | unchanged: same context as the grill |
   | `AGENTS.md` (this repo, rules included) | about 4.5k chars | unchanged: agents must read the repo rules |
-  | `SKILL.md` bodies, 14 skills | about 63k chars | about 50k chars for a non-UI run: impeccable (about 12.7k chars) is dropped |
+  | `SKILL.md` bodies, 14 committed skills | about 62.5k chars | about 49.8k chars for a non-UI run: impeccable (about 12.7k chars) is dropped |
   | MCP tool lists | every configured server | `harnessd-memory` only |
+
+  The skill row counts the folders a worktree cut from `main` holds, not only the files sync generates. The test is `committed skill pack` in `prompt-size.test.ts`.
 
   **Owner-level gaps, measured and out of scope:** D-032 says Codex still reads `$CODEX_HOME/AGENTS.md` and user skills, because `CODEX_HOME` must hold `auth.json`. D-036 says OpenCode 2.0.20 still loads `~/.claude/skills` and `~/.agents/skills`. The loop cannot remove those files without breaking the owner's sign-in or setup.
 
