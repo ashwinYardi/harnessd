@@ -42,7 +42,13 @@ if (env.FAKE_OC_RECORD) {
     pwd: env.PWD ?? null,
   }));
 }
-if (env.FAKE_OC_FIXTURE) process.stdout.write(fs.readFileSync(env.FAKE_OC_FIXTURE, "utf8"));
+if (env.FAKE_OC_FIXTURE) {
+  const lines = fs.readFileSync(env.FAKE_OC_FIXTURE, "utf8").trimEnd().split("\\n");
+  for (const line of lines) {
+    if (line.startsWith("\\x1b")) process.stderr.write(line + "\\n");
+    else process.stdout.write(line + "\\n");
+  }
+}
 if (env.FAKE_OC_STDERR) process.stderr.write(env.FAKE_OC_STDERR + "\\n");
 if (env.FAKE_OC_HANG === "1") setInterval(() => {}, 1000);
 else process.exitCode = Number(env.FAKE_OC_EXIT ?? "0");
@@ -98,9 +104,9 @@ function readRecord(path: string): Record_ {
   return JSON.parse(readFileSync(path, "utf8"));
 }
 
-const BASE = ["run", "--format", "json", "--standalone", "--auto"];
+const BASE = ["run", "--format", "json", "--standalone"];
 
-test("openCodeArgs runs a standalone, auto-approved JSON run and ends flags with --", () => {
+test("openCodeArgs runs a standalone JSON run with automatic permission rejection and ends flags with --", () => {
   assert.deepEqual(openCodeArgs(task()), [...BASE, "--", "Say hi"]);
 });
 
@@ -397,6 +403,19 @@ test("a missing binary is an error, not a throw", async () => {
   assert.deepEqual(left, before);
 });
 
+test("the CLI rejects a permission request and streams the next step", async () => {
+  const { run: r, record } = run({ fixture: "permission-rejected" });
+  const events = await collect(r);
+  assert.deepEqual(readRecord(record).argv, [...BASE, "--", "Say hi"]);
+  const logs = events.filter((event) => event.type === "log");
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0]?.stream, "stderr");
+  assert.match(logs[0]?.line ?? "", /permission requested: external_directory .*; auto-rejecting/);
+  const result = await r.result;
+  assert.equal(result.status, "ok");
+  assert.equal(result.finalText, "Continued after rejection.");
+});
+
 test("a cancelled Web Search input explains exit 1 after a step", async () => {
   const { run: r } = run({ fixture: "cancelled-input", exit: 1 });
   const events = await collect(r);
@@ -404,7 +423,9 @@ test("a cancelled Web Search input explains exit 1 after a step", async () => {
     events.filter((event) => event.type === "log"),
     [{ type: "log", stream: "stdout", line: "Web Search request cancelled; the run goes on" }],
   );
-  assert.equal((await r.result).status, "ok");
+  const result = await r.result;
+  assert.equal(result.status, "ok");
+  assert.equal(result.finalText, "Continued after cancellation.");
 });
 
 test("a provider auth error after cancelled input still fails the run", async () => {

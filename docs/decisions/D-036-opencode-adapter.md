@@ -8,17 +8,17 @@ Status: draft 2026-11-21. Issue: MET-71 (part 1, MET-91). Follows D-032; it does
 
 **The argv.**
 ```
-opencode run --format json --standalone --auto [-m <provider>/<model>[#variant]] -- <prompt>
+opencode run --format json --standalone [-m <provider>/<model>[#variant]] -- <prompt>
 ```
 - `--format json` gives the event stream that the adapter maps to `AdapterEvent`s.
 - `--standalone` starts a private server for this run. Without it, the run attaches to the owner's background service, which has the owner's config and state.
-- `--auto` approves every permission that is not explicitly denied. No human is there to answer a prompt.
+- In a non-interactive run, OpenCode rejects pending permission requests, writes one warning to stderr, and tells the model to continue. Harnessd streams that warning to the run log. Keep `--auto` off so a pending request gets rejected.
 - `-m` is set only when the agent config sets `model`. The `#variant` part (for example `#high`) sets the thinking level. OpenCode 2.x has no separate `--variant` flag; `-m` takes `provider/model#variant`.
 - `--` ends the flags, so a prompt that starts with `-` is not read as a flag.
 - The run never passes `--continue`, `--session` or `--fork`. Each task is a new session.
 
 **No sandbox.**
-- `--auto` with no OS sandbox is acceptable. Claude Code runs have no OS sandbox either (D-031), and Codex runs use full access (D-032 amendment).
+- OpenCode runs without an OS sandbox, as do Claude Code (D-031) and Codex (D-032 amendment).
 - Each agent still works in its own worktree (D-012).
 
 ## Permissions and input requests (MET-118)
@@ -27,13 +27,15 @@ MET-119 amends the OpenCode sync ownership in D-037. Sync also owns `permission`
 
 | Tool or permission | Default |
 | --- | --- |
+| `*` (fallback, before the specific rules) | Deny |
 | `read`, `edit`, `glob`, `grep`, `list`, `lsp`, `skill`, `task`, `todowrite`, `webfetch`, `websearch` | Allow |
-| `bash` | Allow `*`. Deny `git push *`. |
+| `harnessd_memory_*` | Allow |
+| `bash` | Allow `*`. Deny `git push` and `git push *`. |
 | `external_directory`, `question`, `doom_loop` | Deny |
 
 Owner sync writes the defaults. Worktree sync merges `[agents.<name>.opencode_permission]` over them. Each action is `allow` or `deny`. A move to the OpenCode 2.3.x `permissions` ruleset is a follow-up.
 
-OpenCode handles permission requests and forms inside the CLI. It cancels unsupported input forms, emits a JSON error with the form title, and exits 1 after the session goes idle. The adapter logs the cancellation in one line. It accepts exit 1 when a step started and the cancellation was the only error. A later failure still determines the result.
+OpenCode handles permission requests and forms inside the CLI. The JSON stream carries the result of a tool call, and stderr carries the permission rejection warning. OpenCode cancels unsupported input forms, emits a JSON error with the form title, and exits 1 after the session goes idle. The adapter logs the cancellation in one line. It accepts exit 1 when a step started and the cancellation was the only error. A later failure still determines the result.
 
 Bash can reach paths outside the worktree. OpenCode runs without an OS sandbox, as do Claude Code and Codex.
 

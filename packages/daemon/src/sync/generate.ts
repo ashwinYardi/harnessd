@@ -144,7 +144,9 @@ export function agentMd(text: string): string {
   return `${note}${text}`;
 }
 
+// OpenCode uses the last matching rule. Put the fallback before tool rules.
 const OPENCODE_PERMISSION: OpenCodePermission = {
+  "*": "deny",
   read: "allow",
   edit: "allow",
   glob: "allow",
@@ -156,7 +158,8 @@ const OPENCODE_PERMISSION: OpenCodePermission = {
   todowrite: "allow",
   webfetch: "allow",
   websearch: "allow",
-  bash: { "*": "allow", "git push *": "deny" },
+  "harnessd_memory_*": "allow",
+  bash: { "*": "allow", "git push": "deny", "git push *": "deny" },
   external_directory: "deny",
   question: "deny",
   doom_loop: "deny",

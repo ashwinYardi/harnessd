@@ -37,8 +37,8 @@ export interface OpenCodeOptions {
  */
 export function openCodeArgs(task: Task, options: OpenCodeOptions = {}): string[] {
   // --standalone: a private server for this run, not the owner's background service.
-  // --auto: nobody is there to approve a permission prompt (D-036, as D-031 for Claude).
-  const args = ["run", "--format", "json", "--standalone", "--auto"];
+  // The non-interactive CLI rejects pending permissions and lets the session continue.
+  const args = ["run", "--format", "json", "--standalone"];
   const model = task.model ?? options.model;
   if (model) args.push("-m", model);
   args.push("--", task.prompt);
