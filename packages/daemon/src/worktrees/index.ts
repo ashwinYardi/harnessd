@@ -12,6 +12,7 @@ import { mkdir, open, readdir, readFile, realpath, rename, rm, stat } from "node
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { excludesEnv } from "./excludes.ts";
 
 const run = promisify(execFile);
 
@@ -83,10 +84,10 @@ export function branchName(issueKey: string, title: string): string {
   return slug && budget > 0 ? `${key}-${slug}` : key;
 }
 
-async function git(cwd: string, args: string[]): Promise<string> {
+async function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<string> {
   try {
     const { stdout } = await run("git", ["-C", cwd, ...args], {
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env },
       maxBuffer: 16 * 1024 * 1024,
     });
     return stdout;
@@ -95,6 +96,54 @@ async function git(cwd: string, args: string[]): Promise<string> {
     throw new Error(`git ${args.join(" ")} failed in ${cwd}${stderr ? `: ${stderr}` : ""}`, {
       cause: error,
     });
+  }
+}
+
+/** True when `git rev-parse --verify` finds `ref`. */
+async function refExists(repoDir: string, ref: string): Promise<boolean> {
+  try {
+    await git(repoDir, ["rev-parse", "--verify", "--quiet", ref]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** True when `ancestor` is on the history of `descendant`. */
+async function isAncestor(repoDir: string, ancestor: string, descendant: string): Promise<boolean> {
+  try {
+    await git(repoDir, ["merge-base", "--is-ancestor", ancestor, descendant]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Commits on the worktree's HEAD that `from` does not reach. */
+function commitsAhead(path: string, from: string): Promise<number> {
+  return git(path, ["rev-list", "--count", `${from}..HEAD`]).then((out) => {
+    const n = Number.parseInt(out.trim(), 10);
+    return Number.isInteger(n) && n > 0 ? n : 0;
+  });
+}
+
+/**
+ * The head of `refs/heads/<branch>` on the remote, or undefined when the remote has no
+ * such branch. Asks the remote itself: a local `refs/remotes/origin/<branch>` can outlive
+ * a deleted remote branch and would wrongly report the branch as shipped.
+ */
+async function remoteBranchHead(
+  repoDir: string,
+  branch: string,
+  remote = "origin",
+): Promise<string | undefined> {
+  try {
+    const out = await git(repoDir, ["ls-remote", "--heads", remote, `refs/heads/${branch}`]);
+    const sha = out.trim().split("\n")[0]?.split(/\s+/)[0];
+    return sha !== undefined && /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  } catch {
+    // The remote is unreachable. Treat it as missing: keep rather than lose work.
+    return undefined;
   }
 }
 
@@ -318,7 +367,18 @@ export async function createWorktree(options: CreateWorktreeOptions): Promise<Wo
 
     await mkdir(dirname(path), { recursive: true });
     const resumed = await branchExists(repoDir, branch);
-    const base = options.base ?? "main";
+    // A branch a QA send-back already pushed starts from, or catches up to, its remote
+    // head, so the next daemon push is a fast-forward.
+    const remoteBranch = (await refExists(repoDir, `refs/remotes/origin/${branch}`))
+      ? `origin/${branch}`
+      : undefined;
+    if (resumed && remoteBranch !== undefined) {
+      const inUse = [...registered.values()].some((on) => on === branch);
+      if (!inUse && (await isAncestor(repoDir, branch, remoteBranch))) {
+        await git(repoDir, ["branch", "-f", branch, remoteBranch]);
+      }
+    }
+    const base = !resumed && remoteBranch !== undefined ? remoteBranch : (options.base ?? "main");
     try {
       await git(
         repoDir,
@@ -353,8 +413,8 @@ export interface CheckoutWorktreeOptions {
  * Checks out someone else's branch read-only: fetches `branch` from `remote` and adds
  * `<root>/<repo-name>/<branchName(issueKey, title)>` with a detached HEAD at `sha`, so the
  * branch itself stays free for its owner and is never moved. A leftover worktree at the
- * same path (a crashed run) is replaced. If the fetch fails but `sha` is already present
- * locally, the local commit is used; it is the same commit.
+ * same path is replaced only when it has no unshipped work. If the fetch fails but
+ * `sha` is already present locally, the local commit is used.
  */
 export async function checkoutWorktree(options: CheckoutWorktreeOptions): Promise<Worktree> {
   const root = resolve(options.root ?? defaultWorktreesRoot());
@@ -376,7 +436,18 @@ export async function checkoutWorktree(options: CheckoutWorktreeOptions): Promis
 
   return updateManifest(root, async (manifest) => {
     await git(repoDir, ["worktree", "prune"]);
-    if ((await registeredWorktrees(repoDir)).has(await canonical(path))) {
+    const registered = await registeredWorktrees(repoDir);
+    const registeredPath = await canonical(path);
+    if (registered.has(registeredPath)) {
+      const previous = manifest.entries.find((entry) => entry.path === path);
+      const branch = registered.get(registeredPath) ?? previous?.branch;
+      // A detached checkout is a scratch checkout: judge it the way removeWorktree does.
+      const detached = await git(path, ["symbolic-ref", "-q", "HEAD"]).then(
+        () => false,
+        () => true,
+      );
+      const kept = await keepReason(repoDir, path, branch, "main", undefined, detached);
+      if (kept !== undefined) throw new Error(`worktree kept at ${path}: ${kept}`);
       await teardown(root, repoDir, path);
     } else if (await exists(path)) {
       throw new Error(`${path} exists but is not a git worktree; run recoverOnStartup first`);
@@ -409,6 +480,78 @@ export interface RemoveWorktreeOptions {
   root?: string;
   /** Also delete the branch. Default false: the PR needs it. */
   deleteBranch?: boolean;
+  /**
+   * A throwaway checkout, such as a QA PR head, detached from a branch. Its commits are
+   * judged against the remote branch when one exists, not against the base, because a
+   * PR from a fork keeps its commits on another branch. Uncommitted work is still kept.
+   */
+  scratch?: boolean;
+  /** The run's excludes file, so synced files do not count as uncommitted changes. */
+  excludesFile?: string;
+  /** The branch the task started from, when it has no remote branch. Default "main". */
+  base?: string;
+}
+
+/** Why a worktree was kept: it holds work the remote does not have. */
+export type WorktreeKeepReason = "uncommitted changes" | "commits not on the remote";
+
+export interface RemoveWorktreeResult {
+  removed: boolean;
+  /** Set when the worktree was kept. */
+  kept?: WorktreeKeepReason;
+}
+
+/**
+ * The reason to keep the worktree, or undefined when it is safe to remove. Committed
+ * work counts only when it is not on the remote branch; with no remote branch, every
+ * commit ahead of base is unshipped. A scratch checkout is detached from a PR head, so
+ * its commits may live on a fork: it is judged on the remote branch when one exists,
+ * and otherwise on whether any live remote branch holds its commits.
+ */
+async function keepReason(
+  repoDir: string,
+  path: string,
+  branch: string | undefined,
+  base: string,
+  excludesFile: string | undefined,
+  scratch: boolean,
+): Promise<WorktreeKeepReason | undefined> {
+  const status = await git(
+    path,
+    ["status", "--porcelain", "--untracked-files=all"],
+    excludesFile ? excludesEnv(excludesFile) : undefined,
+  );
+  if (status.trim() !== "") return "uncommitted changes";
+
+  const remoteHead = branch === undefined ? undefined : await remoteBranchHead(repoDir, branch);
+  if (remoteHead !== undefined) {
+    // The remote may name a commit this clone has not fetched. Without it locally we
+    // cannot prove the work is shipped, so keep it.
+    if (!(await refExists(repoDir, `${remoteHead}^{commit}`))) return "commits not on the remote";
+    return (await commitsAhead(path, remoteHead)) > 0 ? "commits not on the remote" : undefined;
+  }
+  if (scratch) {
+    // A tracking ref can outlive a deleted branch. Check the live heads instead.
+    const remotes = (await git(repoDir, ["remote"])).trim().split("\n").filter(Boolean);
+    for (const remote of remotes) {
+      const heads = await git(repoDir, ["ls-remote", "--heads", remote]).catch(() => "");
+      for (const sha of new Set(heads.match(/^[0-9a-f]{40}(?=\t)/gm))) {
+        if (await isAncestor(path, "HEAD", sha)) return undefined;
+      }
+    }
+    return "commits not on the remote";
+  }
+  for (const ref of [`origin/${base}`, base]) {
+    if (await refExists(repoDir, ref)) {
+      return (await commitsAhead(path, ref)) > 0 ? "commits not on the remote" : undefined;
+    }
+  }
+  // No named base: the main checkout's commit is the best reference left.
+  const head = (await git(repoDir, ["rev-parse", "--verify", "HEAD"]).catch(() => "")).trim();
+  if (head !== "") {
+    return (await commitsAhead(path, head)) > 0 ? "commits not on the remote" : undefined;
+  }
+  return undefined;
 }
 
 async function teardown(root: string, repoDir: string, path: string): Promise<void> {
@@ -419,17 +562,34 @@ async function teardown(root: string, repoDir: string, path: string): Promise<vo
   await git(repoDir, ["worktree", "prune"]);
 }
 
-/** Removes a task's worktree and its manifest entry. The branch is kept unless asked. */
-export async function removeWorktree(options: RemoveWorktreeOptions): Promise<void> {
+/**
+ * Removes a task's worktree and its manifest entry. The branch is kept unless asked.
+ * A worktree with unshipped work is kept instead, with the reason.
+ */
+export async function removeWorktree(
+  options: RemoveWorktreeOptions,
+): Promise<RemoveWorktreeResult> {
   const root = resolve(options.root ?? defaultWorktreesRoot());
   const path = resolve(options.path);
   if (!isInside(await canonical(root), await canonical(path))) {
     throw new Error(`refusing to remove ${path}: outside worktrees root ${root}`);
   }
-  await updateManifest(root, async (manifest) => {
+  return updateManifest(root, async (manifest) => {
     const entry = manifest.entries.find((e) => e.path === path);
     const repoDir = entry?.repoDir ?? options.repoDir;
     const branch = entry?.branch ?? (await registeredWorktrees(repoDir)).get(await canonical(path));
+
+    if (await exists(path)) {
+      const kept = await keepReason(
+        repoDir,
+        path,
+        branch,
+        options.base ?? "main",
+        options.excludesFile,
+        options.scratch ?? false,
+      );
+      if (kept !== undefined) return { removed: false, kept };
+    }
 
     // Mark done first: if we crash below, recovery finishes the job.
     if (entry) {
@@ -441,6 +601,7 @@ export async function removeWorktree(options: RemoveWorktreeOptions): Promise<vo
       await git(repoDir, ["branch", "-D", branch]);
     }
     drop(manifest, path);
+    return { removed: true };
   });
 }
 
@@ -572,8 +733,14 @@ export interface TaskWorktrees {
     branch: string;
     sha: string;
   }): Promise<Worktree>;
-  /** Removes the worktree; the branch stays for the PR and for a retry. */
-  remove(path: string): Promise<void>;
+  /**
+   * Removes the worktree; the branch stays for the PR and for a retry. A worktree with
+   * unshipped work is kept, and the result says why.
+   */
+  remove(
+    path: string,
+    options?: Omit<RemoveWorktreeOptions, "repoDir" | "path" | "root">,
+  ): Promise<RemoveWorktreeResult>;
   /** Startup reconciliation (recoverOnStartup). */
   recover(): Promise<void>;
 }
@@ -600,9 +767,10 @@ export function createGitWorktrees(options: GitWorktreesOptions): TaskWorktrees 
       if (root !== undefined) checkout.root = root;
       return checkoutWorktree(checkout);
     },
-    remove: (path) => {
-      const remove: RemoveWorktreeOptions = { repoDir: options.repoDir, path };
+    remove: (path, more) => {
+      const remove: RemoveWorktreeOptions = { repoDir: options.repoDir, path, ...more };
       if (root !== undefined) remove.root = root;
+      if (options.base !== undefined) remove.base = options.base;
       return removeWorktree(remove);
     },
     recover: async () => {

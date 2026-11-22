@@ -305,6 +305,7 @@ function fakeWorktrees() {
     },
     async remove(path) {
       removed.push(path);
+      return { removed: true };
     },
     async recover() {},
   };
@@ -1748,6 +1749,127 @@ test("a restart re-queues runs left in loop.json, cleans their worktrees and cou
   const final = JSON.parse(await readFile(join(repo, ".harnessd/state/loop.json"), "utf8"));
   assert.deepEqual(final.inFlight, []);
   assert.deepEqual(final.attempts, {});
+});
+
+test("a restart keeps a dirty worktree instead of removing it, then resumes it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-requeue-keep-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  await writeFile(join(repo, "README.md"), "hi\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+  const worktrees = createGitWorktrees({ repoDir: repo, root: join(root, "worktrees") });
+
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress" });
+  const part = linear.add({
+    title: "Crashes with work",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const first = setup({ linear, worktrees, store: createFileLoopStore(repo) });
+  await first.loop.tick();
+  const wtPath = first.adapter.pending[0]?.cwd ?? "";
+  await writeFile(join(wtPath, "wip.txt"), "not shipped\n");
+
+  // The daemon dies; a new one starts from the same loop.json.
+  const second = setup({ linear, worktrees, store: createFileLoopStore(repo) });
+  const report = await second.loop.tick();
+  assert.deepEqual(report.requeued, [part.key]);
+  assert.deepEqual(report.dispatched, [part.key]);
+  assert.equal(second.adapter.pending[0]?.cwd, wtPath, "the same worktree is reused");
+  assert.ok(existsSync(join(wtPath, "wip.txt")), "the uncommitted work survived");
+  assert.ok(second.adapter.pending[0]?.task.prompt.endsWith(RESUMED_RUN_NOTE));
+  assert.ok(
+    linear.comments.some(
+      (c) =>
+        c.key === part.key &&
+        c.body === `**harnessd**: worktree kept at ${wtPath}: uncommitted changes.`,
+    ),
+  );
+});
+
+test("a worktree with unshipped work is kept, commented on and recorded in interrupted", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-keep-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  await writeFile(join(repo, "README.md"), "hi\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+  const worktrees = createGitWorktrees({ repoDir: repo, root: join(root, "worktrees") });
+
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress" });
+  const part = linear.add({
+    title: "Keeps shipped work",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const t = setup({ linear, worktrees, store: createFileLoopStore(repo) });
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+  const wtPath = t.adapter.pending[0]?.cwd ?? "";
+  await writeFile(join(wtPath, "wip.txt"), "not shipped\n");
+
+  t.adapter.pending[0]?.finish("ok");
+  await t.loop.idle();
+
+  assert.ok(existsSync(join(wtPath, "wip.txt")));
+  assert.ok(
+    t.linear.comments.some(
+      (c) =>
+        c.key === part.key &&
+        c.body === `**harnessd**: worktree kept at ${wtPath}: uncommitted changes.`,
+    ),
+  );
+  const saved = JSON.parse(await readFile(join(repo, ".harnessd/state/loop.json"), "utf8"));
+  assert.deepEqual(
+    saved.interrupted.map((e: { issueKey: string; reason: string }) => [e.issueKey, e.reason]),
+    [[part.key, "uncommitted changes"]],
+  );
+});
+
+test("a failed, cancelled or limited run keeps its worktree when it holds unshipped work", async () => {
+  for (const status of ["error", "cancelled", "limited"] as const) {
+    const root = await mkdtemp(join(tmpdir(), `harnessd-keep-${status}-`));
+    roots.push(root);
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    await writeFile(join(repo, "README.md"), "hi\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-q", "-m", "init");
+    const worktrees = createGitWorktrees({ repoDir: repo, root: join(root, "worktrees") });
+
+    const linear = new FakeLinear();
+    const parent = linear.add({ title: "P", state: "In Progress" });
+    const part = linear.add({
+      title: "Fails with work",
+      parentId: parent.id,
+      description: `${partMarker("backend")}\n**Size**: S`,
+    });
+    const t = setup({ linear, worktrees, store: createFileLoopStore(repo) });
+    await t.loop.tick();
+    const wtPath = t.adapter.pending[0]?.cwd ?? "";
+    await writeFile(join(wtPath, "wip.txt"), "not shipped\n");
+
+    t.adapter.pending[0]?.finish(status, "tests failed");
+    await t.loop.idle();
+
+    assert.ok(existsSync(join(wtPath, "wip.txt")), status);
+    assert.equal(part.state, "Ready", `${status}: one retry`);
+    const saved = JSON.parse(await readFile(join(repo, ".harnessd/state/loop.json"), "utf8"));
+    assert.equal(saved.interrupted[0]?.reason, "uncommitted changes", status);
+    assert.ok(
+      t.linear.comments.some(
+        (c) =>
+          c.key === part.key &&
+          c.body.includes("worktree kept at") &&
+          c.body.includes("uncommitted changes"),
+      ),
+      status,
+    );
+  }
 });
 
 // --- pause (MET-15) ----------------------------------------------------------

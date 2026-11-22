@@ -44,6 +44,10 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Run**: one agent working one sub-issue in its own worktree (D-012). A QA round is one run.
 
+**Unshipped work**: uncommitted changes in a run's worktree, or commits on its branch that are not on `origin/<branch>`. A worktree with unshipped work is kept, not removed (MET-114, docs/LOOP.md "Dispatch"). _Avoid_: dirty tree, local only.
+
+**Scratch worktree**: a detached checkout of a PR head that a QA round uses. It holds no branch work, so a clean one is removed; uncommitted changes, or commits not on its remote branch, are kept like any other worktree (MET-114). _Avoid_: throwaway worktree.
+
 **Event stream**: the server-sent events at `GET /api/events` that push pause, board, agent and log changes to the UI (D-024).
 
 **Held update**: a live change the UI keeps back while the pointer or focus is in that region, so content never moves under the cursor.

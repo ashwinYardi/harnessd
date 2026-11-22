@@ -170,6 +170,7 @@ function harness(options: Options = {}) {
       },
       async remove(path: string) {
         removed.push(path);
+        return { removed: true };
       },
     },
     adapter,
