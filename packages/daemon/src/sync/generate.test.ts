@@ -140,9 +140,7 @@ test("toml and yaml scalars quote only when needed", () => {
 test("OpenCode sync generates fixed builder permissions and a Web Search provider", () => {
   const file = generateSyncFiles(mergeLayers([])).find(({ path }) => path === "opencode.json");
   assert.ok(file && "settings" in file);
-  assert.equal(Object.keys(file.settings.keys.permission as object)[0], "*");
   assert.deepEqual(file.settings.keys.permission, {
-    "*": "deny",
     read: "allow",
     edit: "allow",
     glob: "allow",
@@ -154,8 +152,7 @@ test("OpenCode sync generates fixed builder permissions and a Web Search provide
     todowrite: "allow",
     webfetch: "allow",
     websearch: "allow",
-    "harnessd_memory_*": "allow",
-    bash: { "*": "allow", "git push": "deny", "git push *": "deny" },
+    bash: { "*": "allow", "git push *": "deny" },
     external_directory: "deny",
     question: "deny",
     doom_loop: "deny",

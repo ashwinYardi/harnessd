@@ -21,7 +21,7 @@ const SUMMARY_MAX = 120;
 export interface ParsedOutcome {
   /** True when the harness reported success. The process must also exit cleanly or explain its nonzero exit. */
   ok: boolean;
-  acceptedExitCode?: number;
+  exitExplained?: true;
   /** Why the run failed, when the harness said so. */
   error?: string;
   reason?: RunResult["reason"];
@@ -228,7 +228,7 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
   function statusOf(exitCode: number | null, parsed: ParsedOutcome): RunStatus {
     if (stopReason) return stopReason;
     if (spawnError !== undefined) return "error";
-    if (parsed.ok && (exitCode === 0 || exitCode === parsed.acceptedExitCode)) return "ok";
+    if (parsed.ok && (exitCode === 0 || parsed.exitExplained)) return "ok";
     return parsed.limited || parsed.reason === "usage_limit" ? "limited" : "error";
   }
 

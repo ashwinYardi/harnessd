@@ -38,8 +38,8 @@ export interface OpenCodeOptions {
  */
 export function openCodeArgs(task: Task, options: OpenCodeOptions = {}): string[] {
   // --standalone: a private server for this run, not the owner's background service.
-  // The non-interactive CLI rejects pending permissions and lets the session continue.
-  const args = ["run", "--format", "json", "--standalone"];
+  // --auto answers pending permission requests inside the CLI.
+  const args = ["run", "--format", "json", "--standalone", "--auto"];
   const model = task.model ?? options.model;
   if (model) args.push("-m", model);
   args.push("--", task.prompt);
@@ -185,7 +185,7 @@ class OpenCodeJsonParser implements LineParser {
       this.#stderrError === undefined &&
       reason === undefined
     ) {
-      out.acceptedExitCode = 1;
+      out.exitExplained = true;
       return out;
     }
     if (failure === undefined) {

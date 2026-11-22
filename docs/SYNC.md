@@ -65,7 +65,7 @@ Commit `.harnessd/` (including `vault/`, the repo's shared memory), `AGENTS.md`,
 opencode.json
 ```
 
-**opencode.json.** Sync merges into it. It replaces `$schema`, `permission` and `websearch` as whole keys. It sets one `mcp` entry for each of its servers, by name. User-owned `mcp` entries and keys such as `model` and `provider` stay. Owner sync writes the default permission table. It denies unlisted tools and allows the built-in memory tools. Worktree sync applies the run agent's `opencode_permission` overrides. Sync sets the Web Search provider to `random`. A file that is not a JSON object, or whose `mcp` is not an object, stops sync.
+**opencode.json.** Sync merges into it. It replaces `$schema`, `permission` and `websearch` as whole keys. It sets one `mcp` entry for each of its servers, by name. User-owned `mcp` entries and keys such as `model` and `provider` stay. Owner sync writes the default permission table. OpenCode allows unlisted tools through `--auto`, including MCP tools. Worktree sync applies the run agent's `opencode_permission` overrides. Sync sets the Web Search provider to `random`. A file that is not a JSON object, or whose `mcp` is not an object, stops sync.
 
 Global AGENTS.md and rules end up in the repo's AGENTS.md, so keep anything private out of `~/.harnessd/`.
 

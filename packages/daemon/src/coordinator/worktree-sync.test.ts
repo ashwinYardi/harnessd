@@ -184,7 +184,6 @@ test("worktree sync applies the run agent's OpenCode permissions", async () => {
   assert.equal(config.permission.edit, "allow");
   assert.deepEqual(config.permission.bash, {
     "*": "allow",
-    "git push": "deny",
     "git push *": "deny",
     "npm publish *": "deny",
   });
