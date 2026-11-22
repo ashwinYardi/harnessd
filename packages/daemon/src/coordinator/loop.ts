@@ -1328,7 +1328,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         decisions,
       });
       if (state !== undefined) {
-        recordUsage(state, issue.id, issue.key, agent.name, grill.tokens ?? emptyTokenUsage(), grill.turns);
+        recordUsage(
+          state,
+          issue.id,
+          issue.key,
+          agent.name,
+          grill.tokens ?? emptyTokenUsage(),
+          grill.turns,
+        );
       }
       if (pausedNow) {
         log(`${issue.key}: paused, split skipped`);
@@ -1349,7 +1356,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
       plan = await planIssue(issue, { adapter, agent, context, cwd: repoDir, calls: grill.calls });
       if (state !== undefined) {
-        recordUsage(state, issue.id, issue.key, agent.name, plan.tokens ?? emptyTokenUsage(), plan.turns);
+        recordUsage(
+          state,
+          issue.id,
+          issue.key,
+          agent.name,
+          plan.tokens ?? emptyTokenUsage(),
+          plan.turns,
+        );
       }
       if (pausedNow) {
         log(`${issue.key}: paused, split skipped`);

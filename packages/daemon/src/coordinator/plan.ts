@@ -243,11 +243,22 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
           tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         } as const);
   if (!reply.ok && reply.limited) {
-    return { parts: [], source: "limited", error: reply.error, tokens: reply.tokens, ...turnsOf(reply) };
+    return {
+      parts: [],
+      source: "limited",
+      error: reply.error,
+      tokens: reply.tokens,
+      ...turnsOf(reply),
+    };
   }
   const parsed: ParsedPlanReply = reply.ok ? parsePlanReply(reply.text) : reply;
   if (parsed.ok) {
-    const plan: SplitPlan = { parts: parsed.parts, source: "model", tokens: reply.tokens, ...turnsOf(reply) };
+    const plan: SplitPlan = {
+      parts: parsed.parts,
+      source: "model",
+      tokens: reply.tokens,
+      ...turnsOf(reply),
+    };
     if (parsed.reason !== undefined) plan.reason = parsed.reason;
     return plan;
   }

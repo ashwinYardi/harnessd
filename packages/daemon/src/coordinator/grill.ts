@@ -328,7 +328,14 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     if (reply.turns !== undefined) turns = (turns ?? 0) + reply.turns;
     if (!reply.ok && reply.limited) {
       // A usage limit is no bad reply: no retry, nothing written, the issue stays (MET-70).
-      return { calls: [], escalation: null, outcome: "limited", error: reply.error, tokens: spent, ...(turns === undefined ? {} : { turns }) };
+      return {
+        calls: [],
+        escalation: null,
+        outcome: "limited",
+        error: reply.error,
+        tokens: spent,
+        ...(turns === undefined ? {} : { turns }),
+      };
     }
     parsed = reply.ok ? parseGrillReply(reply.text) : reply;
     if (parsed.ok) break;
@@ -346,7 +353,8 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       escalation: null,
       outcome: "error",
       error: parsed.error,
-      tokens: spent, ...(turns === undefined ? {} : { turns }),
+      tokens: spent,
+      ...(turns === undefined ? {} : { turns }),
     };
   }
 
@@ -408,7 +416,8 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       error: `could not ${step}: ${(error as Error).message}`,
       terms,
       precedents,
-      tokens: spent, ...(turns === undefined ? {} : { turns }),
+      tokens: spent,
+      ...(turns === undefined ? {} : { turns }),
     };
   }
   return {
@@ -417,6 +426,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     outcome: escalation ? "needs_input" : "proceed",
     terms,
     precedents,
-    tokens: spent, ...(turns === undefined ? {} : { turns }),
+    tokens: spent,
+    ...(turns === undefined ? {} : { turns }),
   };
 }
