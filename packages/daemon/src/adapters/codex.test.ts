@@ -162,6 +162,7 @@ test("a success run streams text and usage, and keeps the thread id", async () =
   assert.equal(result.exitCode, 0);
   assert.equal(result.sessionId, "thread-fake-1");
   assert.equal(result.finalText, "Done.");
+  assert.equal(result.turns, 1);
   assert.equal(result.costUsd, undefined);
   assert.equal(result.error, undefined);
   assert.equal(result.reason, undefined);

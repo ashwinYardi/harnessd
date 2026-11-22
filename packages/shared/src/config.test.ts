@@ -23,6 +23,7 @@ test("parseConfigFile accepts a full config", () => {
       max_concurrent: 5,
       budget_minutes: { S: 20, M: 90 },
       token_budget: { S: 1_000_000, M: 2_000_000 },
+      cached_token_weight: 0.25,
       qa_max_failures: 1,
     },
     linear: { team_id: "MET", project: "harnessd" },
@@ -90,7 +91,7 @@ test("an unknown fallback_harness names the file and key", () => {
 test("unknown keys are rejected with their path", () => {
   rejects(
     { limits: { max_concurent: 2 } },
-    `${FILE}: limits.max_concurent: unknown key, expected one of max_concurrent, budget_minutes, token_budget, qa_max_failures`,
+    `${FILE}: limits.max_concurent: unknown key, expected one of max_concurrent, budget_minutes, token_budget, cached_token_weight, qa_max_failures`,
   );
   rejects(
     { colour: "red" },
@@ -110,6 +111,32 @@ test("limits.token_budget accepts S and M and rejects another key", () => {
     { limits: { token_budget: { L: 300 } } },
     `${FILE}: limits.token_budget.L: unknown key, expected one of S, M`,
   );
+});
+
+test("limits.cached_token_weight defaults to 0.1 and takes 0 to 1", () => {
+  assert.equal(DEFAULT_SETTINGS.limits.cached_token_weight, 0.1);
+  assert.deepEqual(parseConfigFile({ limits: { cached_token_weight: 0 } }, FILE), {
+    limits: { cached_token_weight: 0 },
+  });
+  assert.deepEqual(parseConfigFile({ limits: { cached_token_weight: 1 } }, FILE), {
+    limits: { cached_token_weight: 1 },
+  });
+  rejects(
+    { limits: { cached_token_weight: 1.1 } },
+    `${FILE}: limits.cached_token_weight: expected a number from 0 to 1, got 1.1`,
+  );
+  rejects(
+    { limits: { cached_token_weight: -0.1 } },
+    `${FILE}: limits.cached_token_weight: expected a number from 0 to 1, got -0.1`,
+  );
+  rejects(
+    { limits: { cached_token_weight: "0.1" } },
+    `${FILE}: limits.cached_token_weight: expected a number from 0 to 1, got "0.1"`,
+  );
+});
+
+test("the token budget defaults are weighted tokens for one M build", () => {
+  assert.deepEqual(DEFAULT_SETTINGS.limits.token_budget, { S: 3_000_000, M: 6_000_000 });
 });
 
 test("wrong types are rejected with their path", () => {

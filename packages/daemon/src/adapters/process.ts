@@ -30,6 +30,8 @@ export interface ParsedOutcome {
   /** ISO time the limit resets, when the harness said it. */
   resetAt?: string;
   tokens: TokenUsage;
+  /** Model turns the harness reported, when it did (D-043). */
+  turns?: number;
   costUsd?: number;
   sessionId?: string;
   finalText?: string;
@@ -207,6 +209,7 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
       tokens: parsed.tokens,
     };
     if (parsed.costUsd !== undefined) run.costUsd = parsed.costUsd;
+    if (parsed.turns !== undefined) run.turns = parsed.turns;
     if (parsed.sessionId !== undefined) run.sessionId = parsed.sessionId;
     if (parsed.finalText !== undefined) run.finalText = parsed.finalText;
     const error = errorOf(status, exitCode, parsed);

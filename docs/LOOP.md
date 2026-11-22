@@ -72,7 +72,7 @@ When the split is done, the parent moves to In Progress.
   - uses the adapter for its agent's harness;
   - gets a prompt made of the agent's layered instructions plus the sub-issue body;
   - runs within the budget for its size.
-- Before a part or QA run starts, and before a rework run, the loop checks the parent's token sum against `limits.token_budget`. At or over it, nothing starts and the parent goes to Needs input (see Token budget).
+- Before a part or QA run starts, and before a rework run, the loop checks the parent's weighted token sum against `limits.token_budget`. At or over it, nothing starts and the parent goes to Needs input (see Token budget).
 - The prompt tells the agent to edit and test in the worktree only. It does not commit, push or open the PR: the daemon ships the work after the run (D-039). A part that QA sent back gets the failing items and works on its open PR.
 - A QA sub-issue runs the QA round below instead of a single agent run.
 - When the sub-issue starts it moves to In Progress. When the run finishes:
@@ -130,26 +130,43 @@ A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch
   - `.codex/hooks.json`: the skills' Codex hooks. `--dangerously-bypass-hook-trust` lets them run with no `/hooks` approval.
 - **The Codex gap.** Codex has no flag that skips `$CODEX_HOME/AGENTS.md` or the user-level skills. `CODEX_HOME` stays, because `auth.json` lives there. So a Codex run can still see the owner's `$CODEX_HOME/AGENTS.md` and user skills. A follow-up issue tracks this.
 - **OpenCode runs.** An agent with `harness = "opencode"` runs `opencode run --format json --standalone --auto`. The CLI approves pending permission requests and keeps the session running (docs/decisions/D-036-opencode-adapter.md). `OPENCODE_CONFIG_DIR` points to an empty temp folder, so the owner's OpenCode config and global `AGENTS.md` do not load. The run reads `AGENTS.md` and the project skill folders.
-- **The OpenCode gap.** OpenCode 2.0.20 still loads skills from `~/.claude/skills` and `~/.agents/skills`. Impeccable hooks do not run, because OpenCode uses JS plugins, not `hooks.json`. Sync adds the `harnessd-memory` server to `opencode.json`.
+- **The OpenCode gap.** OpenCode 2.0.20 and 2.3.2 still load skills from `~/.claude/skills` and `~/.agents/skills`. It has no switch that skips them. Impeccable hooks do not run, because OpenCode uses JS plugins, not `hooks.json`. Sync adds the `harnessd-memory` server to `opencode.json`.
 - **Memory.** The prompt has a Memory section. It names `search_notes`, `read_note` and `write_note`, and the two vaults: `<repo>/.harnessd/vault/` and `$HARNESSD_HOME/vault/` (docs/MEMORY.md). The worktree's `.mcp.json` runs `harnessd mcp memory --workspace <main repo>`, so notes outlive the worktree.
 - **Hand-vendored skills.** A skill folder that sync did not generate stays as it is (D-020). Sync prints `kept <folder>` and does not write into it. A worktree run still withholds the skill its role leaves out, even when the repo commits that folder (see the role skill set below).
-- **Role skill set (D-040).** A worktree run gets the pack for its role: the `frontend` role gets the full pack, and every other role gets the pack without impeccable. The map is built in, not config: `enabled = false` still turns a skill off for everyone. A worktree cut from `main` already holds the skill folders the repo commits, so the loop removes a withheld folder from that worktree and marks its tracked files `skip-worktree`; git sees no deletion and the agent commits, pushes and opens the PR as usual. The main checkout is not touched. A later frontend run in the same worktree puts the committed folder back. The D-028 hook stays for frontend runs.
+- **Role skill set (D-040, D-043).** A worktree run gets the pack for its role. `frontend` keeps `impeccable` and drops `grilling`, `domain-modeling`, `research` and `prototype`. `coordinator` keeps those four and drops `impeccable`. `backend` and `qa` drop all five, because their work never needs those bodies. The map is built in, not config: `enabled = false` still turns a skill off for everyone. A worktree cut from `main` already holds the skill folders the repo commits, so the loop removes a withheld folder from that worktree and marks its tracked files `skip-worktree`; git sees no deletion and the agent commits, pushes and opens the PR as usual. The main checkout is not touched. A later run that does not withhold a folder puts the committed folder back. The D-028 hook stays for frontend runs.
 - **MCP servers (D-040).** A worktree run gets only `harnessd-memory`. A `[mcp.<name>]` server in the config does not load into a worktree run, so its tool list is not sent.
-- **Measured size.** The base prompt is measured, not guessed. The numbers below are from `packages/daemon/src/coordinator/prompt-size.test.ts` and this repo's sync output. A character is about a quarter of a token.
+- **Measured size.** The base prompt is measured, not guessed. The numbers below are from `packages/daemon/src/coordinator/prompt-size.test.ts`, this repo's committed skill pack and its sync output. A character is about a quarter of a token.
 
-  | Item | Before | After |
+  | Item | Builder or QA run | Frontend run |
   |---|---|---|
-  | Part prompt (fixture issue) | about 0.9k chars | unchanged: it is already only the agent, the task and the memory pointer |
+  | Part prompt (fixture issue) | about 1.1k chars | unchanged: it is already only the agent, the task and the memory pointer |
   | QA prompt (one PR, diff cut at 24k chars) | about 3.3k chars | unchanged: the diff, CI, tests and checklist are the whole job |
-  | Grill prompt (this repo: spec + 39 decision records) | about 70.7k chars | unchanged: the coordinator needs the spec and the decisions |
-  | Plan prompt (this repo) | about 60.2k chars | unchanged: same context as the grill |
-  | `AGENTS.md` (this repo, rules included) | about 4.5k chars | unchanged: agents must read the repo rules |
-  | `SKILL.md` bodies, 14 committed skills | about 62.5k chars | about 49.8k chars for a non-UI run: impeccable (about 12.7k chars) is dropped |
-  | MCP tool lists | every configured server | `harnessd-memory` only |
+  | `AGENTS.md` (this repo, rules included) | 4.5k chars | unchanged: agents must read the repo rules |
+  | `SKILL.md` bodies, committed pack | 40,781 chars (9 of 14 skills) | 53,443 chars (13 of 14; keeps `impeccable`) |
+  | `opencode.json` MCP and permission tables | 687 chars | unchanged |
+  | `harnessd-memory` tool list | 1,878 chars | unchanged |
+  | **Static total from the sync** | **about 47.8k chars, about 12.0k tokens** | **about 60.5k chars, about 15.1k tokens** |
+  | Owner `~/.claude/skills` + `~/.agents/skills` (out of scope, MET-112) | 73,829 chars, measured 2026-11-22 | same |
 
-  The skill row counts the folders a worktree cut from `main` holds, not only the files sync generates. The test is `committed skill pack` in `prompt-size.test.ts`.
+  The coordinator's grill and plan runs get no worktree sync and read this repo's spec and decision records instead: about 86.1k and 74.5k chars for this repo. The skill row counts the folders a worktree cut from `main` holds, read from `HEAD`, not only the files sync generates. The test is `the committed skill pack…` in `prompt-size.test.ts`.
 
-  **Owner-level gaps, measured and out of scope:** D-032 says Codex still reads `$CODEX_HOME/AGENTS.md` and user skills, because `CODEX_HOME` must hold `auth.json`. D-036 says OpenCode 2.0.20 still loads `~/.claude/skills` and `~/.agents/skills`. The loop cannot remove those files without breaking the owner's sign-in or setup.
+  **Per harness, first turn.** The same files reach every harness, but each reads its own layout. The static total is an upper bound: a harness that loads a skill body on demand sends less.
+
+  | Harness | What the sync adds | First turn |
+  |---|---|---|
+  | Claude Code | `AGENTS.md`, `.claude/skills/`, `.mcp.json` with `harnessd-memory` | not measured on a real run; about 12.0k static tokens |
+  | Codex | `AGENTS.md`, `.agents/skills/`, `.codex/config.toml`, `.codex/hooks.json` | not measured on a real run; about 12.0k static tokens |
+  | OpenCode 2.3.2 | `AGENTS.md`, `.claude/skills/` and `.agents/skills/`, `opencode.json` | **9,328 tokens** (8,944 input + 384 cache read) on the first `step_finish` of a short real run in this worktree, deepseek-v4.1-flash |
+
+  The same prompt in an empty folder, with no project files, took **7,437 tokens** (5,645 input + 1,792 cache read). That is OpenCode's system prompt and built-in tool schemas. The worktree files and the `harnessd-memory` tool list add about **1.9k tokens**. The static skill count is an upper bound because OpenCode exposes skills through its `skill` tool and loads a body only when it uses it.
+
+  **What grows the turn.** The MET-128 build averaged about **190k tokens per turn**: 12,257,280 cached tokens over about 65 turns, plus the new input. The base prompt is about 9k to 12k of that. The rest is the conversation and the tool output it carries, which every later turn sends again.
+
+  - OpenCode caps one tool result at `tool_output.max_lines` 2,000 and `max_bytes` 51,200 (about 50 KiB) by default.
+  - Automatic compaction is on by default: near the context limit OpenCode replaces older conversation with a summary, keeps about `compaction.keep.tokens` 15,000 recent tokens, and shortens long tool output in that tail. It can only reclaim conversation, not fixed instructions and tool schemas.
+  - So a full test run or a large file read stays in context as one capped tool result, then in the summary and the recent tail after compaction. Focused tests and file ranges keep those results small.
+
+  **Owner-level gaps, measured and out of scope:** D-032 says Codex still reads `$CODEX_HOME/AGENTS.md` and user skills, because `CODEX_HOME` must hold `auth.json`. D-036 says OpenCode still loads `~/.claude/skills` and `~/.agents/skills`. On 2026-11-22 the SKILL.md bodies in those two folders total 73,829 chars; a run that used one of those skills would load that body too. The loop cannot remove them without breaking the owner's sign-in or setup (MET-112).
 
 ## Pause
 The global kill switch (D-014). It stops every agent in every workspace within 10 s.
@@ -212,13 +229,13 @@ A QA agent run that ends `limited` stops the round. No review is posted, no QA f
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
 
 ## Token budget and usage
-Each run ends with one log line: `<key>: <agent> used <input> input, <cached> cached, <output> output tokens`, where cached is cache read plus cache write. The loop adds the run's tokens to the parent's **usage sum** in `loop.json` under `usage`, so the sum survives a restart. The board shows the sum as one compact count with a tooltip that splits input, cached and output.
+Each run ends with one log line: `<key>: <agent> used <input> input, <cached> cached, <output> output tokens in <n> turns`, where cached is cache read plus cache write. `n` is the harness's own count: OpenCode's `step_start` steps, Codex's `turn.completed` turns, or Claude Code's `num_turns`. A run with no count keeps the line without `in <n> turns`. The loop adds the run's raw tokens to the parent's **usage sum** in `loop.json` under `usage`, so the sum survives a restart. The board shows the sum as one compact count with a tooltip that splits input, cached and output.
 
-The **token budget** is `limits.token_budget`, keyed by size like `budget_minutes`: S 5M, M 12M. An unknown size counts as M. It sums every token of the parent over its grill, plan, part and QA runs. Before the loop starts a new part run, QA run or rework round, it checks the sum:
+The **token budget** is weighted (D-043): `limits.token_budget`, keyed by size like `budget_minutes`: S 3M, M 6M. An unknown size counts as M. The weighted sum is `input + output + round(cached × limits.cached_token_weight)`, with `limits.cached_token_weight` from 0 to 1 and default 0.1; at 1 it is the old raw count. `cached` is cache read plus cache write. It sums every run of the parent over its grill, plan, part and QA runs. Before the loop starts a new part run, QA run or rework round, it compares the weighted sum with the budget:
 - below the budget: the run starts;
-- at or over it: nothing starts. The parent moves to Needs input, with one comment that states the sum and the budget, and one notice (the D-011 escalation shape). A run in flight finishes normally.
+- at or over it: nothing starts. The parent moves to Needs input, with one comment that states the weighted total, the budget, and the raw input, cached and output parts with the weight, and one notice (the D-011 escalation shape). A run in flight finishes normally.
 
-The sum at escalation is recorded as `usageBaseline` in `loop.json`, as the parent's cumulative sum (not the delta), so the next count subtracts it. When a human moves the parent back to Ready, the budget counts from that point, also after a second escalation.
+The raw sum at escalation is recorded as `usageBaseline` in `loop.json`, as the parent's cumulative sum (not the delta), so the next count subtracts it. When a human moves the parent back to Ready, the budget counts from that point, also after a second escalation. `usage` and `usageBaseline` stay raw, so an old `loop.json` loads and the board count is unchanged.
 
 ## Usage limits
 A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.

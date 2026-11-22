@@ -95,6 +95,7 @@ if (mode === "ok" || mode === "malformed") {
     result: "Done.",
     total_cost_usd: 0.0123,
     usage: usage(13, 12, 300, 20),
+    num_turns: 2,
   });
   process.exitCode = 0;
 } else if (mode === "error") {

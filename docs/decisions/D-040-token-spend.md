@@ -1,5 +1,5 @@
 # D-040 Cut the token spend per parent
-Status: accepted 2026-11-22. Issue: MET-123. Amends D-014 and SPEC "Limits" and "Autonomy loop" step 4. Supersedes the part limit in the MET-87 draft and the QA timing in the MET-86 draft.
+Status: accepted 2026-11-22. Issue: MET-123. Amends D-014 and SPEC "Limits" and "Autonomy loop" step 4. Supersedes the part limit in the MET-87 draft and the QA timing in the MET-86 draft. Amended by D-043: the budget is weighted, its defaults change, and the role skill set is smaller.
 
 - The default `limits.max_concurrent` is 1. A user may still set up to 3 (D-014 cap). Parallel parts of one parent touched the same files, so each merge sent the next PR back for another build and QA round.
 - The coordinator plans one part, one PR, per ticket by default. It splits only when the ticket's Size is L or one part cannot fit the M budget, and the split comment states the reason. A plan with more than one part and no reason is invalid, and the loop uses the one-part fallback.

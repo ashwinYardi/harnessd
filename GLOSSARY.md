@@ -44,9 +44,11 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Reviewed head**: the PR head sha that QA read for one part, with its verdict (`approved` or `changes_requested`), kept per part in `loop.json`. A part whose PR head is still the approved sha gets no second QA run (D-040). _Avoid_: reviewed commit, last sha.
 
-**Token budget**: the tokens one parent may spend across its grill, plan, part and QA runs, by size: S 5M, M 12M (D-040). At or over it the loop starts nothing new and moves the parent to Needs input. _Avoid_: token limit, quota.
+**Token budget**: the weighted tokens one parent may spend across its grill, plan, part and QA runs, by size: S 3M, M 6M (D-043). The sum is input + output + cached × `limits.cached_token_weight` (default 0.1). At or over it the loop starts nothing new and moves the parent to Needs input. _Avoid_: token limit, quota.
 
-**Usage sum**: the input, cached and output tokens a parent used, added up per run and kept in `loop.json` under `usage`, so it survives a restart. The board shows it as one count, such as "7.4M tok" (D-040). _Avoid_: token count, spend.
+**Weighted tokens**: a token count for the budget, where a cached token counts `limits.cached_token_weight` of a new input token. Input and output count in full (D-043). _Avoid_: cost, price, spend.
+
+**Usage sum**: the raw input, cached and output tokens a parent used, added up per run and kept in `loop.json` under `usage`, so it survives a restart. The board shows it as one count, such as "7.4M tok" (D-040). The budget weighs the cached part; the board count stays raw (D-043). _Avoid_: token count, spend.
 
 **Run**: one agent working one sub-issue in its own worktree (D-012). A QA round is one run.
 

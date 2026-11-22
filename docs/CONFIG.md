@@ -17,7 +17,8 @@ harnessd reads two folders with the same shape (D-004): `~/.harnessd/` (global, 
 [limits]
 max_concurrent = 1
 budget_minutes = { S = 30, M = 120 }   # L has no budget: split it (D-014)
-token_budget = { S = 5000000, M = 12000000 }   # per parent; an unknown size counts as M (D-040)
+token_budget = { S = 3000000, M = 6000000 }   # weighted; an unknown size counts as M (D-043)
+cached_token_weight = 0.1   # a cached token counts this much of a new input token (D-043)
 qa_max_failures = 2
 
 [linear]
@@ -87,7 +88,15 @@ Setting `protected_paths` replaces the whole list, so copy the defaults you want
 ## Limits and token spend
 `limits.max_concurrent` defaults to **1** (D-040). A user may set 1 to 3 (D-014 cap). Parallel parts of one parent touched the same files, and each merge sent the next PR back for another build and QA round. With 1, a ticket's parts run one after another: one part, one PR, one QA pass at a time.
 
-`limits.token_budget` is the tokens one parent may spend across its grill, plan, part and QA runs, keyed by size like `budget_minutes`: `S = 5000000`, `M = 12000000`. An unknown size counts as M, and so does L, which never runs. The sum counts input, cached and output tokens. Before a part run, QA run or rework round starts, the loop checks the parent's sum. At or over the budget it starts nothing, moves the parent to Needs input, posts one comment with the sum and the budget, and sends one notice (D-011). A run in flight finishes. When a human moves the parent back to Ready, the count starts again from the escalation point. `loop.json` keeps the sums under `usage`, so a restart does not lose them.
+`limits.token_budget` is the **weighted** tokens one parent may spend across its grill, plan, part and QA runs, keyed by size like `budget_minutes`: `S = 3000000`, `M = 6000000`. An unknown size counts as M, and so does L, which never runs.
+
+The weighted sum is `input + output + round(cached × limits.cached_token_weight)`. `cached` is cache read plus cache write; the weight applies to both together. `cached_token_weight` is a number from 0 to 1, default `0.1`, and merges per layer like the other `limits` keys. At `1` the budget is the old raw count. Before a part run, QA run or rework round starts, the loop compares the parent's weighted sum with the budget. At or over it the loop starts nothing, moves the parent to Needs input, posts one comment with the weighted total, the budget and the raw input, cached and output parts, and sends one notice (D-011). A run in flight finishes. When a human moves the parent back to Ready, the count starts again from the escalation point.
+
+`loop.json` keeps the raw sums under `usage` (input, cached and output), so a restart does not lose them, an old file still loads, and the board's token count stays the raw sum. Only the budget comparison and the Needs-input comment use the weight.
+
+**Why weighted tokens, not cost per harness (D-043).** Codex reports no cost (D-032), and OpenCode reports cost only for some providers (D-036). A price table would go stale, and a missing cost would make the budget unlimited. A weight applies to every harness and needs no pricing data. Cached input is billed far below new input, so counting it in full made one 13-minute MET-128 build look like 12.5M tokens and trip the old M default before QA. At `0.1` that build is 1,470,055 weighted tokens. The weight treats cache writes as cheap too; that error is small where it matters because Codex reports `cacheWrite` 0, and OpenCode's providers mostly report 0 or a write at or below input. Claude Code reports the most cache writes.
+
+**The defaults fit one M ticket (D-043).** Two MET-128-sized builds (2 × 1,470,055), one QA round (335,000 weighted) and 540,000 raw grill and plan tokens total 3,815,110 of 6,000,000. S is half of M.
 
 ### Which model for QA, and which for builders
 - **QA:** a fast, low-cost model at medium effort. QA reads one PR diff against a checklist, and harnessd runs the tests itself, so it needs little reasoning. Example: an OpenCode flash model.

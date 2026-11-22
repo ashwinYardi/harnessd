@@ -45,9 +45,9 @@ Instruction layers merge in this order: global → workspace → agent (schema a
 ## Merge gate (D-013)
 A PR auto-merges when **all** of these hold: CI is green, QA approves every "Done when" item, and no protected path is touched. Protected paths are auth, payments, secrets, release config, and the merge-gate config itself. Protected PRs wait for the human.
 
-## Limits (D-014, D-040)
+## Limits (D-014, D-040, D-043)
 - Per-task token and time budget by size: S 30 min, M 2 h, L must be split.
-- Per-issue token budget by size: S 5M, M 12M (D-040). At or over it the loop stops and asks the coordinator (Needs input).
+- Per-issue token budget by size: weighted tokens S 3M, M 6M (D-043). At or over it the loop stops and asks the coordinator (Needs input).
 - One agent runs at a time by default (configurable up to 3).
 - Two QA failures → escalate rather than loop.
 - A global kill switch: `harnessd pause`, plus a UI button.

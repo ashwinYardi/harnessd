@@ -85,12 +85,32 @@ export function excludesFileFor(globalDir: string, runId: string): string {
   );
 }
 
-/** Skill names a worktree run leaves out of the pack. The UI agent gets the full pack. */
+/** Skill names a non-UI worktree run leaves out of the pack. The UI agent gets the full pack. */
 export const SKILLS_WITHHELD_FROM_NON_UI_RUNS = ["impeccable"] as const;
 
-/** The skills a run with this role omits (D-040). No config key: `enabled = false` still wins. */
+/**
+ * Skills only the coordinator uses (D-043). Builder and QA runs never grill, model the
+ * domain, research or prototype, so their turn does not carry those bodies.
+ */
+export const SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS = [
+  "grilling",
+  "domain-modeling",
+  "research",
+  "prototype",
+] as const;
+
+/** Every skill a worktree run can leave out, so a run that does not withhold it can put it back. */
+const RESTORABLE_SKILLS = [
+  ...SKILLS_WITHHELD_FROM_NON_UI_RUNS,
+  ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS,
+];
+
+/** The skills a run with this role omits (D-040, D-043). No config key: `enabled = false` still wins. */
 export function withheldSkills(role: ResolvedAgentConfig["role"] | undefined): string[] {
-  return role === "frontend" ? [] : [...SKILLS_WITHHELD_FROM_NON_UI_RUNS];
+  // D-040: only the frontend role does UI work. D-043: only the coordinator grills.
+  if (role === "frontend") return [...SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS];
+  if (role === "coordinator") return [...SKILLS_WITHHELD_FROM_NON_UI_RUNS];
+  return [...RESTORABLE_SKILLS];
 }
 
 async function exists(path: string): Promise<boolean> {
@@ -159,7 +179,7 @@ export async function syncWorktree(input: WorktreeSyncInput): Promise<WorktreeSy
   const owner = await ownerExcludes(input.worktree, env);
   const withheld = withheldSkills(input.agent?.role);
   // Before sync: a full-pack run may reuse a worktree that a withheld run cut down.
-  for (const name of SKILLS_WITHHELD_FROM_NON_UI_RUNS) {
+  for (const name of RESTORABLE_SKILLS) {
     if (withheld.includes(name)) continue;
     for (const root of SKILL_ROOTS) await restoreSkill(input.worktree, `${root}/${name}`, env);
   }

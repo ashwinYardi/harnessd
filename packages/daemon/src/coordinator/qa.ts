@@ -520,6 +520,8 @@ export interface QaRunResult {
   limited?: boolean;
   /** Tokens the QA agent runs used (D-040). */
   tokens?: TokenUsage;
+  /** Model turns the QA agent runs reported (D-043). */
+  turns?: number;
 }
 
 /** Reviews every part's PR. Never throws: a broken step is an `error` review. */
@@ -532,6 +534,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
   const cancelled = () => deps.signal?.aborted === true;
   let limited = false;
   let spent: TokenUsage = emptyTokenUsage();
+  let spentTurns: number | undefined;
   const stopped = (part: LinkedIssue, pr?: PullRequest): PrReview => ({
     part,
     ...(pr ? { pr } : {}),
@@ -669,6 +672,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
           cacheRead: spent.cacheRead + reply.tokens.cacheRead,
           cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
         };
+        if (reply.turns !== undefined) spentTurns = (spentTurns ?? 0) + reply.turns;
         if (!reply.ok && reply.limited) limited = true;
         verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
       }
@@ -752,14 +756,33 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
     }
     reviews.push(await review(part));
   }
-  if (cancelled()) return { outcome: "error", reviews, cancelled: true, tokens: spent };
-  if (limited) return { outcome: "error", reviews, limited: true, tokens: spent };
+  if (cancelled())
+    return {
+      outcome: "error",
+      reviews,
+      cancelled: true,
+      tokens: spent,
+      ...(spentTurns === undefined ? {} : { turns: spentTurns }),
+    };
+  if (limited)
+    return {
+      outcome: "error",
+      reviews,
+      limited: true,
+      tokens: spent,
+      ...(spentTurns === undefined ? {} : { turns: spentTurns }),
+    };
   const outcome = reviews.some((r) => r.decision === "request_changes")
     ? "changes_requested"
     : reviews.some((r) => r.decision === "error")
       ? "error"
       : "approved";
-  return { outcome, reviews, tokens: spent };
+  return {
+    outcome,
+    reviews,
+    tokens: spent,
+    ...(spentTurns === undefined ? {} : { turns: spentTurns }),
+  };
 }
 
 // --- after a round: Linear and the loop state ----------------------------------

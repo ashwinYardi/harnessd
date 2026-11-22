@@ -22,7 +22,8 @@ test("no layers gives the defaults", () => {
   assert.deepEqual(merged.limits, {
     max_concurrent: 1,
     budget_minutes: { S: 30, M: 120 },
-    token_budget: { S: 5_000_000, M: 12_000_000 },
+    token_budget: { S: 3_000_000, M: 6_000_000 },
+    cached_token_weight: 0.1,
     qa_max_failures: 2,
   });
   assert.equal(merged.slack.channel, "#harnessd");
@@ -49,10 +50,27 @@ test("scalars override and tables deep-merge, later layer winning", () => {
   assert.deepEqual(merged.limits, {
     max_concurrent: 5,
     budget_minutes: { S: 10, M: 60 },
-    token_budget: { S: 5_000_000, M: 12_000_000 },
+    token_budget: { S: 3_000_000, M: 6_000_000 },
+    cached_token_weight: 0.1,
     qa_max_failures: 2,
   });
   assert.deepEqual(merged.linear, { team_id: "MET", project: "harnessd" });
+});
+
+test("limits merge per key, the cached weight included", () => {
+  const merged = mergeLayers([
+    layer("global", {
+      settings: { limits: { token_budget: { S: 1_000 }, cached_token_weight: 0.25 } },
+    }),
+    layer("workspace", { settings: { limits: { cached_token_weight: 0.05 } } }),
+  ]);
+  assert.deepEqual(merged.limits, {
+    max_concurrent: 1,
+    budget_minutes: { S: 30, M: 120 },
+    token_budget: { S: 1_000, M: 6_000_000 },
+    cached_token_weight: 0.05,
+    qa_max_failures: 2,
+  });
 });
 
 test("qa commands default to pnpm and merge per key", () => {

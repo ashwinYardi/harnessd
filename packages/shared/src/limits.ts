@@ -1,6 +1,12 @@
-// The words for a harness usage limit (MET-70). The loop log, the daily summary and
-// the app use these, so the text matches everywhere.
+// The words for a harness usage limit (MET-70) and the weighted token budget (D-043).
+// The loop log, the daily summary and the app use these, so the text matches everywhere.
 import type { HarnessId } from "./index.ts";
+import type { TokenSum } from "./ui.ts";
+
+/** Tokens one run or parent used by kind, weighted for the budget (D-043). */
+export function weightedTokens(sum: TokenSum, weight: number): number {
+  return sum.input + sum.output + Math.round(sum.cached * weight);
+}
 
 const HARNESS_NAMES: Record<HarnessId, string> = {
   "claude-code": "Claude Code",

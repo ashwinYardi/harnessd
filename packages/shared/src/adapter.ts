@@ -31,6 +31,8 @@ export interface RunResult {
   /** Wall-clock time measured by the adapter, spawn to exit. */
   durationMs: number;
   tokens: TokenUsage;
+  /** Model turns the harness reported, when it did. In memory only, never in loop.json. */
+  turns?: number;
   costUsd?: number;
   sessionId?: string;
   /** Final assistant text reported by the harness. */
