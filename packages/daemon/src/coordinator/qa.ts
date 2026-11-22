@@ -373,6 +373,11 @@ export interface PrReview {
   pr?: PullRequest;
   /** `error` means QA itself could not judge; no review is posted. */
   decision: ReviewDecision;
+  /**
+   * True when QA could not set up the review (PR lookup, checkout, worktree sync, budget
+   * before the agent). Such a round is re-queued without counting a QA failure (D-041).
+   */
+  setup?: boolean;
   /** One line per failing item: the item and its evidence. */
   failing: string[];
   /** The posted review. */
@@ -561,6 +566,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         part,
         decision: "error",
         failing: [],
+        setup: true,
         error: `could not look up the PR: ${message(error)}`,
       };
     }
@@ -586,6 +592,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         pr,
         decision: "error",
         failing: [],
+        setup: true,
         error: `could not check out PR #${pr.number}: ${message(error)}`,
       };
     }
@@ -594,6 +601,9 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
 
     let tests: TestRun;
     let verdict: ParsedQaVerdict;
+    // A throw while this is true is a setup error: it counts no QA failure (D-041).
+    let inSetup = true;
+    let setupError = false;
     try {
       const files = await deps.github.prFiles(pr.number).catch((error) => {
         log(`${qa.key}: could not list the files of PR #${pr.number}: ${message(error)}`);
@@ -619,6 +629,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       if (cancelled()) {
         verdict = { ok: false, error: "cancelled by harnessd pause" };
       } else if (left <= 0) {
+        setupError = true;
         verdict = { ok: false, error: "the QA budget ran out before the agent ran" };
       } else {
         const id = `${qa.key}-qa-${input.round}-pr${pr.number}`;
@@ -650,6 +661,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         };
         if (deps.agent.model !== undefined) task.model = deps.agent.model;
         if (env !== undefined) task.env = env;
+        inSetup = false;
         const reply = await runForReply(deps.adapter, task, path);
         spent = {
           input: spent.input + reply.tokens.input,
@@ -662,19 +674,21 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       }
     } catch (error) {
       if (cancelled()) return stopped(part, pr);
-      return { part, pr, decision: "error", failing: [], error: message(error) };
+      return {
+        part,
+        pr,
+        decision: "error",
+        failing: [],
+        ...(inSetup ? { setup: true } : {}),
+        error: message(error),
+      };
     } finally {
       // A pause keeps the worktree in use for inspection (MET-15); the loop records it.
       if (!cancelled()) {
-        // A detached PR-head checkout is a scratch tree: remove it when it holds no
-        // unshipped work, and say so when it does.
-        const removed = await deps.worktrees.remove(path, { scratch: true }).catch((error) => {
+        // A QA PR-head checkout is never kept, even when it has local changes (D-041).
+        await deps.worktrees.remove(path, { force: true }).catch((error) => {
           log(`${qa.key}: could not remove ${path}: ${message(error)}`);
-          return undefined;
         });
-        if (removed !== undefined && !removed.removed && removed.kept !== undefined) {
-          log(`${qa.key}: worktree kept at ${path}: ${removed.kept}`);
-        }
         deps.onWorktree?.("");
       }
     }
@@ -690,7 +704,14 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
 
     const decision = decideReview(checklist, tests, verdict);
     if (decision.decision === "error") {
-      return { part, pr, decision: "error", failing: [], error: decision.error ?? "unknown" };
+      return {
+        part,
+        pr,
+        decision: "error",
+        failing: [],
+        ...(setupError ? { setup: true } : {}),
+        error: decision.error ?? "unknown",
+      };
     }
     const body = formatReviewBody({
       qa,
@@ -754,7 +775,7 @@ export interface QaSettleDeps {
   log?: (line: string) => void;
 }
 
-export type QaSettlement = "approved" | "sent_back" | "escalated";
+export type QaSettlement = "approved" | "sent_back" | "escalated" | "requeued";
 
 function reviewLines(reviews: PrReview[]): string[] {
   const lines: string[] = [];
@@ -779,11 +800,12 @@ function times(n: number): string {
 }
 
 /**
- * Applies a QA round. Approved: QA moves to In Review (MET-14 merges). Otherwise the
- * round counts as a failure for the parent: parts with requested changes go back to
- * Ready with a comment pointing at the review, and QA waits in Ready for them. The
- * `maxFailures`-th failure moves QA and the parent to Needs input with one comment and
- * one ping, and nothing is sent back again (D-014).
+ * Applies a QA round. Approved: QA moves to In Review (MET-14 merges). A round where no
+ * part was judged and every failed review is a setup error is re-queued with no failure
+ * counted (D-041). Otherwise the round counts as a failure for the parent: parts with
+ * requested changes go back to Ready with a comment pointing at the review, and QA waits
+ * in Ready for them. The `maxFailures`-th failure moves QA and the parent to Needs input
+ * with one comment and one ping, and nothing is sent back again (D-014).
  */
 export async function settleQa(
   state: Pick<LoopState, "qaFailures" | "qaFeedback">,
@@ -817,6 +839,18 @@ export async function settleQa(
   }
 
   const failures = (state.qaFailures[parent.id] ?? 0) + 1;
+  const notApproved = result.reviews.filter((r) => r.decision !== "approve");
+  const setupOnly =
+    notApproved.length > 0 &&
+    notApproved.every((r) => r.setup === true) &&
+    !result.reviews.some((r) => r.decision === "request_changes");
+  if (setupOnly) {
+    const reason = notApproved.map((r) => oneLine(r.error ?? "unknown")).join("; ");
+    log(`${qa.key}: QA not judged (${reason}), re-queued`);
+    await safely(`re-queue ${qa.key}`, () => deps.linear.moveTo(qa.id, "Ready"));
+    return "requeued";
+  }
+
   if (failures >= deps.maxFailures) {
     delete state.qaFailures[parent.id];
     for (const r of result.reviews) delete state.qaFeedback[r.part.id];

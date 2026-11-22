@@ -1138,6 +1138,55 @@ test("a limited QA run counts no QA failure and goes back to Ready", async () =>
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
 });
 
+test("a QA checkout error counts no failure, and the next tick runs QA again", async () => {
+  const wt = fakeWorktrees();
+  let fail = true;
+  let release!: () => void;
+  const wait = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const t = setup({
+    worktrees: {
+      ...wt.worktrees,
+      async checkout(input) {
+        if (fail) {
+          fail = false;
+          await wait;
+          throw new Error("fetch failed");
+        }
+        return wt.worktrees.checkout(input);
+      },
+    },
+  });
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  release();
+  await t.loop.idle();
+  assert.equal(qa.state, "Ready");
+  assert.notEqual(qa.state, "Needs input");
+  assert.equal(backend.state, "In Review", "the part is not sent back");
+  assert.equal(parent.state, "In Progress");
+  assert.deepEqual(t.memory.state.qaFailures, {}, "no QA failure counted");
+  assert.deepEqual(t.memory.state.reviewedHeads ?? {}, {});
+  assert.equal(t.gh.reviews.length, 0);
+  assert.equal(t.linear.comments.length, 0, "no comment is posted");
+  assert.deepEqual(t.pings, []);
+  assert.ok(
+    t.logs.includes(
+      `${qa.key}: QA not judged (could not check out PR #7: fetch failed), re-queued`,
+    ),
+  );
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key], "the next tick runs QA again");
+  await settle();
+  t.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+  assert.equal(t.gh.reviews.length, 1, "the retry really reviews the PR");
+  assert.equal(backend.state, "In Review");
+});
+
 // --- fallback harness (MET-81) ------------------------------------------------
 
 /** The backend agent runs on Claude Code with opus, and on Codex with gpt-5 while Claude Code is held. */

@@ -18,6 +18,7 @@ import { formatNotice, type Notifier } from "./notifier.ts";
 import {
   type CommandResult,
   type CommandRunner,
+  type PrReview,
   parseQaVerdict,
   type QaRunInput,
   type QaRunResult,
@@ -128,6 +129,7 @@ function harness(options: Options = {}) {
   const reviews: Array<ReviewInput & { number: number }> = [];
   const checkouts: Array<{ issueKey: string; title: string; branch: string; sha: string }> = [];
   const removed: string[] = [];
+  const removals: Array<{ path: string; options?: unknown }> = [];
   const commands: Array<{ command: string; cwd: string }> = [];
   const worktreeLog: string[] = [];
   const logs: string[] = [];
@@ -180,8 +182,9 @@ function harness(options: Options = {}) {
         checkouts.push(input);
         return { path: `/wt/qa-${input.sha}`, branch: input.branch, resumed: false };
       },
-      async remove(path: string) {
+      async remove(path: string, options?: unknown) {
         removed.push(path);
+        removals.push({ path, options });
         return { removed: true };
       },
     },
@@ -200,7 +203,19 @@ function harness(options: Options = {}) {
     round: 1,
     maxRounds: 2,
   };
-  return { deps, input, reviews, checkouts, removed, commands, worktreeLog, logs, tasks, cwds };
+  return {
+    deps,
+    input,
+    reviews,
+    checkouts,
+    removed,
+    removals,
+    commands,
+    worktreeLog,
+    logs,
+    tasks,
+    cwds,
+  };
 }
 
 const verdict = (pass: boolean[], testsPassed = true) =>
@@ -217,6 +232,7 @@ function settleDeps() {
   const comments: Array<{ issueId: string; body: string }> = [];
   const moves: Array<{ issueId: string; state: WorkflowStateName }> = [];
   const pings: string[] = [];
+  const logs: string[] = [];
   const notifier: Notifier = {
     async notify(notice) {
       pings.push(formatNotice(notice));
@@ -231,7 +247,17 @@ function settleDeps() {
       moves.push({ issueId, state });
     },
   };
-  return { deps: { linear, notifier, maxFailures: 2 }, comments, moves, pings };
+  return {
+    deps: { linear, notifier, maxFailures: 2, log: (line: string) => logs.push(line) },
+    comments,
+    moves,
+    pings,
+    logs,
+  };
+}
+
+function setupErrorReview(part: LinkedIssue, error: string): PrReview {
+  return { part, decision: "error", failing: [], setup: true, error };
 }
 
 test("every item and the tests pass: approve at the PR head, then QA stays Ready", async () => {
@@ -273,7 +299,7 @@ test("every item and the tests pass: approve at the PR head, then QA stays Ready
   assert.deepEqual(s.pings, []);
 });
 
-test("the worktree is checked out at the PR head, used as the agent's cwd and removed", async () => {
+test("the worktree is checked out at the PR head, used as the agent's cwd and force-removed", async () => {
   const h = harness({ replies: [verdict([true, true])] });
   await runQa(h.input, h.deps);
   assert.deepEqual(h.checkouts, [
@@ -287,6 +313,11 @@ test("the worktree is checked out at the PR head, used as the agent's cwd and re
   assert.deepEqual(h.cwds, ["/wt/qa-sha7"]);
   assert.equal(h.tasks[0]?.id, "MET-53-qa-1-pr7");
   assert.deepEqual(h.removed, ["/wt/qa-sha7"]);
+  assert.deepEqual(
+    h.removals,
+    [{ path: "/wt/qa-sha7", options: { force: true } }],
+    "a QA checkout is removed without the keep guard",
+  );
   assert.deepEqual(h.worktreeLog, ["/wt/qa-sha7", ""]);
 });
 
@@ -450,13 +481,76 @@ test("an approval that cannot be posted at all is an error, not an approval", as
   assert.match(result.reviews[0]?.error ?? "", /could not post the approval/);
 });
 
-test("a failed checkout is an error and nothing runs", async () => {
+test("a failed checkout is a setup error and nothing runs", async () => {
   const h = harness({ checkoutFails: true });
   const result: QaRunResult = await runQa(h.input, h.deps);
   assert.equal(result.outcome, "error");
+  assert.equal(result.reviews[0]?.setup, true);
   assert.match(result.reviews[0]?.error ?? "", /could not check out PR #7: fetch failed/);
   assert.deepEqual(h.commands, []);
   assert.deepEqual(h.removed, []);
+});
+
+test("a PR lookup failure is also a setup error", async () => {
+  const h = harness();
+  const result = await runQa(h.input, {
+    ...h.deps,
+    github: {
+      ...h.deps.github,
+      async findPrForIssue() {
+        throw new Error("gh pr list failed");
+      },
+    },
+  });
+  assert.equal(result.outcome, "error");
+  assert.equal(result.reviews[0]?.setup, true);
+  assert.match(result.reviews[0]?.error ?? "", /could not look up the PR: gh pr list failed/);
+});
+
+test("a setup-error round counts no QA failure, re-queues QA and posts nothing", async () => {
+  const result: QaRunResult = {
+    outcome: "error",
+    reviews: [setupErrorReview(backend, "could not check out PR #7: fetch failed")],
+  };
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, { [parent.id]: 1 }, "no failure counted");
+  assert.deepEqual(state.qaFeedback, {});
+  assert.deepEqual(s.moves, [{ issueId: qa.id, state: "Ready" }]);
+  assert.deepEqual(s.comments, [], "no comment is posted");
+  assert.deepEqual(s.pings, [], "no notice is sent");
+  assert.deepEqual(s.logs, [
+    "MET-53: QA not judged (could not check out PR #7: fetch failed), re-queued",
+  ]);
+});
+
+test("a setup error mixed with requested changes counts one failure", async () => {
+  const result: QaRunResult = {
+    outcome: "error",
+    reviews: [
+      setupErrorReview(backend, "could not check out PR #7: fetch failed"),
+      {
+        part: frontend,
+        decision: "request_changes",
+        failing: ["It has tests: nothing covers item 2"],
+      },
+    ],
+  };
+  const s = settleDeps();
+  const state = emptyLoopState();
+
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "sent_back");
+  assert.equal(state.qaFailures[parent.id], 1);
+  assert.deepEqual(state.qaFeedback[frontend.id], {
+    failing: ["It has tests: nothing covers item 2"],
+  });
+  assert.deepEqual(state.qaFeedback[backend.id], undefined);
+  assert.ok(s.comments.some((c) => c.issueId === frontend.id));
+  assert.ok(s.comments.some((c) => c.issueId === qa.id));
+  assert.deepEqual(s.pings, []);
 });
 
 test("parseQaVerdict is strict", () => {
@@ -571,7 +665,7 @@ test("prepare runs after the tests and before the agent; its env and the memory 
   assert.match(h.tasks[0]?.prompt ?? "", /\/repo\/\.harnessd\/vault/);
 });
 
-test("a failed prepare is an error review: no agent runs, nothing is posted", async () => {
+test("a failed prepare is a setup error: no agent runs, nothing is posted", async () => {
   const h = harness({ replies: [verdict([true, true])] });
   const result = await runQa(h.input, {
     ...h.deps,
@@ -580,6 +674,7 @@ test("a failed prepare is an error review: no agent runs, nothing is posted", as
     },
   });
   assert.equal(result.outcome, "error");
+  assert.equal(result.reviews[0]?.setup, true);
   assert.match(
     result.reviews[0]?.error ?? "",
     /harnessd sync into the worktree failed: bad config\.toml/,
@@ -587,6 +682,21 @@ test("a failed prepare is an error review: no agent runs, nothing is posted", as
   assert.equal(h.tasks.length, 0);
   assert.equal(h.reviews.length, 0);
   assert.deepEqual(h.removed, ["/wt/qa-sha7"]);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, {});
+  assert.deepEqual(s.comments, []);
+});
+
+test("a round whose budget ran out before the agent is a setup error", async () => {
+  const h = harness();
+  const result = await runQa({ ...h.input, budgetMs: 0 }, h.deps);
+  assert.equal(result.outcome, "error");
+  assert.equal(result.reviews[0]?.setup, true);
+  assert.match(result.reviews[0]?.error ?? "", /budget ran out before the agent ran/);
+  assert.equal(h.tasks.length, 0);
 });
 
 test("a limited QA run stops the round: no review, the worktree is removed, no more parts run (MET-70)", async () => {

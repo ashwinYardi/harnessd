@@ -56,11 +56,11 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **State repair**: the loop's move of a shipped part with an open PR back to In Review after a Linear automation moved it to In Progress (D-039, MET-128). The loop logs one line. _Avoid_: state fix, resync, revert.
 
-**Kept worktree**: a worktree that the loop does not remove because it holds unshipped work, or because a run was paused, stopped or limited. The next run resumes it on the same branch (D-039). _Avoid_: leftover worktree.
+**Kept worktree**: a worktree that the loop does not remove because it holds unshipped work, or because a run was paused, stopped or limited. The next run resumes it on the same branch (D-039). A QA checkout is never kept (D-041). _Avoid_: leftover worktree.
 
-**Unshipped work**: uncommitted changes in a run's worktree, or commits on its branch that are not on `origin/<branch>`. A worktree with unshipped work is kept, not removed (MET-114, docs/LOOP.md "Dispatch"). _Avoid_: dirty tree, local only.
+**Unshipped work**: uncommitted changes in a run's worktree, or commits on its branch that are not on `origin/<branch>`. Files the worktree sync wrote are excluded, so they never count (D-041). A worktree with unshipped work is kept, not removed (MET-114, docs/LOOP.md "Dispatch"). _Avoid_: dirty tree, local only.
 
-**Scratch worktree**: a detached checkout of a PR head that a QA round uses. It holds no branch work, so a clean one is removed; uncommitted changes, or commits that no live remote branch holds, are kept like any other worktree (MET-114). _Avoid_: throwaway worktree.
+**Scratch worktree**: a detached checkout of a PR head that a QA round uses. It holds no branch work and is always removed after the round, even when it has local changes (D-041). _Avoid_: throwaway worktree.
 
 **Event stream**: the server-sent events at `GET /api/events` that push pause, board, agent and log changes to the UI (D-024).
 

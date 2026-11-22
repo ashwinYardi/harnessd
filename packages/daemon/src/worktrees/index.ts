@@ -412,9 +412,10 @@ export interface CheckoutWorktreeOptions {
 /**
  * Checks out someone else's branch read-only: fetches `branch` from `remote` and adds
  * `<root>/<repo-name>/<branchName(issueKey, title)>` with a detached HEAD at `sha`, so the
- * branch itself stays free for its owner and is never moved. A leftover worktree at the
- * same path is replaced only when it has no unshipped work. If the fetch fails but
- * `sha` is already present locally, the local commit is used.
+ * branch itself stays free for its owner and is never moved. This is used only for QA PR
+ * heads, so a leftover checkout at the same path is always replaced: a QA round never keeps
+ * its worktree (D-041). If the fetch fails but `sha` is already present locally, the local
+ * commit is used.
  */
 export async function checkoutWorktree(options: CheckoutWorktreeOptions): Promise<Worktree> {
   const root = resolve(options.root ?? defaultWorktreesRoot());
@@ -439,15 +440,7 @@ export async function checkoutWorktree(options: CheckoutWorktreeOptions): Promis
     const registered = await registeredWorktrees(repoDir);
     const registeredPath = await canonical(path);
     if (registered.has(registeredPath)) {
-      const previous = manifest.entries.find((entry) => entry.path === path);
-      const branch = registered.get(registeredPath) ?? previous?.branch;
-      // A detached checkout is a scratch checkout: judge it the way removeWorktree does.
-      const detached = await git(path, ["symbolic-ref", "-q", "HEAD"]).then(
-        () => false,
-        () => true,
-      );
-      const kept = await keepReason(repoDir, path, branch, "main", undefined, detached);
-      if (kept !== undefined) throw new Error(`worktree kept at ${path}: ${kept}`);
+      // A QA PR-head checkout is never kept: replace the old one without the keep guard.
       await teardown(root, repoDir, path);
     } else if (await exists(path)) {
       throw new Error(`${path} exists but is not a git worktree; run recoverOnStartup first`);
@@ -481,11 +474,10 @@ export interface RemoveWorktreeOptions {
   /** Also delete the branch. Default false: the PR needs it. */
   deleteBranch?: boolean;
   /**
-   * A throwaway checkout, such as a QA PR head, detached from a branch. Its commits are
-   * judged against the remote branch when one exists, not against the base, because a
-   * PR from a fork keeps its commits on another branch. Uncommitted work is still kept.
+   * Skip the keep guard and remove the worktree even when it holds unshipped work. A QA
+   * PR-head checkout uses this: a QA round never keeps its worktree (D-041).
    */
-  scratch?: boolean;
+  force?: boolean;
   /** The run's excludes file, so synced files do not count as uncommitted changes. */
   excludesFile?: string;
   /** The branch the task started from, when it has no remote branch. Default "main". */
@@ -504,9 +496,7 @@ export interface RemoveWorktreeResult {
 /**
  * The reason to keep the worktree, or undefined when it is safe to remove. Committed
  * work counts only when it is not on the remote branch; with no remote branch, every
- * commit ahead of base is unshipped. A scratch checkout is detached from a PR head, so
- * its commits may live on a fork: it is judged on the remote branch when one exists,
- * and otherwise on whether any live remote branch holds its commits.
+ * commit ahead of base is unshipped.
  */
 async function keepReason(
   repoDir: string,
@@ -514,7 +504,6 @@ async function keepReason(
   branch: string | undefined,
   base: string,
   excludesFile: string | undefined,
-  scratch: boolean,
 ): Promise<WorktreeKeepReason | undefined> {
   const status = await git(
     path,
@@ -529,17 +518,6 @@ async function keepReason(
     // cannot prove the work is shipped, so keep it.
     if (!(await refExists(repoDir, `${remoteHead}^{commit}`))) return "commits not on the remote";
     return (await commitsAhead(path, remoteHead)) > 0 ? "commits not on the remote" : undefined;
-  }
-  if (scratch) {
-    // A tracking ref can outlive a deleted branch. Check the live heads instead.
-    const remotes = (await git(repoDir, ["remote"])).trim().split("\n").filter(Boolean);
-    for (const remote of remotes) {
-      const heads = await git(repoDir, ["ls-remote", "--heads", remote]).catch(() => "");
-      for (const sha of new Set(heads.match(/^[0-9a-f]{40}(?=\t)/gm))) {
-        if (await isAncestor(path, "HEAD", sha)) return undefined;
-      }
-    }
-    return "commits not on the remote";
   }
   for (const ref of [`origin/${base}`, base]) {
     if (await refExists(repoDir, ref)) {
@@ -579,14 +557,13 @@ export async function removeWorktree(
     const repoDir = entry?.repoDir ?? options.repoDir;
     const branch = entry?.branch ?? (await registeredWorktrees(repoDir)).get(await canonical(path));
 
-    if (await exists(path)) {
+    if ((await exists(path)) && options.force !== true) {
       const kept = await keepReason(
         repoDir,
         path,
         branch,
         options.base ?? "main",
         options.excludesFile,
-        options.scratch ?? false,
       );
       if (kept !== undefined) return { removed: false, kept };
     }

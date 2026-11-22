@@ -1,5 +1,5 @@
 # D-039 The daemon ships every part run; agents get no git write and no GitHub login
-Status: accepted 2026-11-22. Issue: MET-109 (part 4, MET-116). Amends D-032 and docs/LOOP.md.
+Status: accepted 2026-11-22. Issue: MET-109 (part 4, MET-116). Amends D-032 and docs/LOOP.md. Amended by D-041 for the QA checkout and the keep guard.
 
 **The ship step.**
 - After a part run ends `ok`, the daemon commits the worktree, pushes the branch and opens or updates the PR. The agent does not commit, push or open a PR.
@@ -21,7 +21,7 @@ Status: accepted 2026-11-22. Issue: MET-109 (part 4, MET-116). Amends D-032 and 
 - `removeWorktree` refuses a worktree with unshipped work: uncommitted changes, or commits that are not on `origin/<branch>`.
 - The loop keeps that worktree, lists it under `interrupted`, and posts one Linear comment: "worktree kept at <path>: uncommitted changes" or "…: commits not on the remote". The next run resumes it on the same branch.
 - The guard runs on every removal, so a failed, cancelled or limited run keeps its worktree too when it holds unshipped work. The keep comment is the only comment such a run posts.
-- The keep guard also applies to a QA PR-head scratch checkout. If the checkout has no remote branch, the guard asks each remote for its live branch heads (`git ls-remote`), because a local tracking ref can outlive a deleted branch. If no live head holds the checkout's HEAD, or the remote cannot be reached, the daemon keeps the checkout and reports "commits not on the remote".
+- The keep guard also applies to a QA PR-head scratch checkout. If the checkout has no remote branch, the guard asks each remote for its live branch heads (`git ls-remote`), because a local tracking ref can outlive a deleted branch. If no live head holds the checkout's HEAD, or the remote cannot be reached, the daemon keeps the checkout and reports "commits not on the remote". Superseded by D-041: a QA checkout is never kept.
 - A run that a pause (D-014) or a self-update (D-033) stopped keeps its worktree.
 
 **The `harness.<id>.worktree_write` check.**
