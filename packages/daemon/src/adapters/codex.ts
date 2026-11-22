@@ -51,6 +51,9 @@ export function codexArgs(task: Task, options: CodexOptions = {}, cwd?: string):
     // Nobody is there to answer a prompt.
     "-c",
     'approval_policy="never"',
+    // D-045: about 5k tokens of one tool result, matching the Claude Code cap.
+    "-c",
+    "tool_output_token_limit=5000",
   ];
   if (cwd !== undefined) args.push(...mcpOverrides(cwd));
   const model = task.model ?? options.model;
@@ -71,6 +74,7 @@ export function createCodexAdapter(options: CodexOptions = {}): HarnessAdapter {
         parser: (emit) => new CodexJsonParser(emit),
         ...(options.killGraceMs !== undefined ? { killGraceMs: options.killGraceMs } : {}),
         ...(options.env !== undefined ? { env: options.env } : {}),
+        ...(task.maxTurns === undefined ? {} : { maxTurns: task.maxTurns }),
       }),
   };
 }
@@ -154,7 +158,10 @@ class CodexJsonParser implements LineParser {
   #sessionId: string | undefined;
   #finalText: string | undefined;
   #tokens = emptyTokenUsage();
+  /** Completed tool items, the turn count for the cap and the D-043 log line (D-045). */
   #turns = 0;
+  /** One `turn.completed` per prompt marks a run that produced a turn. */
+  #turnCompleted = 0;
   #failure: string | undefined;
   #lastStderr: string | undefined;
   /** Items already shown as a tool event, so a started item is not shown twice. */
@@ -181,8 +188,12 @@ class CodexJsonParser implements LineParser {
     if (line.trim() !== "") this.#lastStderr = line.trim();
   }
 
+  turnCount(): number {
+    return this.#turns;
+  }
+
   outcome(exitCode: number | null): ParsedOutcome {
-    const ok = this.#turns > 0 && this.#failure === undefined;
+    const ok = this.#turnCompleted > 0 && this.#failure === undefined;
     const out: ParsedOutcome = { ok, tokens: { ...this.#tokens } };
     if (this.#turns > 0) out.turns = this.#turns;
     if (this.#sessionId !== undefined) out.sessionId = this.#sessionId;
@@ -200,7 +211,7 @@ class CodexJsonParser implements LineParser {
       out.error = message;
     } else if (exitCode !== 0) {
       out.error = `exited with code ${exitCode}`;
-    } else if (this.#turns === 0) {
+    } else if (this.#turnCompleted === 0) {
       out.error = "no turn.completed event";
     }
     return out;
@@ -231,8 +242,14 @@ class CodexJsonParser implements LineParser {
       }
       case "item.started":
       case "item.updated":
-      case "item.completed":
-        return isRecord(value.item) && this.#item(value.type, value.item);
+      case "item.completed": {
+        if (!isRecord(value.item)) return false;
+        const handled = this.#item(value.type, value.item);
+        if (handled && value.type === "item.completed" && countsAsTurn(value.item.type)) {
+          this.#turns++;
+        }
+        return handled;
+      }
       default:
         return false;
     }
@@ -299,7 +316,7 @@ class CodexJsonParser implements LineParser {
   }
 
   #turn(usage: unknown): void {
-    this.#turns++;
+    this.#turnCompleted++;
     // A turn with no usage still emits the running totals.
     const u = isRecord(usage) ? usage : {};
     const cached = count(u.cached_input_tokens);
@@ -321,6 +338,16 @@ class CodexJsonParser implements LineParser {
   #raw(line: string): void {
     this.#emit({ type: "log", stream: "stdout", line });
   }
+}
+
+/** Completed items that count as one turn for the cap and the D-043 log line (D-045). */
+function countsAsTurn(type: unknown): boolean {
+  return (
+    type === "command_execution" ||
+    type === "file_change" ||
+    type === "mcp_tool_call" ||
+    type === "web_search"
+  );
 }
 
 function todoSummary(items: unknown): string {

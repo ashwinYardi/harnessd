@@ -330,6 +330,7 @@ test("planIssue runs the coordinator harness and returns the model plan", async 
   assert.equal(plan.parts.length, 1);
   assert.equal(tasks[0]?.id, "plan-MET-40");
   assert.equal(tasks[0]?.budgetMs, 10 * 60_000);
+  assert.equal(tasks[0]?.maxTurns, 50);
   assert.equal(tasks[0]?.model, "opus");
 });
 

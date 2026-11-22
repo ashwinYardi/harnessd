@@ -50,6 +50,7 @@ function readRecord(path: string): {
   cwd: string;
   grandchildPid?: number;
   probe?: string;
+  bashMaxOutput?: string;
 } {
   return JSON.parse(readFileSync(path, "utf8"));
 }
@@ -147,6 +148,23 @@ test("passes prompt, model, permissions and worktree cwd to the CLI", async () =
     assert.equal(start.cwd, scratch);
     assert.equal(start.taskId, "MET-8");
   }
+});
+
+test("adds --max-turns and the bash output cap to every run", async () => {
+  const { run: r, record } = run("ok", task({ maxTurns: 80 }));
+  const result = await r.result;
+  const { argv, bashMaxOutput } = readRecord(record);
+  assert.deepEqual(argv.slice(-2), ["--max-turns", "80"]);
+  assert.equal(bashMaxOutput, "20000");
+  assert.equal(result.status, "ok");
+});
+
+test("an error_max_turns result is an error with turn cap and no reason", async () => {
+  const { run: r } = run("max-turns", task({ maxTurns: 80 }));
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "turn cap (80 turns)");
+  assert.equal(result.reason, undefined);
 });
 
 test("omits --model and permission flags when not configured", async () => {

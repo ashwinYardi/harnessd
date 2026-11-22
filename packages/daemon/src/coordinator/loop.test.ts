@@ -824,6 +824,26 @@ test("a failed run goes back to Ready once; the second failure goes to Needs inp
   assert.equal(t.adapter.runs().length, 2, "Needs input is not picked up again");
 });
 
+test("a turn-capped part counts one attempt and is not shipped", async () => {
+  const t = setup();
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const part = t.linear.add({
+    title: "Long build",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+
+  await t.loop.tick();
+  assert.equal(t.adapter.runs()[0]?.maxTurns, 80);
+  t.adapter.pending[0]?.finish("error", "turn cap (80 turns)");
+  await t.loop.idle();
+  assert.equal(part.state, "Ready");
+  assert.equal(t.memory.state.attempts[part.id], 1);
+  assert.match(t.linear.comments.at(-1)?.body ?? "", /turn cap \(80 turns\)/);
+  assert.deepEqual(t.wt.removed, [`/wt/${part.key}`]);
+  assert.equal(t.memory.state.shipped?.[part.id], undefined);
+});
+
 test("a limited run goes back to Ready and uses no attempt (MET-70)", async () => {
   const t = setup();
   const parent = t.linear.add({ title: "P", state: "In Progress" });

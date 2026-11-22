@@ -28,6 +28,8 @@ export interface LimitsConfig {
   token_budget: Record<BudgetSize, number>;
   /** Rate of a cached token against a new input token in the token budget, 0 to 1 (D-043). */
   cached_token_weight: number;
+  /** Model turns one builder part run may take, keyed by size (D-045). */
+  max_turns: Record<BudgetSize, number>;
   qa_max_failures: number;
 }
 
@@ -325,6 +327,7 @@ export const DEFAULT_SETTINGS: Settings = {
     budget_minutes: { S: 30, M: 120 },
     token_budget: { S: 3_000_000, M: 6_000_000 },
     cached_token_weight: 0.1,
+    max_turns: { S: 80, M: 160 },
     qa_max_failures: 2,
   },
   linear: {},
@@ -643,6 +646,7 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
       "budget_minutes",
       "token_budget",
       "cached_token_weight",
+      "max_turns",
       "qa_max_failures",
     ]);
     const limits: NonNullable<ConfigFile["limits"]> = {};
@@ -674,6 +678,16 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
         t.cached_token_weight,
         "limits.cached_token_weight",
       );
+    }
+    if (t.max_turns !== undefined) {
+      const b = c.table(t.max_turns, "limits.max_turns", BUDGET_SIZES);
+      const turns: Partial<Record<BudgetSize, number>> = {};
+      for (const size of BUDGET_SIZES) {
+        if (b[size] !== undefined) {
+          turns[size] = c.positiveInt(b[size], `limits.max_turns.${size}`);
+        }
+      }
+      limits.max_turns = turns;
     }
     if (t.qa_max_failures !== undefined) {
       limits.qa_max_failures = c.positiveInt(t.qa_max_failures, "limits.qa_max_failures");

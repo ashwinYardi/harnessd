@@ -65,6 +65,11 @@ export interface GenerateOptions {
   opencodePermission?: OpenCodePermission;
   /** A worktree run gets only the built-in memory server (D-040). */
   memoryMcpOnly?: boolean;
+  /**
+   * A builder worktree run gets OpenCode compaction and the tool-output cap (D-045).
+   * Owner, QA and coordinator sync leave both keys alone.
+   */
+  builderLimits?: boolean;
 }
 
 function memoryServer(options: GenerateOptions): McpServerConfig {
@@ -198,16 +203,38 @@ export function opencodeSettings(
       enabled: true,
     };
   }
-  return {
-    keys: {
-      $schema: "https://opencode.ai/config.json",
-      permission: deepMerge(OPENCODE_PERMISSION, options.opencodePermission),
-      websearch: { provider: "random" },
-    },
-    hooks: {},
-    entries: { mcp },
+  const keys: Record<string, unknown> = {
+    $schema: "https://opencode.ai/config.json",
+    permission: deepMerge(OPENCODE_PERMISSION, options.opencodePermission),
+    websearch: { provider: "random" },
   };
+  if (options.builderLimits === true) {
+    // D-045: start compaction near 100k tokens of a 200k window, and keep 20k recent.
+    keys.compaction = OPENCODE_COMPACTION;
+    keys.tool_output = OPENCODE_TOOL_OUTPUT;
+  }
+  return { keys, hooks: {}, entries: { mcp } };
 }
+
+/**
+ * OpenCode 2.3.2 compaction for builder runs (D-045). `buffer` is the share of the
+ * model's window kept free, so "50%" starts compaction at about 100k tokens of a
+ * 200k window. `keep.tokens` is 20,000, above the relaxed 15,000 default.
+ */
+export const OPENCODE_COMPACTION = {
+  auto: true,
+  keep: { tokens: 20_000 },
+  buffer: "50%",
+} as const;
+
+/**
+ * OpenCode 2.3.2 `tool_output` for builder runs (D-045): 20,000 bytes of one tool
+ * result, about 5k tokens. `max_lines` stays at the documented default of 2,000.
+ */
+export const OPENCODE_TOOL_OUTPUT = {
+  max_lines: 2_000,
+  max_bytes: 20_000,
+} as const;
 
 /** `.mcp.json`, the project MCP file Claude Code reads. */
 export function mcpJson(config: MergedConfig, options: GenerateOptions = {}): string {

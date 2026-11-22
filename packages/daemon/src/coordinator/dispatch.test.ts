@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { LinkedIssue, ResolvedAgentConfig } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
-import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
+import { agentForRole, budgetMs, buildPartPrompt, maxTurns } from "./dispatch.ts";
 
 const limits = mergeLayers([]).limits;
 
@@ -37,6 +37,21 @@ test("budgets are S 30 minutes and M 2 hours; a missing size is M; L has none", 
   assert.equal(budgetMs("M", limits), 120 * 60_000);
   assert.equal(budgetMs(undefined, limits), 120 * 60_000);
   assert.equal(budgetMs("L", limits), undefined);
+});
+
+test("turn caps are per size for builders and fixed for QA and the coordinator", () => {
+  assert.equal(maxTurns("backend", "S", limits), 80);
+  assert.equal(maxTurns("frontend", "M", limits), 160);
+  // A missing or unknown size counts as M.
+  assert.equal(maxTurns("backend", undefined, limits), 160);
+  assert.equal(maxTurns("backend", "L", limits), 160);
+  assert.equal(maxTurns("qa", "S", limits), 40);
+  assert.equal(maxTurns("qa", "M", limits), 40);
+  assert.equal(maxTurns("coordinator", undefined, limits), 50);
+  // The config key is read per size.
+  const lower = { ...limits, max_turns: { S: 20, M: 30 } };
+  assert.equal(maxTurns("backend", "S", lower), 20);
+  assert.equal(maxTurns("backend", "M", lower), 30);
 });
 
 test("agentForRole prefers the agent named after the role", () => {

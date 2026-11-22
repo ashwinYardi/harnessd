@@ -9,6 +9,7 @@ import type {
   Task,
   TokenUsage,
 } from "@harnessd/shared";
+import { COORDINATOR_MAX_TURNS } from "./dispatch.ts";
 import { extractJson, type RunReply, runForReply } from "./grill.ts";
 import type { GrillContext } from "./prompt.ts";
 
@@ -327,6 +328,8 @@ export interface PlanDeps {
   log?: (line: string) => void;
   /** Wall-clock budget of the planning run. Default 10 minutes. */
   budgetMs?: number;
+  /** Turn cap of the planning run. Default `COORDINATOR_MAX_TURNS` (D-045). */
+  maxTurns?: number;
 }
 
 export const DEFAULT_PLAN_BUDGET_MS = 10 * 60_000;
@@ -347,6 +350,7 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
     title: `Plan ${issue.key}: ${issue.title}`,
     prompt: buildPlanPrompt(input),
     budgetMs: deps.budgetMs ?? DEFAULT_PLAN_BUDGET_MS,
+    maxTurns: deps.maxTurns ?? COORDINATOR_MAX_TURNS,
   };
   if (deps.agent.model !== undefined) task.model = deps.agent.model;
 

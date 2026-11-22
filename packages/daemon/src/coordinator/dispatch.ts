@@ -29,6 +29,21 @@ export function agentForRole(config: MergedConfig, role: AgentRole): string | un
     .find((name) => config.agents[name]?.role === role);
 }
 
+/** Fixed turn caps for the roles that do not use the size key (D-045). */
+export const QA_MAX_TURNS = 40;
+export const COORDINATOR_MAX_TURNS = 50;
+
+/**
+ * Turn cap of a run by role and size (D-045). Builder part runs use `limits.max_turns` for
+ * the part's size; a missing or unknown size counts as M. QA, grill and plan use fixed caps.
+ */
+export function maxTurns(role: AgentRole, size: Size | undefined, limits: LimitsConfig): number {
+  if (role === "qa") return QA_MAX_TURNS;
+  if (role === "coordinator") return COORDINATOR_MAX_TURNS;
+  // L never runs; an unknown or L size counts as M, as for the budgets.
+  return size === "S" ? limits.max_turns.S : limits.max_turns.M;
+}
+
 export interface PartPromptInput {
   agent: ResolvedAgentConfig;
   /** The sub-issue being worked. */

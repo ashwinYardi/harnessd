@@ -159,3 +159,29 @@ test("OpenCode sync generates fixed builder permissions and a Web Search provide
   });
   assert.deepEqual(file.settings.keys.websearch, { provider: "random" });
 });
+
+test("owner, QA and coordinator OpenCode settings leave compaction and tool_output alone", () => {
+  const file = generateSyncFiles(mergeLayers([])).find(({ path }) => path === "opencode.json");
+  assert.ok(file && "settings" in file);
+  assert.equal(file.settings.keys.compaction, undefined);
+  assert.equal(file.settings.keys.tool_output, undefined);
+});
+
+test("a builder worktree OpenCode file sets compaction and the tool-output cap", () => {
+  const file = generateSyncFiles(mergeLayers([]), { builderLimits: true }).find(
+    ({ path }) => path === "opencode.json",
+  );
+  assert.ok(file && "settings" in file);
+  // OpenCode 2.3.2: buffer is the share of the window kept free, so 50% starts near 100k
+  // tokens of a 200k window. keep.tokens is 20,000, above the 15,000 default.
+  assert.deepEqual(file.settings.keys.compaction, {
+    auto: true,
+    keep: { tokens: 20_000 },
+    buffer: "50%",
+  });
+  // OpenCode 2.3.2 tool_output: 20,000 bytes of one tool result, about 5k tokens.
+  assert.deepEqual(file.settings.keys.tool_output, { max_lines: 2_000, max_bytes: 20_000 });
+  // The keys sync already owned stay.
+  assert.deepEqual(file.settings.keys.websearch, { provider: "random" });
+  assert.ok(file.settings.keys.permission !== undefined);
+});
