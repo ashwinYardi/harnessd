@@ -407,8 +407,8 @@ export interface CheckoutWorktreeOptions {
  * Checks out someone else's branch read-only: fetches `branch` from `remote` and adds
  * `<root>/<repo-name>/<branchName(issueKey, title)>` with a detached HEAD at `sha`, so the
  * branch itself stays free for its owner and is never moved. A leftover worktree at the
- * same path (a crashed run) is replaced. If the fetch fails but `sha` is already present
- * locally, the local commit is used; it is the same commit.
+ * same path is replaced only when it has no unshipped work. If the fetch fails but
+ * `sha` is already present locally, the local commit is used.
  */
 export async function checkoutWorktree(options: CheckoutWorktreeOptions): Promise<Worktree> {
   const root = resolve(options.root ?? defaultWorktreesRoot());
@@ -430,7 +430,13 @@ export async function checkoutWorktree(options: CheckoutWorktreeOptions): Promis
 
   return updateManifest(root, async (manifest) => {
     await git(repoDir, ["worktree", "prune"]);
-    if ((await registeredWorktrees(repoDir)).has(await canonical(path))) {
+    const registered = await registeredWorktrees(repoDir);
+    const registeredPath = await canonical(path);
+    if (registered.has(registeredPath)) {
+      const previous = manifest.entries.find((entry) => entry.path === path);
+      const branch = registered.get(registeredPath) ?? previous?.branch;
+      const kept = await keepReason(repoDir, path, branch, "main", undefined, false);
+      if (kept !== undefined) throw new Error(`worktree kept at ${path}: ${kept}`);
       await teardown(root, repoDir, path);
     } else if (await exists(path)) {
       throw new Error(`${path} exists but is not a git worktree; run recoverOnStartup first`);

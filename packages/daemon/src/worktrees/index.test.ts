@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -403,12 +403,24 @@ describe("worktrees", () => {
     assert.ok(existsSync(join(wt.path, "feature.txt")));
     assert.equal((await entry(wt.path))?.status, "active");
 
-    // A leftover checkout at the same path is replaced, not an error.
-    await writeFile(join(wt.path, "scratch.txt"), "left behind\n");
-    const again = await checkoutWorktree(input);
-    assert.equal(again.path, wt.path);
-    assert.equal(existsSync(join(wt.path, "scratch.txt")), false);
+    const draft = join(wt.path, "scratch.txt");
+    await writeFile(draft, "left behind\n");
+    assert.deepEqual(await removeWorktree({ repoDir, path: wt.path, root, scratch: true }), {
+      removed: false,
+      kept: "uncommitted changes",
+    });
+    await assert.rejects(checkoutWorktree(input), /worktree kept at .*: uncommitted changes/);
+    assert.equal(await readFile(draft, "utf8"), "left behind\n");
 
+    git(wt.path, "add", "scratch.txt");
+    git(wt.path, "commit", "-q", "-m", "local QA work");
+    const localHead = git(wt.path, "rev-parse", "HEAD");
+    await assert.rejects(checkoutWorktree(input), /worktree kept at .*: commits not on the remote/);
+    assert.equal(git(wt.path, "rev-parse", "HEAD"), localHead);
+    assert.equal(await readFile(draft, "utf8"), "left behind\n");
+
+    git(wt.path, "reset", "--hard", sha);
+    assert.equal((await checkoutWorktree(input)).path, wt.path);
     await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
     assert.equal(existsSync(wt.path), false);
     assert.equal(await entry(wt.path), undefined);
