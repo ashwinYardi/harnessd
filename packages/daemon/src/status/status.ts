@@ -5,7 +5,7 @@
 
 import { access, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { ConfigError, DEFAULT_SETTINGS, type HarnessId, type MergedConfig } from "@harnessd/shared";
 import { loadConfig } from "../config/load.ts";
 import { LinearClient, LinearError } from "../linear/client.ts";
@@ -18,6 +18,7 @@ import {
   type SecretStore,
 } from "../secrets/store.ts";
 import { missingHookEvents } from "../sync/settings.ts";
+import { resolveWorktreeRepo } from "../worktrees/index.ts";
 import {
   compareSemver,
   type Exec,
@@ -564,14 +565,26 @@ async function worktreeWrite(
   version: string,
   deadline: number,
 ): Promise<Check> {
+  const id = `harness.${harness}.worktree_write`;
   const root = ctx.o.worktreesRoot ?? join(ctx.o.globalDir, "worktrees");
+  let name: string;
+  try {
+    ({ name } = await resolveWorktreeRepo(ctx.o.repoDir));
+  } catch (error) {
+    return bad(
+      id,
+      "fail",
+      firstLine(error instanceof Error ? error.message : String(error)),
+      "Run harnessd in a git clone.",
+    );
+  }
   return worktreeWriteCheck({
-    id: `harness.${harness}.worktree_write`,
+    id,
     harness,
     bin,
     version,
     root,
-    name: basename(ctx.o.repoDir),
+    name,
     exec: ctx.exec,
     env: ctx.env,
     timeoutMs: Math.max(1, deadline - Date.now()),

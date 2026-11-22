@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +33,7 @@ async function machine(opts: { claudeSignedIn?: boolean } = {}) {
   const home = join(root, "global");
   await mkdir(bin);
   await mkdir(join(repo, ".harnessd"), { recursive: true });
+  execFileSync("git", ["init", "--quiet", repo]);
   await mkdir(home);
   await writeFile(join(repo, ".harnessd", "config.toml"), '[linear]\nteam_id = "MET"\n');
   const signedIn = opts.claudeSignedIn ?? true;

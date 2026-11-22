@@ -132,8 +132,10 @@ async function checkWrite(options: WorktreeWriteOptions): Promise<Check> {
     }
     await rm(file, { force: true });
 
-    const where = sandboxed ? ` (codex sandbox ${options.sandboxMode})` : "";
-    return { id, state: "ok", detail: `wrote and deleted a file in ${root}${where}`, fix: "" };
+    const how = sandboxed
+      ? `through codex sandbox (${options.sandboxMode})`
+      : "as the daemon user (no OS sandbox)";
+    return { id, state: "ok", detail: `wrote and deleted a file in ${root} ${how}`, fix: "" };
   } catch (error) {
     return { id, state: "fail", detail: messageOf(error), fix };
   } finally {
@@ -144,14 +146,14 @@ async function checkWrite(options: WorktreeWriteOptions): Promise<Check> {
 /**
  * Checks that one harness can write a file in a scratch worktree under the root.
  * A fresh check is the default. When `fresh` is false, a cached result is reused for
- * ten minutes per binary, version, root and mode.
+ * ten minutes per binary, version, repo folder and mode.
  */
 export async function worktreeWriteCheck(options: WorktreeWriteOptions): Promise<Check> {
   const key = [
     options.harness,
     options.bin,
     options.version,
-    options.root,
+    join(options.root, options.name),
     options.sandboxMode ?? "",
   ].join("\n");
   const now = (options.now ?? Date.now)();

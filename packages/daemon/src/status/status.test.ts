@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { createSecretStore } from "../secrets/store.ts";
+import { createWorktree } from "../worktrees/index.ts";
 import type { ExecOptions, ExecResult } from "./detect.ts";
 import {
   type Check,
@@ -30,12 +32,13 @@ const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
 const failed = (stderr = "", code = 1): ExecResult => ({ code, stdout: "", stderr });
 
 /** A machine where everything works; each test breaks one part. */
-async function world(config = '[linear]\nteam_id = "MET"\n') {
+async function world(config = '[linear]\nteam_id = "MET"\n', repoName = "repo") {
   const root = await mkdtemp(join(tmpdir(), "harnessd-status-"));
   roots.push(root);
-  const repoDir = join(root, "repo");
+  const repoDir = join(root, repoName);
   const globalDir = join(root, "global");
   await mkdir(join(repoDir, ".harnessd"), { recursive: true });
+  execFileSync("git", ["init", "--quiet", repoDir]);
   await mkdir(join(globalDir, "skills", "tdd"), { recursive: true });
   await writeFile(join(globalDir, "skills", "tdd", "SKILL.md"), "# tdd\n");
   await writeFile(join(repoDir, ".harnessd", "config.toml"), config);
@@ -173,7 +176,7 @@ test("a working machine reports every check ok, with a one-line detail each", as
   assert.equal(byId(checks, "harness.claude-code.auth").detail, "signed in (oauth_token)");
   assert.equal(
     byId(checks, "harness.claude-code.worktree_write").detail,
-    `wrote and deleted a file in ${join(w.globalDir, "worktrees")}`,
+    `wrote and deleted a file in ${join(w.globalDir, "worktrees")} as the daemon user (no OS sandbox)`,
   );
   assert.equal(byId(checks, "github.push").detail, "WRITE on acme/app");
   assert.equal(byId(checks, "github.ci").detail, "main requires: ci");
@@ -982,6 +985,31 @@ test("a file where the builder's repo folder goes fails, with EEXIST and the fix
   } finally {
     await rm(repoRoot, { force: true });
   }
+});
+
+test("the Codex check finds a blocked builder folder through a symlinked repo", async () => {
+  const w = await world(
+    '[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "codex"\n',
+    "real-repo",
+  );
+  const repoDir = join(w.root, "repo-alias");
+  await symlink(w.repoDir, repoDir, "dir");
+  const root = join(w.globalDir, "worktrees");
+  const blocker = join(root, "real-repo");
+  await mkdir(root);
+  await writeFile(blocker, "not a folder\n");
+
+  await assert.rejects(createWorktree({ repoDir, root, issueKey: "MET-115", title: "Symlink" }), {
+    code: "EEXIST",
+  });
+  const entries = await readdir(root);
+  const check = byId(await runStatus({ ...w.options, repoDir }), "harness.codex.worktree_write");
+  assert.equal(check.state, "fail");
+  assert.match(check.detail, /EEXIST.*worktrees\/real-repo/);
+  assert.ok(check.fix.includes(blocker));
+  assert.ok(isBlocking(check));
+  assert.deepEqual(await readdir(root), entries);
+  assert.equal(await readFile(blocker, "utf8"), "not a folder\n");
 });
 
 test("the worktree-write check is missing, not checked, when the harness is not installed", async () => {
