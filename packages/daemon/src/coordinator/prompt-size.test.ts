@@ -7,14 +7,15 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import type { ConfigLayer, Issue, LinkedIssue, ResolvedAgentConfig } from "@harnessd/shared";
+import type { Call, ConfigLayer, Issue, LinkedIssue, ResolvedAgentConfig } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
 import { MEMORY_TOOLS } from "../memory/server.ts";
 import { generateSyncFiles, opencodeSettings } from "../sync/generate.ts";
 import { buildPartPrompt } from "./dispatch.ts";
-import { buildPlanPrompt } from "./plan.ts";
+import { buildPlanPrompt, type PlanPart } from "./plan.ts";
 import { buildGrillPrompt, type GrillContext } from "./prompt.ts";
 import { buildQaPrompt } from "./qa.ts";
+import { formatPartDescription } from "./split.ts";
 import { withheldSkills } from "./worktree-sync.ts";
 
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -118,9 +119,10 @@ test("the committed skill pack a worktree loads loses the skills a builder does 
   const pack = committedSkills();
   const body = (name: string): string => pack.body(name);
   const builder = withheldSkills("backend");
+  const qa = withheldSkills("qa");
   const frontend = withheldSkills("frontend");
-  assert.ok(pack.names.includes("impeccable"));
-  assert.ok(pack.names.includes("grilling"));
+  assert.ok(pack.names.includes("grill-with-docs"));
+  assert.ok(pack.names.includes("code-review"));
   const sum = (list: string[]): number => list.reduce((total, name) => total + size(body(name)), 0);
 
   const full = report("committed SKILL.md bodies, no withholding", sum(pack.names));
@@ -129,18 +131,119 @@ test("the committed skill pack a worktree loads loses the skills a builder does 
     sum(pack.names.filter((name) => !frontend.includes(name))),
   );
   const nonUi = report(
-    "committed SKILL.md bodies, builder or QA run",
+    "committed SKILL.md bodies, builder run",
     sum(pack.names.filter((name) => !builder.includes(name))),
   );
-  assert.equal(
-    full - ui,
-    frontend.reduce((total, name) => total + size(body(name)), 0),
+  const reviewed = report(
+    "committed SKILL.md bodies, QA run",
+    sum(pack.names.filter((name) => !qa.includes(name))),
   );
-  // The frontend run keeps impeccable and drops the coordinator's four skills.
-  assert.equal(ui - nonUi, size(body("impeccable")));
-  // A builder or QA run must stay well under the size docs/LOOP.md reports.
+  // Builder and frontend runs drop grill-with-docs and code-review; QA reviews.
+  assert.ok(frontend.includes("grill-with-docs"));
+  assert.ok(frontend.includes("code-review"));
+  assert.equal(qa.includes("grill-with-docs"), true);
+  assert.equal(qa.includes("code-review"), false);
+  // The QA run keeps code-review, so it loads that body and the builder does not.
+  assert.equal(reviewed - nonUi, size(body("code-review")));
+  // A builder run must stay well under the size docs/LOOP.md reports.
   assert.ok(ui < 60_000, `frontend skill bodies ${ui}`);
   assert.ok(nonUi < 50_000, `builder skill bodies ${nonUi}`);
+  assert.ok(nonUi < full, "the builder drops two committed skill bodies");
+});
+
+/** The builder skill set before D-044: the five non-builder skills from D-043. */
+const OLD_BUILDER_WITHHELD = ["impeccable", "grilling", "domain-modeling", "research", "prototype"];
+
+/** The old reading rule, replaced by the role split in .harnessd/AGENTS.md (D-044). */
+const OLD_READING_RULE =
+  "- Read docs/SPEC.md and docs/decisions/ before any change. If a change contradicts a decision, add a new decision record. Don't silently diverge.";
+
+/** The role split in the generated AGENTS.md; the test below checks it is there. */
+const NEW_READING_RULES = [
+  "- **Reading by role.** The coordinator (grill, plan) reads `docs/SPEC.md` and every decision record in `docs/decisions/`. A builder or QA run reads only its brief and the decision records the brief names by ID. It reads another record only when the brief or the code points to it.",
+  "- If a change contradicts a decision, add a new decision record (D-044). Don't silently diverge.",
+].join("\n");
+
+function decisionFiles(): { name: string; text: string }[] {
+  const dir = join(REPO, "docs/decisions");
+  return readdirSync(dir)
+    .filter((name) => name.endsWith(".md"))
+    .sort()
+    .map((name) => ({ name, text: readFileSync(join(dir, name), "utf8") }));
+}
+
+test("role-scoped reading shrinks the builder's first turn (D-044)", () => {
+  const issue = issues.clear as Issue;
+  const linked: LinkedIssue = { ...issue, blockers: [] };
+  const calls: Call[] = [
+    {
+      question: "Where does the version come from?",
+      answer: "The package version.",
+      basis: "SPEC",
+    },
+  ];
+  const decisions = decisionFiles();
+  const named = decisions.filter((d) => /^(D-040|D-043)/.test(d.name));
+  const afterPart: PlanPart = {
+    role: "backend",
+    title: issue.title,
+    prompt: `Implement ${issue.key} as written: every "Done when" item, with tests. Follow D-040 and D-043.`,
+    size: issue.size ?? "M",
+    decisions: [
+      { id: "D-040", line: "One part is one PR." },
+      { id: "D-043", line: "The token budget is weighted." },
+    ],
+    calls: [1],
+  };
+  const beforePart: PlanPart = {
+    role: "backend",
+    title: issue.title,
+    prompt: `Implement ${issue.key} as written: every "Done when" item, with tests. ${OLD_READING_RULE}`,
+    size: issue.size ?? "M",
+  };
+  const beforePrompt = buildPartPrompt({
+    agent,
+    issue: { ...linked, description: formatPartDescription(issue, beforePart, "backend") },
+    branch: "met-147",
+  });
+  const afterPrompt = buildPartPrompt({
+    agent,
+    issue: { ...linked, description: formatPartDescription(issue, afterPart, "backend", calls) },
+    branch: "met-147",
+  });
+
+  const pack = committedSkills();
+  const skillChars = (withheld: string[]): number =>
+    pack.names
+      .filter((name) => !withheld.includes(name))
+      .reduce((total, name) => total + size(pack.body(name)), 0);
+  const newAgents = readFileSync(join(REPO, "AGENTS.md"), "utf8");
+  assert.ok(newAgents.includes(NEW_READING_RULES), "AGENTS.md has the role-scoped rule");
+  const oldAgents = newAgents.replace(NEW_READING_RULES, OLD_READING_RULE);
+
+  const spec = readFileSync(join(REPO, "docs/SPEC.md"), "utf8");
+  const before =
+    size(beforePrompt) +
+    size(spec) +
+    decisions.reduce((total, d) => total + size(d.text), 0) +
+    size(oldAgents) +
+    skillChars(OLD_BUILDER_WITHHELD);
+  const after =
+    size(afterPrompt) +
+    named.reduce((total, d) => total + size(d.text), 0) +
+    size(newAgents) +
+    skillChars(withheldSkills("backend"));
+
+  const beforeChars = report("builder first turn, before role-scoped reading (D-044)", before);
+  const afterChars = report("builder first turn, after role-scoped reading (D-044)", after);
+  console.log(
+    `builder first turn tokens before: ${Math.ceil(beforeChars / 4)}; after: ${Math.ceil(afterChars / 4)} (4 chars per token)`,
+  );
+  assert.ok(named.length > 0, "the named records exist");
+  assert.ok(
+    afterChars < beforeChars,
+    `after ${afterChars} chars is smaller than before ${beforeChars}`,
+  );
 });
 
 test("the builder's base prompt fits well under 100k tokens", () => {

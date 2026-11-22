@@ -1,5 +1,11 @@
 // Turns a split plan into Linear sub-issues, idempotently. See docs/LOOP.md.
-import { type BudgetSize, type Issue, isAreaLabel, type LinkedIssue } from "@harnessd/shared";
+import {
+  type BudgetSize,
+  type Call,
+  type Issue,
+  isAreaLabel,
+  type LinkedIssue,
+} from "@harnessd/shared";
 import type { LinearClient } from "../linear/client.ts";
 import type { PartRole, PlanPart } from "./plan.ts";
 
@@ -70,10 +76,28 @@ export function qaSize(parent: Issue): BudgetSize {
   return parent.size === "S" ? "S" : "M";
 }
 
+/** The grill calls a part names, by 1-based number or question text (D-044). */
+export function resolvePartCalls(part: PlanPart, calls: readonly Call[]): Call[] {
+  const out: Call[] = [];
+  for (const ref of part.calls ?? []) {
+    const match =
+      typeof ref === "number" ? calls[ref - 1] : calls.find((c) => c.question.trim() === ref);
+    if (match !== undefined && !out.includes(match)) out.push(match);
+  }
+  return out;
+}
+
 /** Body of a backend or frontend sub-issue. */
-export function formatPartDescription(parent: Issue, part: PlanPart, id: string): string {
+export function formatPartDescription(
+  parent: Issue,
+  part: PlanPart,
+  id: string,
+  calls: readonly Call[] = [],
+): string {
   const why = extractSection(parent.description, "Why") || `Part of ${parent.key}.`;
-  return [
+  const decisions = part.decisions ?? [];
+  const partCalls = resolvePartCalls(part, calls);
+  const lines = [
     partMarker(id),
     `Part of [${parent.key}](${parent.url}): ${parent.title}. Role: ${part.role}.`,
     "",
@@ -88,10 +112,19 @@ export function formatPartDescription(parent: Issue, part: PlanPart, id: string)
     "",
     `**Size**: ${part.size}`,
     "",
-    "**Brief**",
-    part.prompt,
-    "",
-  ].join("\n");
+  ];
+  if (decisions.length > 0) {
+    lines.push("**Decisions**");
+    for (const decision of decisions) lines.push(`- ${decision.id}: ${decision.line}`);
+    lines.push("");
+  }
+  if (partCalls.length > 0) {
+    lines.push("**Grill calls**");
+    for (const call of partCalls) lines.push(`- ${call.question} → ${call.answer}`);
+    lines.push("");
+  }
+  lines.push("**Brief**", part.prompt, "");
+  return lines.join("\n");
 }
 
 /** Body of the QA sub-issue, which every part blocks. */
@@ -148,6 +181,7 @@ export async function splitIssue(
   plan: readonly PlanPart[],
   linear: SplitLinear,
   children?: LinkedIssue[],
+  calls: readonly Call[] = [],
 ): Promise<SplitResult> {
   const existing = children ?? (await linear.listChildren(parent.id));
   const byMarker = new Map<string, LinkedIssue>();
@@ -165,7 +199,7 @@ export async function splitIssue(
     if (byMarker.has(id)) continue;
     const child = await linear.createSubIssue(parent.id, {
       title: part.title,
-      description: formatPartDescription(parent, part, id),
+      description: formatPartDescription(parent, part, id, calls),
       state: "Ready",
       labels,
     });

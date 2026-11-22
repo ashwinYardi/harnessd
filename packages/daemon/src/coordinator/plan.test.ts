@@ -186,12 +186,136 @@ test("buildPlanPrompt carries the rules, the issue, the grill calls and the cont
     "## Coordinator instructions\nKeep parts small.",
     "## Issue MET-40: Agents show avatars",
     "- [ ] Avatars show",
-    "- Where? → daemon",
+    "1. Where? → daemon",
     "THE SPEC",
     "### D-014\nSizes.",
   ]) {
     assert.ok(prompt.includes(text), text);
   }
+});
+
+test("the plan prompt asks each part for decision IDs and forbids the read-everything line (D-044)", () => {
+  const prompt = buildPlanPrompt({
+    issue: issue(),
+    context: { spec: "THE SPEC", decisions: [{ name: "D-014", text: "Sizes." }] },
+  });
+  assert.match(prompt, /"decisions": \[\{ "id": "D-NNN", "line"/);
+  assert.match(prompt, /"calls": \[1, "a grill question this part follows"\]/);
+  assert.match(prompt, /Each part lists the decision records it depends on/);
+  assert.match(prompt, /Each part lists the grill calls that apply to it/);
+  assert.match(prompt, /Never write "Read docs\/SPEC\.md and docs\/decisions\/"/);
+});
+
+test("a brief with no read-the-whole-spec line passes the plan check (D-044)", () => {
+  const reply = JSON.stringify({
+    parts: [{ ...part("backend"), prompt: "Change the daemon. Follow D-014." }],
+  });
+  const parsed = parsePlanReply(reply);
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) assert.equal(parsed.parts[0]?.prompt, "Change the daemon. Follow D-014.");
+  // The check does not scan prose: the prompt forbids the line, the parser does not.
+  const withLine = JSON.stringify({
+    parts: [
+      {
+        ...part("backend"),
+        prompt: "Read docs/SPEC.md and docs/decisions/ before any change.",
+      },
+    ],
+  });
+  assert.equal(parsePlanReply(withLine).ok, true);
+});
+
+test("a part's decisions are parsed and named in its brief (D-044)", () => {
+  const reply = JSON.stringify({
+    parts: [
+      {
+        ...part("backend"),
+        decisions: [{ id: "D-014", line: "Sets the part sizes." }],
+      },
+    ],
+  });
+  const parsed = parsePlanReply(reply, { knownIds: new Set(["D-014"]) });
+  assert.equal(parsed.ok, true);
+  if (parsed.ok)
+    assert.deepEqual(parsed.parts[0]?.decisions, [{ id: "D-014", line: "Sets the part sizes." }]);
+});
+
+test("a malformed decision entry makes the plan invalid (D-044)", () => {
+  const cases: Array<[Record<string, unknown>, RegExp]> = [
+    [{ decisions: "D-014" }, /decisions: expected an array/],
+    [{ decisions: ["D-014"] }, /decisions\[0\]: expected an object/],
+    [{ decisions: [{ id: "D-14", line: "x" }] }, /expected D-NNN, got "D-14"/],
+    [{ decisions: [{ id: "D-014", line: "" }] }, /expected id and line strings/],
+    [{ decisions: [{ id: 14, line: "x" }] }, /expected id and line strings/],
+    [{ decisions: [{ id: "D-014", line: "x", why: "y" }] }, /unknown key "why"/],
+    [{ calls: "1" }, /calls: expected an array/],
+    [{ calls: [0] }, /expected a positive call number/],
+    [{ calls: [true] }, /expected a positive call number/],
+  ];
+  for (const [extra, error] of cases) {
+    const parsed = parsePlanReply(JSON.stringify({ parts: [{ ...part("backend"), ...extra }] }));
+    assert.equal(parsed.ok, false, JSON.stringify(extra));
+    if (!parsed.ok) assert.match(parsed.error, error);
+  }
+});
+
+test("a well-formed id with no record file is dropped with one log line (D-044)", () => {
+  const logs: string[] = [];
+  const reply = JSON.stringify({
+    parts: [
+      {
+        ...part("backend"),
+        decisions: [
+          { id: "D-014", line: "Kept." },
+          { id: "D-999", line: "Missing." },
+        ],
+      },
+    ],
+  });
+  const parsed = parsePlanReply(reply, {
+    knownIds: new Set(["D-014"]),
+    log: (line) => logs.push(line),
+  });
+  assert.equal(parsed.ok, true);
+  if (parsed.ok) assert.deepEqual(parsed.parts[0]?.decisions, [{ id: "D-014", line: "Kept." }]);
+  assert.deepEqual(logs, ["plan: dropped decision D-999: no record in docs/decisions/"]);
+});
+
+test("a missing or empty decisions array is valid (D-044)", () => {
+  for (const decisions of [undefined, []]) {
+    const raw = { ...part("backend") } as Record<string, unknown>;
+    if (decisions !== undefined) raw.decisions = decisions;
+    assert.equal(parsePlanReply(JSON.stringify({ parts: [raw] })).ok, true);
+  }
+});
+
+test("planIssue drops an unknown decision id and keeps the model plan (D-044)", async () => {
+  const logs: string[] = [];
+  const { adapter } = adapterReplying(
+    JSON.stringify({
+      parts: [{ ...part("backend"), decisions: [{ id: "D-999", line: "Missing." }] }],
+    }),
+  );
+  const plan = await planIssue(issue(), {
+    adapter,
+    agent,
+    context: { spec: "", decisions: [{ name: "D-014-token-spend.md", text: "Sizes." }] },
+    cwd: "/repo",
+    log: (line) => logs.push(line),
+  });
+  assert.equal(plan.source, "model");
+  assert.equal(plan.parts[0]?.decisions, undefined);
+  assert.deepEqual(logs, ["plan: dropped decision D-999: no record in docs/decisions/"]);
+});
+
+test("the fallback plan carries every grill call and no decision ids (D-044)", () => {
+  const calls = [
+    { question: "Where?", answer: "daemon", basis: "SPEC" },
+    { question: "How?", answer: "one part", basis: "D-040" },
+  ];
+  const [fallback] = fallbackPlan(issue(), calls);
+  assert.deepEqual(fallback?.calls, [1, 2]);
+  assert.equal(fallback?.decisions, undefined);
 });
 
 test("planIssue runs the coordinator harness and returns the model plan", async () => {

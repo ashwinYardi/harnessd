@@ -1,6 +1,7 @@
 # Agent instructions for this repo
 
-- Read docs/SPEC.md and docs/decisions/ before any change. If a change contradicts a decision, add a new decision record. Don't silently diverge.
+- **Reading by role.** The coordinator (grill, plan) reads `docs/SPEC.md` and every decision record in `docs/decisions/`. A builder or QA run reads only its brief and the decision records the brief names by ID. It reads another record only when the brief or the code points to it.
+- If a change contradicts a decision, add a new decision record (D-044). Don't silently diverge.
 - Work only on Linear issues in **Ready** (team Meta Harness, project harnessd). One issue = one branch = one small PR. Put `MET-<n>` in the PR title.
 - Harness integration goes through CLIs only (D-002). Never add a vendor SDK.
 - UI: dense, quiet, keyboard-first and professional. No gradients, emoji, or filler copy.
@@ -29,10 +30,10 @@ Never commit these:
 - Local paths from your machine, or links to agent sessions.
 
 ## Skills (vendored in .claude/skills, see VENDORED.md)
-- **Before you build an issue,** read and follow `.claude/skills/grill-with-docs/SKILL.md` and the two skills it names. Run it on autopilot: answer each question yourself from the spec, decisions, code and vault. Ask the human only for a D-011 trigger. Write new terms to `GLOSSARY.md` and new precedent as a decision record.
-- **Write code test-first** with `.claude/skills/tdd/`. Use `diagnosing-bugs` for a bug, and `codebase-design` before a new module.
-- **Before you open a PR,** run `.claude/skills/code-review/` on your own diff.
-- **For any UI work,** use `.claude/skills/impeccable/` for real, never in a degraded mode without saying so in the PR. Read PRODUCT.md and DESIGN.md first, and read `impeccable/reference/craft-floor.md` before every UI edit.
+- **Coordinator: before you grill an issue,** read and follow `.claude/skills/grill-with-docs/SKILL.md` and the two skills it names. Run it on autopilot: answer each question yourself from the spec, decisions, code and vault. Ask the human only for a D-011 trigger. Write new terms to `GLOSSARY.md` and new precedent as a decision record.
+- **Builder: write code test-first** with `.claude/skills/tdd/`. Use `diagnosing-bugs` for a bug, and `codebase-design` before a new module.
+- **QA: before you approve a PR,** run `.claude/skills/code-review/` on the diff.
+- **Frontend: for any UI work,** use `.claude/skills/impeccable/` for real, never in a degraded mode without saying so in the PR. Read PRODUCT.md and DESIGN.md first, and read `impeccable/reference/craft-floor.md` before every UI edit.
   - Plan with `/impeccable shape`. Before the PR, run `/impeccable critique` and `/impeccable audit`, then `/impeccable polish`.
   - The design hook in `.claude/settings.json` scans each UI file you edit, and runs a deep pass when you stop. Fix its findings; do not silence them.
   - Ask the `impeccable-finish-reviewer` agent to review the finished UI, and `impeccable-motion-reviewer` for motion. Apply their material fixes.

@@ -99,17 +99,37 @@ export const SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS = [
   "prototype",
 ] as const;
 
+/** Builder and QA runs do not grill; the coordinator does (D-044). */
+export const SKILLS_WITHHELD_FROM_NON_COORDINATOR_READING = ["grill-with-docs"] as const;
+
+/** QA reviews; every other role drops code-review (D-044). */
+export const SKILLS_WITHHELD_FROM_NON_QA_RUNS = ["code-review"] as const;
+
 /** Every skill a worktree run can leave out, so a run that does not withhold it can put it back. */
 const RESTORABLE_SKILLS = [
   ...SKILLS_WITHHELD_FROM_NON_UI_RUNS,
   ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS,
+  ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_READING,
+  ...SKILLS_WITHHELD_FROM_NON_QA_RUNS,
 ];
 
-/** The skills a run with this role omits (D-040, D-043). No config key: `enabled = false` still wins. */
+/** The skills a run with this role omits (D-040, D-043, D-044). No config key: `enabled = false` still wins. */
 export function withheldSkills(role: ResolvedAgentConfig["role"] | undefined): string[] {
   // D-040: only the frontend role does UI work. D-043: only the coordinator grills.
-  if (role === "frontend") return [...SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS];
-  if (role === "coordinator") return [...SKILLS_WITHHELD_FROM_NON_UI_RUNS];
+  // D-044: only QA reviews; builders and the coordinator do not carry code-review.
+  if (role === "frontend") {
+    return [
+      ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS,
+      ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_READING,
+      ...SKILLS_WITHHELD_FROM_NON_QA_RUNS,
+    ];
+  }
+  if (role === "coordinator") {
+    return [...SKILLS_WITHHELD_FROM_NON_UI_RUNS, ...SKILLS_WITHHELD_FROM_NON_QA_RUNS];
+  }
+  if (role === "qa") {
+    return RESTORABLE_SKILLS.filter((name) => name !== "code-review");
+  }
   return [...RESTORABLE_SKILLS];
 }
 

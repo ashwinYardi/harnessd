@@ -68,6 +68,10 @@ On `proceed`, the issue's state is left alone; the loop goes on to split and ass
 ## Split (D-040)
 After the grill, the coordinator plans the parts. The plan prompt asks for **one part by default**: one part is one PR. It allows more parts only when the issue's Size is L, or when one part cannot fit the M budget (about 2 hours).
 
+- Each part has an optional `decisions` array of `{ id, line }`. `id` is `D-NNN` and names a record in `docs/decisions/`; `line` is one sentence on why it applies. The plan prompt asks for it, and forbids "Read docs/SPEC.md and docs/decisions/" in the brief (D-044).
+- A missing or empty `decisions` array is valid. A malformed entry makes the plan invalid and the loop uses the one-part fallback. A well-formed id with no record file is dropped with one log line and does not cause the fallback.
+- Each part also has an optional `calls` array of grill call numbers (1-based) or question texts. The split writes a **Decisions** section (`- D-031: …`) and a **Grill calls** section (question → answer) in the sub-issue body, next to **Brief**. The part prompt carries the body, so the builder and QA send-back runs see both.
+- The one-part fallback carries every grill call and no decision ids.
 - The reply has an optional `reason`. A plan with more than one part **must** state why the issue cannot ship as one part. A multi-part plan with no reason is invalid and the loop uses the one-part fallback.
 - The split comment on the parent lists the parts and the QA sub-issue, then `Reason for more than one part: …`.
 - Parts of a split issue run one after another (docs/LOOP.md "Dispatch"). Each part blocks the next, so only one PR of the parent is open at a time.

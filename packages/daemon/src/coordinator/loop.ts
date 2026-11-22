@@ -9,6 +9,7 @@ import { join } from "node:path";
 import {
   type AdapterEvent,
   type AdapterRun,
+  type Call,
   emptyTokenUsage,
   type HarnessAdapter,
   type HarnessId,
@@ -1316,6 +1317,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
 
     const children = await linear.listChildren(issue.id);
     let plan: SplitPlan = { parts: [], source: "model" };
+    /** The grill's calls, rendered into each new part body (D-044). */
+    let grillCalls: Call[] = [];
     // Parts already exist: an earlier tick grilled and split, then stopped early. Finish it.
     if (!children.some(isWorkPart)) {
       const grill = await grillIssue(issue, {
@@ -1327,6 +1330,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         notifier,
         decisions,
       });
+      grillCalls = grill.calls;
       if (state !== undefined) {
         recordUsage(
           state,
@@ -1354,7 +1358,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         log(`${issue.key}: grill failed, retrying next tick: ${grill.error ?? "unknown"}`);
         return;
       }
-      plan = await planIssue(issue, { adapter, agent, context, cwd: repoDir, calls: grill.calls });
+      plan = await planIssue(issue, {
+        adapter,
+        agent,
+        context,
+        cwd: repoDir,
+        calls: grill.calls,
+        log,
+      });
       if (state !== undefined) {
         recordUsage(
           state,
@@ -1391,7 +1402,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
     }
 
-    const result = await splitIssue(issue, plan.parts, linear, children);
+    const result = await splitIssue(issue, plan.parts, linear, children, grillCalls);
     if (result.created.length > 0) {
       await linear.comment(
         issue.id,
