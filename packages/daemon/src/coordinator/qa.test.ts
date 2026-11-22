@@ -282,6 +282,8 @@ test("every item and the tests pass: approve at the PR head, then QA stays Ready
   assert.match(prompt, /src\/avatars\.ts \(\+40 -2\)/);
   assert.match(prompt, /## Diff\n```diff\ndiff --git a\/src\/avatars\.ts/);
   assert.match(prompt, /## CI\n- CI \/ test: success/);
+  assert.match(prompt, /Read this part's brief, the decision IDs it names/);
+  assert.match(prompt, /Do not read docs\/SPEC\.md or every decision record/);
   assert.match(prompt, /Open a file only to check a line the diff touches/);
   assert.doesNotMatch(prompt, /Read the diff and the code/);
   assert.match(prompt, /`pnpm test` passed/);

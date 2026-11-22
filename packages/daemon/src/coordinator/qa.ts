@@ -347,6 +347,7 @@ export function buildQaPrompt(input: QaPromptInput): string {
     `## Done when (${parent.key}: ${parent.title})\n${checklist.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
     [
       "## How to verify",
+      "- Read this part's brief, the decision IDs it names in the part body, the parent's \"Done when\", the diff, the CI result and the tests. Do not read docs/SPEC.md or every decision record.",
       "- Judge from this diff, the CI result and the tests. Open a file only to check a line the diff touches.",
       "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
       "- An item passes only with concrete evidence: a file and line, a test name, or command output.",

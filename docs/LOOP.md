@@ -34,12 +34,23 @@ The coordinator's harness then returns a plan as strict JSON:
 
 ```json
 {
-  "parts": [{ "role": "backend", "title": "…", "prompt": "…", "size": "S" }],
+  "parts": [{
+    "role": "backend",
+    "title": "…",
+    "prompt": "…",
+    "size": "S",
+    "decisions": [{ "id": "D-NNN", "line": "why it applies" }],
+    "calls": [1, "a grill question this part follows"]
+  }],
   "reason": "why the issue cannot ship as one part (required with more than one)"
 }
 ```
 
 `role` is `backend` or `frontend`, and `size` is `S` or `M`. Only the parts the plan lists are created.
+
+**Role-scoped reading (D-044).** Each part names the decision records it depends on in `decisions`, one line each. A malformed entry makes the plan invalid. A well-formed id with no record file is dropped with one log line. The brief names those IDs and does not tell the agent to read the whole spec or every record. The builder reads its brief and the named records only.
+
+**Grill calls (D-044).** Each part names the grill calls that apply to it in `calls`: the call numbers, or their question texts. The one-part fallback carries every call and no decision ids.
 
 **One part by default (D-040).** One part is one PR. The plan may have more only when the issue's Size is L, or when one part cannot fit the M budget. A plan with more than one part and no `reason` is invalid: the loop uses the one-part fallback and the split comment says so. A valid split comment also states the reason.
 
@@ -51,7 +62,7 @@ harnessd always adds a QA sub-issue, "QA: <parent title>". Every part blocks it 
 
 Sub-issues are Linear children of the parent, in the same team and project.
 - They start in Ready and carry the parent's area label.
-- Their body copies the parent's Why and Done when, and adds Size and the part's brief.
+- Their body copies the parent's Why and Done when, and adds Size, the decision IDs the part depends on, the grill calls it follows, and the part's brief.
 
 When the split is done, the parent moves to In Progress.
 
@@ -133,29 +144,39 @@ A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch
 - **The OpenCode gap.** OpenCode 2.0.20 and 2.3.2 still load skills from `~/.claude/skills` and `~/.agents/skills`. It has no switch that skips them. Impeccable hooks do not run, because OpenCode uses JS plugins, not `hooks.json`. Sync adds the `harnessd-memory` server to `opencode.json`.
 - **Memory.** The prompt has a Memory section. It names `search_notes`, `read_note` and `write_note`, and the two vaults: `<repo>/.harnessd/vault/` and `$HARNESSD_HOME/vault/` (docs/MEMORY.md). The worktree's `.mcp.json` runs `harnessd mcp memory --workspace <main repo>`, so notes outlive the worktree.
 - **Hand-vendored skills.** A skill folder that sync did not generate stays as it is (D-020). Sync prints `kept <folder>` and does not write into it. A worktree run still withholds the skill its role leaves out, even when the repo commits that folder (see the role skill set below).
-- **Role skill set (D-040, D-043).** A worktree run gets the pack for its role. `frontend` keeps `impeccable` and drops `grilling`, `domain-modeling`, `research` and `prototype`. `coordinator` keeps those four and drops `impeccable`. `backend` and `qa` drop all five, because their work never needs those bodies. The map is built in, not config: `enabled = false` still turns a skill off for everyone. A worktree cut from `main` already holds the skill folders the repo commits, so the loop removes a withheld folder from that worktree and marks its tracked files `skip-worktree`; git sees no deletion and the agent commits, pushes and opens the PR as usual. The main checkout is not touched. A later run that does not withhold a folder puts the committed folder back. The D-028 hook stays for frontend runs.
+- **Role skill set (D-040, D-043, D-044).** A worktree run gets the pack for its role. `frontend` keeps `impeccable` and drops `grilling`, `domain-modeling`, `research`, `prototype`, `grill-with-docs` and `code-review`. `coordinator` keeps those four and `grill-with-docs`, and drops `impeccable` and `code-review`. `backend` drops all seven, because its work needs none of those bodies. `qa` drops all but `code-review`: it reviews the diff, so it keeps that body and drops `grill-with-docs`. The map is built in, not config: `enabled = false` still turns a skill off for everyone. A worktree cut from `main` already holds the skill folders the repo commits, so the loop removes a withheld folder from that worktree and marks its tracked files `skip-worktree`; git sees no deletion and the agent commits, pushes and opens the PR as usual. The main checkout is not touched. A later run that does not withhold a folder puts the committed folder back. The D-028 hook stays for frontend runs.
 - **MCP servers (D-040).** A worktree run gets only `harnessd-memory`. A `[mcp.<name>]` server in the config does not load into a worktree run, so its tool list is not sent.
 - **Measured size.** The base prompt is measured, not guessed. The numbers below are from `packages/daemon/src/coordinator/prompt-size.test.ts`, this repo's committed skill pack and its sync output. A character is about a quarter of a token.
 
   | Item | Builder or QA run | Frontend run |
   |---|---|---|
   | Part prompt (fixture issue) | about 1.1k chars | unchanged: it is already only the agent, the task and the memory pointer |
-  | QA prompt (one PR, diff cut at 24k chars) | about 3.3k chars | unchanged: the diff, CI, tests and checklist are the whole job |
-  | `AGENTS.md` (this repo, rules included) | 4.5k chars | unchanged: agents must read the repo rules |
-  | `SKILL.md` bodies, committed pack | 40,781 chars (9 of 14 skills) | 53,443 chars (10 of 14; keeps `impeccable`) |
+  | QA prompt (one PR, diff cut at 24k chars) | about 3.6k chars | unchanged: the diff, CI, tests and checklist are the whole job |
+  | `AGENTS.md` (this repo, rules included) | 4,775 chars | unchanged: agents must read the repo rules |
+  | `SKILL.md` bodies, committed pack | 33,843 chars (7 of 14) | 46,505 chars (8 of 14; keeps `impeccable`) |
+  | QA run `SKILL.md` bodies | 40,534 chars (8 of 14; keeps `code-review`) | — |
   | `opencode.json` MCP and permission tables | 687 chars | unchanged |
   | `harnessd-memory` tool list | 1,878 chars | unchanged |
-  | **Static total from the sync** | **about 47.8k chars, about 12.0k tokens** | **about 60.5k chars, about 15.1k tokens** |
+  | **Static total from the sync** | **about 41.2k chars, about 10.3k tokens** | **about 53.8k chars, about 13.5k tokens** |
   | Owner `~/.claude/skills` + `~/.agents/skills` (out of scope, MET-112) | 73,829 chars, measured 2026-11-22 | same |
 
   The coordinator's grill and plan runs get no worktree sync and read this repo's spec and decision records instead: about 86.1k and 74.5k chars for this repo. The skill row counts the folders a worktree cut from `main` holds, read from `HEAD`, not only the files sync generates. The test is `the committed skill pack…` in `prompt-size.test.ts`.
+
+  **Builder first turn, before and after role-scoped reading (D-044).** The first turn measures the part prompt plus what the run reads because of it. Before D-044 the rules told every builder to read the spec and every record, so the before row includes both. After D-044 the part body names the records and the grill calls it needs, so the after row includes only those.
+
+  | Builder first turn | Chars | About tokens (4 chars each) |
+  |---|---|---|
+  | Before: part prompt with the read-spec brief + SPEC + all decision records + AGENTS.md + the full builder skill pack | 121,436 | 30,359 |
+  | After: part prompt with decision lines and grill calls + the named records + AGENTS.md + the reduced skill pack | 49,051 | 12,263 |
+
+  The test `role-scoped reading shrinks the builder's first turn` asserts that after is smaller and prints both numbers.
 
   **Per harness, first turn.** The same files reach every harness, but each reads its own layout. The static total is an upper bound: a harness that loads a skill body on demand sends less.
 
   | Harness | What the sync adds | First turn |
   |---|---|---|
-  | Claude Code | `AGENTS.md`, `.claude/skills/`, `.mcp.json` with `harnessd-memory` | not measured on a real run; about 12.0k static tokens |
-  | Codex | `AGENTS.md`, `.agents/skills/`, `.codex/config.toml`, `.codex/hooks.json` | not measured on a real run; about 12.0k static tokens |
+  | Claude Code | `AGENTS.md`, `.claude/skills/`, `.mcp.json` with `harnessd-memory` | not measured on a real run; about 10.3k static tokens |
+  | Codex | `AGENTS.md`, `.agents/skills/`, `.codex/config.toml`, `.codex/hooks.json` | not measured on a real run; about 10.3k static tokens |
   | OpenCode 2.3.2 | `AGENTS.md`, `.claude/skills/` and `.agents/skills/`, `opencode.json` | **9,328 tokens** (8,944 input + 384 cache read) on the first `step_finish` of a short real run in this worktree, deepseek-v4.1-flash |
 
   The same prompt in an empty folder, with no project files, took **7,437 tokens** (5,645 input + 1,792 cache read). That is OpenCode's system prompt and built-in tool schemas. The worktree files and the `harnessd-memory` tool list add about **1.9k tokens**. The static skill count is an upper bound because OpenCode exposes skills through its `skill` tool and loads a body only when it uses it.
@@ -203,7 +224,7 @@ For each part:
 1. **Find the PR.** It is the newest open PR with the part's key in its title (`gh pr list --json`). With no PR, the part is sent back.
 2. **Check it out.** The PR's head commit is checked out in a worktree of its own, detached, and removed afterwards even when it has local changes. A QA checkout is never kept (D-041).
 3. **Run the tests.** harnessd runs `qa.setup_command` and then `qa.test_command` (default `pnpm test`) in that worktree.
-4. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the parent's "Done when"; the part brief; the CI result from `statusCheckRollup`; and the harnessd test result. It judges from the diff, the CI result and the tests, and opens a file only to check a line the diff touches. Its last message must be strict JSON, one item per "Done when" item:
+4. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the parent's "Done when"; the part brief, including the decision IDs it names and the grill calls it follows; the CI result from `statusCheckRollup`; and the harnessd test result. It reads the part diff, those decision IDs, the parent's "Done when", CI and the tests. It does not read `docs/SPEC.md` or every record. It judges from the diff, the CI result and the tests, and opens a file only to check a line the diff touches. Its last message must be strict JSON, one item per "Done when" item:
 
    ```json
    { "items": [{ "text": "…", "pass": true, "evidence": "…" }], "testsPassed": true }

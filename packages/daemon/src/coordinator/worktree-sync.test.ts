@@ -272,23 +272,40 @@ test("a committed skill folder is withheld from a non-UI run and git stays clean
   assert.equal(git(backend, ["status", "--porcelain", "--untracked-files=all"], env), "");
 });
 
-test("each role gets only the skills its work needs (D-040, D-043)", () => {
-  // The frontend run keeps impeccable and drops the coordinator's four skills.
+test("each role gets only the skills its work needs (D-040, D-043, D-044)", () => {
+  // The frontend run keeps impeccable and drops the coordinator's four skills, the
+  // grill and the review (QA reviews).
   assert.deepEqual(withheldSkills("frontend"), [
     "grilling",
     "domain-modeling",
     "research",
     "prototype",
+    "grill-with-docs",
+    "code-review",
   ]);
-  // The coordinator keeps those four and drops the UI skill (D-040).
-  assert.deepEqual(withheldSkills("coordinator"), ["impeccable"]);
-  for (const role of ["backend", "qa"] as const) {
-    assert.deepEqual(
-      withheldSkills(role),
-      ["impeccable", "grilling", "domain-modeling", "research", "prototype"],
-      role,
-    );
-  }
+  // The coordinator keeps those four and grill-with-docs, and drops the UI skill and review.
+  assert.deepEqual(withheldSkills("coordinator"), ["impeccable", "code-review"]);
+  // A builder drops everything but keeps its own build skills.
+  assert.deepEqual(withheldSkills("backend"), [
+    "impeccable",
+    "grilling",
+    "domain-modeling",
+    "research",
+    "prototype",
+    "grill-with-docs",
+    "code-review",
+  ]);
+  // QA keeps code-review and drops the grill.
+  assert.deepEqual(withheldSkills("qa"), [
+    "impeccable",
+    "grilling",
+    "domain-modeling",
+    "research",
+    "prototype",
+    "grill-with-docs",
+  ]);
+  assert.equal(withheldSkills("qa").includes("code-review"), false);
+  assert.equal(withheldSkills("coordinator").includes("grill-with-docs"), false);
 });
 
 test("worktree sync applies the run agent's OpenCode permissions", async () => {

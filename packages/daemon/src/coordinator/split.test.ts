@@ -198,6 +198,31 @@ test("splitIssue reuses children by marker and only adds what is missing", async
   ]);
 });
 
+test("a part body lists its decision IDs and the grill calls it follows (D-044)", async () => {
+  const calls = [
+    { question: "Where?", answer: "daemon", basis: "SPEC" },
+    { question: "How?", answer: "one part", basis: "D-040" },
+  ];
+  const parts: PlanPart[] = [
+    {
+      ...(plan[0] as PlanPart),
+      decisions: [{ id: "D-014", line: "Sets the part sizes." }],
+      calls: [1, "How?"],
+    },
+  ];
+  const { linear, creates } = fakeLinear();
+  await splitIssue(parent, parts, linear, undefined, calls);
+  const body = creates[0]?.description ?? "";
+  assert.ok(
+    body.includes(
+      "**Size**: S\n\n**Decisions**\n- D-014: Sets the part sizes.\n\n" +
+        "**Grill calls**\n- Where? → daemon\n- How? → one part\n\n**Brief**\nAdd avatar to the API.",
+    ),
+    body,
+  );
+  assert.ok(body.indexOf("**Decisions**") < body.indexOf("**Brief**"));
+});
+
 test("splitIssue refuses an empty plan when nothing exists yet", async () => {
   await assert.rejects(splitIssue(parent, [], fakeLinear().linear), /nothing to split/);
 });

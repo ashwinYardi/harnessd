@@ -25,6 +25,14 @@ const SIZES: readonly Size[] = ["S", "M", "L"];
 /** At most this many parts per issue; more means the issue itself is wrong. */
 export const MAX_PLAN_PARTS = 6;
 
+/** A decision record a part depends on, named in its brief (D-044). */
+export interface PlanDecision {
+  /** `D-NNN`, a file in `docs/decisions/`. */
+  id: string;
+  /** One sentence on why it applies to this part. */
+  line: string;
+}
+
 export interface PlanPart {
   role: PartRole;
   title: string;
@@ -32,6 +40,10 @@ export interface PlanPart {
   prompt: string;
   /** S or M. L is parsed so the loop can refuse it (D-014). */
   size: Size;
+  /** The records this part reads; the builder reads only these and its brief (D-044). */
+  decisions?: PlanDecision[];
+  /** Grill call numbers (1-based) or question texts that apply to this part (D-044). */
+  calls?: (number | string)[];
 }
 
 export interface SplitPlan {
@@ -57,9 +69,29 @@ export type ParsedPlanReply =
 
 /** The JSON shape the coordinator must reply with. */
 export const PLAN_REPLY_SHAPE = `{
-  "parts": [{ "role": "backend" | "frontend", "title": "string", "prompt": "string", "size": "S" | "M" }],
+  "parts": [{
+    "role": "backend" | "frontend",
+    "title": "string",
+    "prompt": "string",
+    "size": "S" | "M",
+    "decisions": [{ "id": "D-NNN", "line": "why it applies to this part" }],
+    "calls": [1, "a grill question this part follows"]
+  }],
   "reason": "why the issue needs more than one part (only for a plan with more than one part; leave it out for a one-part plan)"
 }`;
+
+/** A decision id: D- and three digits, as in a `docs/decisions/` file name. */
+export const DECISION_ID = /^D-\d{3}$/;
+
+/** Ids of the records that exist, from the grill context. */
+export function knownDecisionIds(context: GrillContext): Set<string> {
+  const ids = new Set<string>();
+  for (const decision of context.decisions) {
+    const match = /^(D-\d{3})(?:-|$)/.exec(decision.name);
+    if (match?.[1]) ids.add(match[1]);
+  }
+  return ids;
+}
 
 type Obj = Record<string, unknown>;
 
@@ -67,10 +99,20 @@ function isObj(value: unknown): value is Obj {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-const PART_KEYS = ["role", "title", "prompt", "size"] as const;
+const PART_KEYS = ["role", "title", "prompt", "size", "decisions", "calls"] as const;
+
+export interface ParsePlanOptions {
+  /**
+   * The ids that have a record file. A well-formed id outside this set is dropped
+   * with one log line (D-044). When absent, every well-formed id is kept.
+   */
+  knownIds?: ReadonlySet<string>;
+  /** Receives one line per dropped decision id. */
+  log?: (line: string) => void;
+}
 
 /** Strictly validates a plan reply: known keys only, non-empty strings, 1 to 6 parts. */
-export function parsePlanReply(text: string): ParsedPlanReply {
+export function parsePlanReply(text: string, options: ParsePlanOptions = {}): ParsedPlanReply {
   let value: unknown;
   try {
     value = JSON.parse(extractJson(text));
@@ -110,7 +152,7 @@ export function parsePlanReply(text: string): ParsedPlanReply {
         return { ok: false, error: `${path}: unknown key "${key}"` };
       }
     }
-    for (const key of PART_KEYS) {
+    for (const key of ["role", "title", "prompt", "size"] as const) {
       const v = raw[key];
       if (typeof v !== "string" || v.trim() === "") {
         return { ok: false, error: `${path}.${key}: expected a non-empty string` };
@@ -124,29 +166,99 @@ export function parsePlanReply(text: string): ParsedPlanReply {
     if (!(SIZES as readonly string[]).includes(size)) {
       return { ok: false, error: `${path}.size: expected S or M, got "${raw.size as string}"` };
     }
-    parts.push({
+    const decisions = parseDecisions(raw.decisions, `${path}.decisions`, options);
+    if ("error" in decisions) return { ok: false, error: decisions.error };
+    const calls = parsePartCalls(raw.calls, `${path}.calls`);
+    if ("error" in calls) return { ok: false, error: calls.error };
+    const part: PlanPart = {
       role,
       title: (raw.title as string).trim(),
       prompt: (raw.prompt as string).trim(),
       size: size as Size,
-    });
+    };
+    if (decisions.value.length > 0) part.decisions = decisions.value;
+    if (calls.value.length > 0) part.calls = calls.value;
+    parts.push(part);
   }
   return reason === undefined ? { ok: true, parts } : { ok: true, parts, reason };
 }
 
 /**
+ * A part's optional `decisions`. A malformed entry makes the plan invalid. A well-formed
+ * id with no record file is dropped with one log line, not a fallback (D-044).
+ */
+function parseDecisions(
+  raw: unknown,
+  path: string,
+  options: ParsePlanOptions,
+): { value: PlanDecision[] } | { error: string } {
+  const value: PlanDecision[] = [];
+  if (raw === undefined) return { value };
+  if (!Array.isArray(raw)) return { error: `${path}: expected an array` };
+  for (const [i, entry] of raw.entries()) {
+    const at = `${path}[${i}]`;
+    if (!isObj(entry)) return { error: `${at}: expected an object` };
+    for (const key of Object.keys(entry)) {
+      if (key !== "id" && key !== "line") return { error: `${at}: unknown key "${key}"` };
+    }
+    if (
+      typeof entry.id !== "string" ||
+      entry.id.trim() === "" ||
+      typeof entry.line !== "string" ||
+      entry.line.trim() === ""
+    ) {
+      return { error: `${at}: expected id and line strings` };
+    }
+    const id = entry.id.trim();
+    if (!DECISION_ID.test(id)) {
+      return { error: `${at}.id: expected D-NNN, got "${id}"` };
+    }
+    if (options.knownIds !== undefined && !options.knownIds.has(id)) {
+      options.log?.(`plan: dropped decision ${id}: no record in docs/decisions/`);
+      continue;
+    }
+    value.push({ id, line: entry.line.trim() });
+  }
+  return { value };
+}
+
+/** A part's optional `calls`: 1-based call numbers or the call's question text. */
+function parsePartCalls(
+  raw: unknown,
+  path: string,
+): { value: (number | string)[] } | { error: string } {
+  const value: (number | string)[] = [];
+  if (raw === undefined) return { value };
+  if (!Array.isArray(raw)) return { error: `${path}: expected an array` };
+  for (const [i, entry] of raw.entries()) {
+    if (typeof entry === "number") {
+      if (!Number.isInteger(entry) || entry < 1) {
+        return { error: `${path}[${i}]: expected a positive call number or a question string` };
+      }
+      value.push(entry);
+    } else if (typeof entry === "string" && entry.trim() !== "") {
+      value.push(entry.trim());
+    } else {
+      return { error: `${path}[${i}]: expected a positive call number or a question string` };
+    }
+  }
+  return { value };
+}
+
+/**
  * The plan used when the model's is unusable: one part, frontend when the issue
  * carries the `ui` label, else backend, at the issue's size (M when it has none).
+ * It carries every grill call and no decision ids (D-044).
  */
-export function fallbackPlan(issue: Issue): PlanPart[] {
-  return [
-    {
-      role: issue.labels.includes("ui") ? "frontend" : "backend",
-      title: issue.title,
-      prompt: `Implement ${issue.key} as written: every "Done when" item, with tests.`,
-      size: issue.size ?? "M",
-    },
-  ];
+export function fallbackPlan(issue: Issue, calls: readonly Call[] = []): PlanPart[] {
+  const part: PlanPart = {
+    role: issue.labels.includes("ui") ? "frontend" : "backend",
+    title: issue.title,
+    prompt: `Implement ${issue.key} as written: every "Done when" item, with tests.`,
+    size: issue.size ?? "M",
+  };
+  if (calls.length > 0) part.calls = calls.map((_, i) => i + 1);
+  return [part];
 }
 
 function doneWhenList(issue: Issue): string {
@@ -179,7 +291,9 @@ export function buildPlanPrompt({ issue, context, instructions, calls }: PlanPro
       "- Each part is size S (about 30 minutes) or M (about 2 hours). L is not allowed: split larger work into more parts (D-014).",
       '- When you plan more than one part, "reason" must say why the issue cannot ship as one part. A plan with more than one part and no reason is invalid. For a one-part plan, leave out "reason".',
       "- Do not plan QA; harnessd adds the QA part itself.",
-      '- "prompt" is the full brief for the agent: what to change, where, and which "Done when" items it covers.',
+      '- Each part lists the decision records it depends on in "decisions": [{ "id": "D-NNN", "line": "why it applies" }]. The builder reads only its brief and these records (D-044).',
+      '- Each part lists the grill calls that apply to it in "calls": the call numbers below, or their question texts.',
+      '- "prompt" is the full brief for the agent: what to change, where, which "Done when" items it covers, and the decision IDs it depends on. Never write "Read docs/SPEC.md and docs/decisions/" or tell the agent to read every record.',
       "You may read files in this repo; do not edit anything.",
     ].join("\n"),
     `Reply with strict JSON only, no prose and no code fence, in exactly this shape:\n${PLAN_REPLY_SHAPE}`,
@@ -192,7 +306,7 @@ export function buildPlanPrompt({ issue, context, instructions, calls }: PlanPro
   );
   if (calls && calls.length > 0) {
     parts.push(
-      `## Calls from the grill\n${calls.map((c) => `- ${c.question} → ${c.answer}`).join("\n")}`,
+      `## Calls from the grill\n${calls.map((c, i) => `${i + 1}. ${c.question} → ${c.answer}`).join("\n")}`,
     );
   }
   parts.push(
@@ -209,6 +323,8 @@ export interface PlanDeps {
   context: GrillContext;
   cwd: string;
   calls?: Call[];
+  /** Receives one line per dropped decision id (D-044). */
+  log?: (line: string) => void;
   /** Wall-clock budget of the planning run. Default 10 minutes. */
   budgetMs?: number;
 }
@@ -251,7 +367,12 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
       ...turnsOf(reply),
     };
   }
-  const parsed: ParsedPlanReply = reply.ok ? parsePlanReply(reply.text) : reply;
+  const parsed: ParsedPlanReply = reply.ok
+    ? parsePlanReply(reply.text, {
+        knownIds: knownDecisionIds(deps.context),
+        ...(deps.log === undefined ? {} : { log: deps.log }),
+      })
+    : reply;
   if (parsed.ok) {
     const plan: SplitPlan = {
       parts: parsed.parts,
@@ -263,7 +384,7 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
     return plan;
   }
   return {
-    parts: fallbackPlan(issue),
+    parts: fallbackPlan(issue, deps.calls ?? []),
     source: "fallback",
     error: parsed.error,
     tokens: reply.tokens,
