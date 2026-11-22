@@ -48,6 +48,10 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Kept worktree**: a worktree that the loop does not remove because it holds unshipped work, or because a run was paused, stopped or limited. The next run resumes it on the same branch (D-039). _Avoid_: leftover worktree.
 
+**Unshipped work**: uncommitted changes in a run's worktree, or commits on its branch that are not on `origin/<branch>`. A worktree with unshipped work is kept, not removed (MET-114, docs/LOOP.md "Dispatch"). _Avoid_: dirty tree, local only.
+
+**Scratch worktree**: a detached checkout of a PR head that a QA round uses. It holds no branch work, so a clean one is removed; uncommitted changes, or commits that no live remote branch holds, are kept like any other worktree (MET-114). _Avoid_: throwaway worktree.
+
 **Event stream**: the server-sent events at `GET /api/events` that push pause, board, agent and log changes to the UI (D-024).
 
 **Held update**: a live change the UI keeps back while the pointer or focus is in that region, so content never moves under the cursor.

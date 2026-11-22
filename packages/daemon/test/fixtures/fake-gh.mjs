@@ -41,12 +41,15 @@ const [cmd, sub] = argv;
 if (cmd === "pr" && sub === "list") {
   process.stdout.write(
     JSON.stringify([
+      { ...pr(13, "From a fork", "met-41-serve-avatars"), isCrossRepository: true },
       pr(7, "MET-41: Serve avatars", "met-41-serve-avatars"),
       pr(9, "MET-41: Serve avatars, take two", "met-41-take-two"),
       pr(11, "MET-410: Something else", "met-410-else"),
       pr(12, "Mentions MET-4 only", "met-4"),
     ]),
   );
+} else if (cmd === "pr" && sub === "create") {
+  process.stdout.write("https://github.test/o/r/pull/99\n");
 } else if (cmd === "pr" && sub === "view" && argv.at(-1)?.includes("statusCheckRollup")) {
   process.stdout.write(
     JSON.stringify({

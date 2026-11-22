@@ -333,3 +333,25 @@ test("paths lists every file sync owns, written or already up to date", async ()
   assert.deepEqual(second.paths, first.paths);
   assert.deepEqual([...first.changed].sort(), [...first.paths].sort());
 });
+
+test("owner sync uses default OpenCode permissions and preserves other user keys", async () => {
+  const options = await setup("empty");
+  await writeFile(
+    join(options.repoDir, ".harnessd", "config.toml"),
+    '[agents.backend.opencode_permission]\nwebsearch = "deny"\n',
+  );
+  const path = join(options.repoDir, "opencode.json");
+  await writeFile(
+    path,
+    JSON.stringify({
+      permission: { websearch: "ask" },
+      websearch: { provider: "other" },
+      model: "example/model",
+    }),
+  );
+  await syncRepo(options);
+  const config = JSON.parse(await readFile(path, "utf8"));
+  assert.equal(config.permission.websearch, "allow");
+  assert.deepEqual(config.websearch, { provider: "random" });
+  assert.equal(config.model, "example/model");
+});

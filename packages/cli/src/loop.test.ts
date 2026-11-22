@@ -687,3 +687,35 @@ test("while Claude Code is held, a codex fallback dispatches through harnessAdap
   );
   assert.equal((await started?.result)?.status, "ok");
 });
+
+test("GET /api/status may cache the worktree-write check; POST /api/start checks it afresh", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  const fresh: (boolean | undefined)[] = [];
+  let blocking = true;
+  const code = await runLoop([], {
+    ...s.io,
+    checks: async (o) => {
+      fresh.push(o.freshWorktreeWrite);
+      if (blocking) return FAILING;
+      return [{ id: "slack.webhook", state: "warn", detail: "not set", fix: "set it" }];
+    },
+    stopSignal: async () => {
+      const url = (await readDaemonInfo(s.home))?.url ?? "";
+      await fetch(`${url}/api/status`);
+      blocking = false;
+      await fetch(`${url}/api/start`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(
+    fresh,
+    [true, false, true],
+    "run and Start check afresh; GET /api/status may use the cache",
+  );
+});

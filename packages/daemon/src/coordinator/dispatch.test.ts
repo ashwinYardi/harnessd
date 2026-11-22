@@ -50,7 +50,7 @@ test("agentForRole prefers the agent named after the role", () => {
   assert.equal(agentForRole(config, "backend"), undefined);
 });
 
-test("the part prompt layers the instructions and the brief and ends with commit, push and PR", () => {
+test("the part prompt layers the instructions and the brief; the daemon ships the work", () => {
   const prompt = buildPartPrompt({ agent, issue, branch: "met-41-serve-avatars" });
   for (const text of [
     "You are backend, the harnessd backend agent.",
@@ -58,13 +58,16 @@ test("the part prompt layers the instructions and the brief and ends with commit
     '## Task MET-41: Serve "avatars"\nURL: https://linear.test/MET-41\nParent: MET-40\nSize: S',
     "**Brief**\nAdd it.",
     "on branch `met-41-serve-avatars`",
-    "2. Commit your changes.",
-    "`git push -u origin met-41-serve-avatars`",
-    `gh pr create --title "MET-41: Serve 'avatars'"`,
+    "Edit and test only in this worktree.",
+    "Do not run `git commit`, `git push` or `gh pr create`",
+    "harnessd pushes the branch and opens the PR after your run.",
+    "End with a last message: a summary of the change, and one line on how you checked it.",
     "Do not merge.",
   ]) {
     assert.ok(prompt.includes(text), text);
   }
+  assert.ok(!prompt.includes("Commit your changes"));
+  assert.ok(!prompt.includes("gh pr create --title"));
 });
 
 test("a part sent back by QA gets the failing items and is told to update its open PR", () => {
@@ -82,11 +85,11 @@ test("a part sent back by QA gets the failing items and is told to update its op
     "## QA requested changes",
     "PR: https://github.test/o/r/pull/7\nReview: https://github.test/o/r/pull/7#pullrequestreview-1",
     "- Has tests: no test covers the 404 path",
-    "4. Your PR is already open (https://github.test/o/r/pull/7). Pushing updates it; do not open another.",
+    "harnessd pushes your work to the open PR (https://github.test/o/r/pull/7) and updates it; do not open another.",
   ]) {
     assert.ok(prompt.includes(text), text);
   }
-  assert.ok(!prompt.includes("gh pr create"));
+  assert.ok(!prompt.includes("gh pr create --title"));
 });
 
 test("with memory, the part prompt names the vaults and the generated files before the ship steps", () => {

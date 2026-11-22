@@ -21,6 +21,8 @@ export interface HarnessSummary {
   state: Check["state"];
   /** Why the CLI was not found. */
   reason?: string;
+  /** A failed worktree write check (MET-115): the harness cannot work, whatever its sign-in. */
+  worktreeWrite?: { reason: string; fix: string };
 }
 
 /** The cli check's detail is "<version line> (<path>)". */
@@ -41,6 +43,9 @@ export function harnessSummary(harness: string, checks: readonly Check[]): Harne
     state: worst(checks),
   };
   if (!found && cli) out.reason = cli.detail;
+  const write = get("worktree_write");
+  if (found && write?.state === "fail")
+    out.worktreeWrite = { reason: write.detail, fix: write.fix };
   return out;
 }
 

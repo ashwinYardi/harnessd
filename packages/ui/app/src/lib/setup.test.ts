@@ -171,3 +171,19 @@ test("startState enables Start after a secret save, once the loop state is read 
     loading: false,
   });
 });
+
+test("harnessSummary keeps a failed worktree write check, with its reason and fix, and is not ready", () => {
+  const s = harnessSummary("claude-code", [
+    c("harness.claude-code.cli", "ok", "2.1.4 (Claude Code) (/opt/homebrew/bin/claude)"),
+    c("harness.claude-code.auth", "ok", "signed in (claude.ai)"),
+    c("harness.claude-code.version", "ok", "2.1.4"),
+    c("harness.claude-code.worktree_write", "fail", "cannot write /w: EACCES", "Make /w writable"),
+  ]);
+  assert.equal(s.state, "fail");
+  assert.deepEqual(s.worktreeWrite, { reason: "cannot write /w: EACCES", fix: "Make /w writable" });
+  const ok = harnessSummary("claude-code", [
+    c("harness.claude-code.cli", "ok", "1 (/x)"),
+    c("harness.claude-code.worktree_write", "ok", "writable"),
+  ]);
+  assert.equal(ok.worktreeWrite, undefined);
+});

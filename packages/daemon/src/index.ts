@@ -57,6 +57,7 @@ export * from "./status/detect.ts";
 export * from "./status/launchd.ts";
 export * from "./status/route.ts";
 export * from "./status/status.ts";
+export * from "./status/worktree-write.ts";
 export { tomlKey, tomlString } from "./sync/format.ts";
 export * from "./sync/generate.ts";
 export * from "./sync/sync.ts";
