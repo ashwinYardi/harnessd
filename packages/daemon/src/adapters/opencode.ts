@@ -2,6 +2,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import {
   type AdapterEvent,
   type AdapterRun,
@@ -121,9 +122,9 @@ interface Failure {
   retryAfterMs?: number;
 }
 
-/** Turns `opencode run --format json` lines into adapter events and tracks run totals. */
 const CANCELLED_INPUT = "Cancelled a request for input this run cannot answer:";
 
+/** Turns `opencode run --format json` lines into adapter events and tracks run totals. */
 class OpenCodeJsonParser implements LineParser {
   #emit: (event: AdapterEvent) => void;
   #sessionId: string | undefined;
@@ -134,6 +135,7 @@ class OpenCodeJsonParser implements LineParser {
   #cancelledInput = false;
   #failure: Failure | undefined;
   #lastStderr: string | undefined;
+  #stderrError: string | undefined;
   /** Tool calls already shown, so a call is shown once. */
   #shown = new Set<string>();
 
@@ -155,7 +157,9 @@ class OpenCodeJsonParser implements LineParser {
   }
 
   stderr(line: string): void {
-    if (line.trim() !== "") this.#lastStderr = line.trim();
+    const message = stripVTControlCharacters(line).trim();
+    if (message !== "") this.#lastStderr = message;
+    if (message.startsWith("Error: ")) this.#stderrError ??= message;
   }
 
   outcome(exitCode: number | null): ParsedOutcome {
@@ -165,16 +169,23 @@ class OpenCodeJsonParser implements LineParser {
     if (this.#sessionId !== undefined) out.sessionId = this.#sessionId;
     if (this.#finalText !== undefined) out.finalText = this.#finalText;
     let failure = this.#failure;
-    if (failure === undefined && (!ok || exitCode !== 0) && this.#lastStderr !== undefined) {
-      failure = { message: this.#lastStderr };
+    if (failure === undefined && (!ok || exitCode !== 0)) {
+      const message = this.#stderrError ?? this.#lastStderr;
+      if (message !== undefined) failure = { message };
     }
     const reason =
       failure === undefined
         ? undefined
         : ((failure.type === undefined ? undefined : TYPED_REASON[failure.type]) ??
           openCodeFailureReason(failure.message));
-    if (ok && this.#cancelledInput && exitCode === 1 && reason === undefined) {
-      out.acceptNonzeroExit = true;
+    if (
+      ok &&
+      this.#cancelledInput &&
+      exitCode === 1 &&
+      this.#stderrError === undefined &&
+      reason === undefined
+    ) {
+      out.acceptedExitCode = 1;
       return out;
     }
     if (failure === undefined) {

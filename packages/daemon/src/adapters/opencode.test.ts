@@ -443,9 +443,25 @@ test("a cancelled input without a step still fails the run", async () => {
 });
 
 test("an auth failure on stderr can still explain a nonzero exit after cancelled input", async () => {
-  const { run: r } = run({ fixture: "cancelled-input", exit: 1, stderr: "Invalid API key" });
+  const { run: r } = run({
+    fixture: "cancelled-input",
+    exit: 1,
+    stderr: "Error: Invalid API key\nWarning: cleanup complete",
+  });
   await collect(r);
   const result = await r.result;
   assert.equal(result.status, "error");
   assert.equal(result.reason, "auth");
+});
+
+test("an unclassified CLI error on stderr still fails after cancelled input", async () => {
+  const { run: r } = run({
+    fixture: "cancelled-input",
+    exit: 1,
+    stderr: "\x1b[91m\x1b[1mError: \x1b[0mconnection reset",
+  });
+  await collect(r);
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /connection reset/);
 });

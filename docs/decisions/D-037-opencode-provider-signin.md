@@ -1,6 +1,8 @@
 # D-037 OpenCode sign-in takes a provider id from the daemon's own set
 Status: draft 2026-11-21. Amends D-026 and D-031. Issue: MET-71 (part 2, MET-92).
 
+D-038 extends sync ownership of OpenCode settings.
+
 - OpenCode signs in per model provider, not once per harness. So the OpenCode card has no `/api/harnesses/opencode/signin` route. It has `POST /api/setup/opencode/providers/<provider>/signin` instead.
 - The provider is a path parameter, not a body key. The body stays `{}`.
 - The daemon builds its own allowed set for each request: the providers that `opencode auth list --format json --standalone` lists, plus the providers that opencode agents name in `model` or `fallback_model`. It reads only the `id` of each listed provider, never a credential field.

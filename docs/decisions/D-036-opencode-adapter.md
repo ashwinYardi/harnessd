@@ -23,7 +23,7 @@ opencode run --format json --standalone [-m <provider>/<model>[#variant]] -- <pr
 
 ## Permissions and input requests (MET-118)
 
-MET-119 amends the OpenCode sync ownership in D-037. Sync also owns `permission` and `websearch` in `opencode.json`. Sync writes `websearch = { "provider": "random" }` to avoid the provider consent form. We checked this setting on OpenCode 2.3.2.
+D-038 extends the OpenCode sync ownership in D-037. Sync also owns `permission` and `websearch` in `opencode.json`. Sync writes `websearch = { "provider": "random" }` to avoid the provider consent form. We checked this setting on OpenCode 2.3.2.
 
 | Tool or permission | Default |
 | --- | --- |
