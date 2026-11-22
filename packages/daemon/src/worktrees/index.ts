@@ -127,6 +127,26 @@ function commitsAhead(path: string, from: string): Promise<number> {
   });
 }
 
+/**
+ * The head of `refs/heads/<branch>` on the remote, or undefined when the remote has no
+ * such branch. Asks the remote itself: a local `refs/remotes/origin/<branch>` can outlive
+ * a deleted remote branch and would wrongly report the branch as shipped.
+ */
+async function remoteBranchHead(
+  repoDir: string,
+  branch: string,
+  remote = "origin",
+): Promise<string | undefined> {
+  try {
+    const out = await git(repoDir, ["ls-remote", "--heads", remote, `refs/heads/${branch}`]);
+    const sha = out.trim().split("\n")[0]?.split(/\s+/)[0];
+    return sha !== undefined && /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  } catch {
+    // The remote is unreachable. Treat it as missing: keep rather than lose work.
+    return undefined;
+  }
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await stat(path);
@@ -444,8 +464,9 @@ export interface RemoveWorktreeOptions {
   /** Also delete the branch. Default false: the PR needs it. */
   deleteBranch?: boolean;
   /**
-   * A throwaway checkout, such as a QA PR head, holds no branch work. Remove it even when
-   * it has local changes.
+   * A throwaway checkout, such as a QA PR head, detached from a branch. Its commits are
+   * judged against the remote branch when one exists, not against the base, because a
+   * PR from a fork keeps its commits on another branch. Uncommitted work is still kept.
    */
   scratch?: boolean;
   /** The run's excludes file, so synced files do not count as uncommitted changes. */
@@ -465,8 +486,10 @@ export interface RemoveWorktreeResult {
 
 /**
  * The reason to keep the worktree, or undefined when it is safe to remove. Committed
- * work counts only when it is not on `origin/<branch>`; with no remote branch, every
- * commit ahead of base is unshipped.
+ * work counts only when it is not on the remote branch; with no remote branch, every
+ * commit ahead of base is unshipped. A scratch checkout is detached from a PR head, so
+ * its commits may live on a fork: it is judged on the remote branch when one exists,
+ * and otherwise on its uncommitted changes only.
  */
 async function keepReason(
   repoDir: string,
@@ -474,6 +497,7 @@ async function keepReason(
   branch: string | undefined,
   base: string,
   excludesFile: string | undefined,
+  scratch: boolean,
 ): Promise<WorktreeKeepReason | undefined> {
   const status = await git(
     path,
@@ -482,13 +506,14 @@ async function keepReason(
   );
   if (status.trim() !== "") return "uncommitted changes";
 
-  const remoteBranch =
-    branch !== undefined && (await refExists(repoDir, `refs/remotes/origin/${branch}`))
-      ? `origin/${branch}`
-      : undefined;
-  if (remoteBranch !== undefined) {
-    return (await commitsAhead(path, remoteBranch)) > 0 ? "commits not on the remote" : undefined;
+  const remoteHead = branch === undefined ? undefined : await remoteBranchHead(repoDir, branch);
+  if (remoteHead !== undefined) {
+    // The remote may name a commit this clone has not fetched. Without it locally we
+    // cannot prove the work is shipped, so keep it.
+    if (!(await refExists(repoDir, `${remoteHead}^{commit}`))) return "commits not on the remote";
+    return (await commitsAhead(path, remoteHead)) > 0 ? "commits not on the remote" : undefined;
   }
+  if (scratch) return undefined;
   for (const ref of [`origin/${base}`, base]) {
     if (await refExists(repoDir, ref)) {
       return (await commitsAhead(path, ref)) > 0 ? "commits not on the remote" : undefined;
@@ -527,13 +552,14 @@ export async function removeWorktree(
     const repoDir = entry?.repoDir ?? options.repoDir;
     const branch = entry?.branch ?? (await registeredWorktrees(repoDir)).get(await canonical(path));
 
-    if (!options.scratch && (await exists(path))) {
+    if (await exists(path)) {
       const kept = await keepReason(
         repoDir,
         path,
         branch,
         options.base ?? "main",
         options.excludesFile,
+        options.scratch ?? false,
       );
       if (kept !== undefined) return { removed: false, kept };
     }
