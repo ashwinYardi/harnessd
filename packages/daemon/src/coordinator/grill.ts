@@ -64,12 +64,32 @@ export type ParsedGrillReply =
 
 const REPLY_KEYS = ["calls", "escalation", "terms", "precedents"];
 
-/** The JSON inside a reply: the whole text, or the first ``` / ```json fenced block. */
+/**
+ * The JSON inside a reply: the whole text, the first ``` / ```json fenced block, or a JSON
+ * object that starts a line after some prose and runs to the last "}".
+ */
 export function extractJson(text: string): string {
   const trimmed = text.trim();
   if (trimmed.startsWith("{")) return trimmed;
   const fence = /```(?:json)?[ \t]*\r?\n([\s\S]*?)\r?\n?```/i.exec(trimmed);
-  return fence?.[1] !== undefined ? fence[1].trim() : trimmed;
+  if (fence?.[1] !== undefined) return fence[1].trim();
+  return trailingObject(trimmed) ?? trimmed;
+}
+
+/** The last line-start "{" whose text up to the last "}" parses as JSON, if any. */
+function trailingObject(text: string): string | undefined {
+  const end = text.lastIndexOf("}");
+  let start = text.lastIndexOf("\n{", end);
+  while (start > 0) {
+    const candidate = text.slice(start + 1, end + 1);
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      start = text.lastIndexOf("\n{", start - 1);
+    }
+  }
+  return undefined;
 }
 
 type Obj = Record<string, unknown>;
