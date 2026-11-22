@@ -94,7 +94,7 @@ When the split is done, the parent moves to In Progress.
   - uses the adapter for its agent's harness;
   - gets a prompt made of the agent's layered instructions plus the sub-issue body;
   - runs within the budget for its size;
-  - stops at its turn cap (D-045): a builder part's `limits.max_turns` for its size, QA 40, or coordinator grill and plan 50.
+  - stops at its turn cap (D-045): a builder part's `limits.max_turns` for its size, QA 40 for S and 80 for M (D-047), or coordinator grill and plan 50.
 - Before a part or QA run starts, and before a rework run, the loop checks the parent's weighted token sum against `limits.token_budget`. At or over it, nothing starts and the parent goes to Needs input (see Token budget).
 - The prompt tells the agent to edit and test in the worktree only. It does not commit, push or open the PR: the daemon ships the work after the run (D-039). A part that QA sent back gets the failing items and works on its open PR.
 - A QA sub-issue runs the QA round below instead of a single agent run.
@@ -260,7 +260,7 @@ The QA sub-issue moves to Done after the last part of the parent merges. The fin
 
 A QA agent run that ends `limited` stops the round. No review is posted, no QA failure is counted and QA goes back to Ready.
 
-A QA agent run that ends at its turn cap (40 by default) is a failed QA run: it counts one QA failure, as an agent error does.
+A QA agent run that ends at its turn cap (S 40, M 80) is a failed QA run: it counts one QA failure, as an agent error does.
 
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
 
@@ -274,7 +274,7 @@ The **token budget** is weighted (D-043): `limits.token_budget`, keyed by size l
 The raw sum at escalation is recorded as `usageBaseline` in `loop.json`, as the parent's cumulative sum (not the delta), so the next count subtracts it. When a human moves the parent back to Ready, the budget counts from that point, also after a second escalation. `usage` and `usageBaseline` stay raw, so an old `loop.json` loads and the board count is unchanged.
 
 ### Turn cap
-Every run has a turn cap (D-045). A builder part run uses `limits.max_turns` for its size (S 80, M 160; an unknown size counts as M). QA uses 40, and coordinator grill and plan use 50. The caps come from the MET-131 measurements: 80 turns is about 1.8M weighted tokens, under the S budget of 3M, and 160 turns is about 3.6M, under the M budget of 6M.
+Every run has a turn cap (D-045). A builder part run uses `limits.max_turns` for its size (S 80, M 160; an unknown size counts as M). QA uses 40 for an S parent and 80 for an M parent (D-047), and coordinator grill and plan use 50. The caps come from the MET-131 measurements: 80 turns is about 1.8M weighted tokens, under the S budget of 3M, and 160 turns is about 3.6M, under the M budget of 6M.
 
 - **Claude Code** gets `--max-turns <n>`. A result with subtype `error_max_turns` ends the run `error` with `turn cap (<n> turns)` and no failure reason.
 - **Codex and OpenCode** count turns in the adapter: OpenCode at `step_start`, Codex at each completed tool item. At the cap the adapter kills the process group the way a cancel does and reports `error` with `turn cap (<n> turns)`, not `cancelled`.
