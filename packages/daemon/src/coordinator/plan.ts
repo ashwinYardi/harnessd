@@ -7,6 +7,7 @@ import type {
   ResolvedAgentConfig,
   Size,
   Task,
+  TokenUsage,
 } from "@harnessd/shared";
 import { extractJson, type RunReply, runForReply } from "./grill.ts";
 import type { GrillContext } from "./prompt.ts";
@@ -40,15 +41,22 @@ export interface SplitPlan {
    * usage limit: there are no parts and the issue is not split (MET-70).
    */
   source: "model" | "fallback" | "limited";
+  /** Why the issue needs more than one part. Required when `parts` has more than one. */
+  reason?: string;
   /** Why the model's plan was not used. */
   error?: string;
+  /** Tokens the plan run used (D-040). */
+  tokens?: TokenUsage;
 }
 
-export type ParsedPlanReply = { ok: true; parts: PlanPart[] } | { ok: false; error: string };
+export type ParsedPlanReply =
+  | { ok: true; parts: PlanPart[]; reason?: string }
+  | { ok: false; error: string };
 
 /** The JSON shape the coordinator must reply with. */
 export const PLAN_REPLY_SHAPE = `{
-  "parts": [{ "role": "backend" | "frontend", "title": "string", "prompt": "string", "size": "S" | "M" }]
+  "parts": [{ "role": "backend" | "frontend", "title": "string", "prompt": "string", "size": "S" | "M" }],
+  "reason": "why the issue needs more than one part (required when it has more than one)"
 }`;
 
 type Obj = Record<string, unknown>;
@@ -69,12 +77,26 @@ export function parsePlanReply(text: string): ParsedPlanReply {
   }
   if (!isObj(value)) return { ok: false, error: "expected a JSON object" };
   for (const key of Object.keys(value)) {
-    if (key !== "parts") return { ok: false, error: `unknown key "${key}"` };
+    if (key !== "parts" && key !== "reason") return { ok: false, error: `unknown key "${key}"` };
   }
   if (!Array.isArray(value.parts)) return { ok: false, error: "parts: expected an array" };
   if (value.parts.length === 0) return { ok: false, error: "parts: expected at least one part" };
   if (value.parts.length > MAX_PLAN_PARTS) {
     return { ok: false, error: `parts: expected at most ${MAX_PLAN_PARTS} parts` };
+  }
+  let reason: string | undefined;
+  if (value.reason !== undefined) {
+    if (typeof value.reason !== "string" || value.reason.trim() === "") {
+      return { ok: false, error: "reason: expected a non-empty string" };
+    }
+    reason = value.reason.trim();
+  }
+  if (value.parts.length > 1 && reason === undefined) {
+    return {
+      ok: false,
+      error:
+        "reason: a plan with more than one part must say why the issue cannot ship as one part",
+    };
   }
   const parts: PlanPart[] = [];
   for (const [i, raw] of value.parts.entries()) {
@@ -106,7 +128,7 @@ export function parsePlanReply(text: string): ParsedPlanReply {
       size: size as Size,
     });
   }
-  return { ok: true, parts };
+  return reason === undefined ? { ok: true, parts } : { ok: true, parts, reason };
 }
 
 /**
@@ -149,8 +171,10 @@ export function buildPlanPrompt({ issue, context, instructions, calls }: PlanPro
     [
       "Rules:",
       '- A part has role "backend" (daemon, CLI, adapters, integrations, shared types, docs) or "frontend" (the UI).',
+      "- Plan ONE part by default: one part is one PR. Split only when the issue's Size is L, or one part cannot fit the M budget (about 2 hours).",
       "- Only plan parts with real work. An issue with no UI work gets no frontend part; one with only UI work gets no backend part.",
       "- Each part is size S (about 30 minutes) or M (about 2 hours). L is not allowed: split larger work into more parts (D-014).",
+      '- When you plan more than one part, "reason" must say why the issue cannot ship as one part. A plan with more than one part and no reason is invalid.',
       "- Do not plan QA; harnessd adds the QA part itself.",
       '- "prompt" is the full brief for the agent: what to change, where, and which "Done when" items it covers.',
       "You may read files in this repo; do not edit anything.",
@@ -213,9 +237,21 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
       : ({
           ok: false,
           error: `adapter ${deps.adapter.id} does not match the ${deps.agent.name} harness ${deps.agent.harness}`,
+          tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         } as const);
-  if (!reply.ok && reply.limited) return { parts: [], source: "limited", error: reply.error };
+  if (!reply.ok && reply.limited) {
+    return { parts: [], source: "limited", error: reply.error, tokens: reply.tokens };
+  }
   const parsed: ParsedPlanReply = reply.ok ? parsePlanReply(reply.text) : reply;
-  if (parsed.ok) return { parts: parsed.parts, source: "model" };
-  return { parts: fallbackPlan(issue), source: "fallback", error: parsed.error };
+  if (parsed.ok) {
+    const plan: SplitPlan = { parts: parsed.parts, source: "model", tokens: reply.tokens };
+    if (parsed.reason !== undefined) plan.reason = parsed.reason;
+    return plan;
+  }
+  return {
+    parts: fallbackPlan(issue),
+    source: "fallback",
+    error: parsed.error,
+    tokens: reply.tokens,
+  };
 }

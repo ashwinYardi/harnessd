@@ -24,6 +24,8 @@ export type BudgetSize = (typeof BUDGET_SIZES)[number];
 export interface LimitsConfig {
   max_concurrent: number;
   budget_minutes: Record<BudgetSize, number>;
+  /** Tokens one parent may spend across its grill, plan, part and QA runs (D-040). */
+  token_budget: Record<BudgetSize, number>;
   qa_max_failures: number;
 }
 
@@ -316,7 +318,12 @@ export interface ResolvedAgentConfig {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  limits: { max_concurrent: 3, budget_minutes: { S: 30, M: 120 }, qa_max_failures: 2 },
+  limits: {
+    max_concurrent: 1,
+    budget_minutes: { S: 30, M: 120 },
+    token_budget: { S: 5_000_000, M: 12_000_000 },
+    qa_max_failures: 2,
+  },
   linear: {},
   slack: { channel: "#harnessd", summary_time: "21:00", time_zone: "Asia/Kolkata" },
   merge: {
@@ -623,6 +630,7 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
     const t = c.table(root.limits, "limits", [
       "max_concurrent",
       "budget_minutes",
+      "token_budget",
       "qa_max_failures",
     ]);
     const limits: NonNullable<ConfigFile["limits"]> = {};
@@ -638,6 +646,16 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
         }
       }
       limits.budget_minutes = budget;
+    }
+    if (t.token_budget !== undefined) {
+      const b = c.table(t.token_budget, "limits.token_budget", BUDGET_SIZES);
+      const budget: Partial<Record<BudgetSize, number>> = {};
+      for (const size of BUDGET_SIZES) {
+        if (b[size] !== undefined) {
+          budget[size] = c.positiveInt(b[size], `limits.token_budget.${size}`);
+        }
+      }
+      limits.token_budget = budget;
     }
     if (t.qa_max_failures !== undefined) {
       limits.qa_max_failures = c.positiveInt(t.qa_max_failures, "limits.qa_max_failures");

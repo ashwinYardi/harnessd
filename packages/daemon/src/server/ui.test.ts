@@ -30,7 +30,7 @@ const issue = (key: string, state: string, extra: Partial<BoardIssue> = {}): Boa
   ...extra,
 });
 
-const idle: LoopSnapshot = { lastPollAt: null, runs: [], blocked: [], limits: [] };
+const idle: LoopSnapshot = { lastPollAt: null, runs: [], blocked: [], limits: [], usage: {} };
 
 const running: LoopSnapshot = {
   lastPollAt: "2026-11-20T10:00:00.000Z",
@@ -57,6 +57,7 @@ const running: LoopSnapshot = {
     },
   ],
   limits: [],
+  usage: { "id-MET-41": { input: 100, cached: 20, output: 5 } },
 };
 
 function fakePause() {
@@ -82,7 +83,9 @@ test("buildBoard marks running and blocked issues from the loop", () => {
     running,
   );
   assert.equal(board[0]?.agent, "backend");
+  assert.deepEqual(board[0]?.tokens, { input: 100, cached: 20, output: 5 });
   assert.equal(board[1]?.blocked, "touches protected paths");
+  assert.equal(board[1]?.tokens, undefined);
   assert.equal(board[2]?.agent, undefined);
   assert.equal(board[2]?.blocked, undefined);
 });
@@ -108,7 +111,7 @@ test("agentsView lists every agent in role order with its runs", () => {
     stopping: false,
   });
   assert.equal(view.lastPollAt, "2026-11-20T10:00:00.000Z");
-  assert.equal(view.maxConcurrent, 3);
+  assert.equal(view.maxConcurrent, 1);
 });
 
 test("agentsView carries the harness holds in force (MET-82)", () => {

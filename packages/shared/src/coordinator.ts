@@ -25,6 +25,8 @@ export function isEscalationTrigger(value: string): value is EscalationTrigger {
   return (ESCALATION_TRIGGERS as readonly string[]).includes(value);
 }
 
+import type { TokenUsage } from "./adapter.ts";
+
 /** One question the coordinator settled itself, and why. */
 export interface Call {
   question: string;
@@ -69,6 +71,8 @@ export interface GrillResult {
   precedents?: Precedent[];
   /** Short reason when the outcome is `error` or `limited`. */
   error?: string;
+  /** Tokens the grill run used, when it ran (D-040). */
+  tokens?: TokenUsage;
 }
 
 /** A decision note as written to the vault (same shape as the memory vault's notes). */

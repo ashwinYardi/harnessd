@@ -26,7 +26,7 @@ export interface WorktreeSyncInput {
   /** Names the excludes file, e.g. the task id. */
   runId: string;
   /** The agent assigned to this run. */
-  agent?: Pick<ResolvedAgentConfig, "opencode_permission">;
+  agent?: Pick<ResolvedAgentConfig, "opencode_permission" | "role">;
   /** The daemon's environment. Default process.env. */
   env?: NodeJS.ProcessEnv;
 }
@@ -80,6 +80,14 @@ export function excludesFileFor(globalDir: string, runId: string): string {
   );
 }
 
+/** Skill names a worktree run leaves out of the pack. The UI agent gets the full pack. */
+export const SKILLS_WITHHELD_FROM_NON_UI_RUNS = ["impeccable"] as const;
+
+/** The skills a run with this role omits (D-040). No config key: `enabled = false` still wins. */
+export function withheldSkills(role: ResolvedAgentConfig["role"] | undefined): string[] {
+  return role === "frontend" ? [] : [...SKILLS_WITHHELD_FROM_NON_UI_RUNS];
+}
+
 /**
  * Syncs the merged native files into `worktree` and hides them from git for this run.
  * Throws when sync fails; the caller fails the run before the agent starts.
@@ -92,6 +100,8 @@ export async function syncWorktree(input: WorktreeSyncInput): Promise<WorktreeSy
     repoDir: input.worktree,
     workspaceDir: join(input.repoDir, ".harnessd"),
     globalDir: input.globalDir,
+    omitSkills: withheldSkills(input.agent?.role),
+    memoryMcpOnly: true,
     ...(input.agent?.opencode_permission === undefined
       ? {}
       : { opencodePermission: input.agent.opencode_permission }),

@@ -15,8 +15,9 @@ harnessd reads two folders with the same shape (D-004): `~/.harnessd/` (global, 
 ## config.toml
 ```toml
 [limits]
-max_concurrent = 3
+max_concurrent = 1
 budget_minutes = { S = 30, M = 120 }   # L has no budget: split it (D-014)
+token_budget = { S = 5000000, M = 12000000 }   # per parent; an unknown size counts as M (D-040)
 qa_max_failures = 2
 
 [linear]
@@ -82,6 +83,16 @@ env = { DOCS_MODE = "ro" }  # optional, string values
 | merge-gate config | `.harnessd/config.toml` (holds `[merge]`), `**/CODEOWNERS`, `.github/settings.yml`, `.github/rulesets/**` |
 
 Setting `protected_paths` replaces the whole list, so copy the defaults you want to keep.
+
+## Limits and token spend
+`limits.max_concurrent` defaults to **1** (D-040). A user may set 1 to 3 (D-014 cap). Parallel parts of one parent touched the same files, and each merge sent the next PR back for another build and QA round. With 1, a ticket's parts run one after another: one part, one PR, one QA pass at a time.
+
+`limits.token_budget` is the tokens one parent may spend across its grill, plan, part and QA runs, keyed by size like `budget_minutes`: `S = 5000000`, `M = 12000000`. An unknown size counts as M, and so does L, which never runs. The sum counts input, cached and output tokens. Before a part run, QA run or rework round starts, the loop checks the parent's sum. At or over the budget it starts nothing, moves the parent to Needs input, posts one comment with the sum and the budget, and sends one notice (D-011). A run in flight finishes. When a human moves the parent back to Ready, the count starts again from the escalation point. `loop.json` keeps the sums under `usage`, so a restart does not lose them.
+
+### Which model for QA, and which for builders
+- **QA:** a fast, low-cost model at medium effort. QA reads one PR diff against a checklist, and harnessd runs the tests itself, so it needs little reasoning. Example: an OpenCode flash model.
+- **Builders:** a capable model, because a builder run is a long agent loop and tool turns resend the context. Use a top model only for an M part or after a QA failure. Examples: a top Codex or Claude model as the fallback.
+- Set these per agent in `[agents.<name>]` with `harness` and `model`; docs/CONFIG.md "OpenCode agents" and "Codex agents" show the ids. A hold on the main harness uses `fallback_harness` and `fallback_model`.
 
 ## Secrets
 The Linear key and the Slack webhook url are secrets (D-030). Settings, Connections saves them; docs/INSTALL.md "Secrets" has the steps.

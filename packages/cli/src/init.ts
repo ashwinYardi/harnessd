@@ -48,7 +48,7 @@ export const CONFIG_TEMPLATE = `# harnessd global config. Every key is optional;
 # project = "harnessd"
 
 # [limits]
-# max_concurrent = 3
+# max_concurrent = 1
 
 # [daemon]
 # port = 4747

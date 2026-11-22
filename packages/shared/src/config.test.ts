@@ -19,7 +19,12 @@ function rejects(value: unknown, message: string) {
 
 test("parseConfigFile accepts a full config", () => {
   const input = {
-    limits: { max_concurrent: 5, budget_minutes: { S: 20, M: 90 }, qa_max_failures: 1 },
+    limits: {
+      max_concurrent: 5,
+      budget_minutes: { S: 20, M: 90 },
+      token_budget: { S: 1_000_000, M: 2_000_000 },
+      qa_max_failures: 1,
+    },
     linear: { team_id: "MET", project: "harnessd" },
     slack: { channel: "#ops", summary_time: "18:30", time_zone: "Europe/Berlin" },
     merge: { protected_paths: ["infra/**"], label: "hold", method: "rebase" },
@@ -85,7 +90,7 @@ test("an unknown fallback_harness names the file and key", () => {
 test("unknown keys are rejected with their path", () => {
   rejects(
     { limits: { max_concurent: 2 } },
-    `${FILE}: limits.max_concurent: unknown key, expected one of max_concurrent, budget_minutes, qa_max_failures`,
+    `${FILE}: limits.max_concurent: unknown key, expected one of max_concurrent, budget_minutes, token_budget, qa_max_failures`,
   );
   rejects(
     { colour: "red" },
@@ -97,6 +102,16 @@ test("unknown keys are rejected with their path", () => {
   );
 });
 
+test("limits.token_budget accepts S and M and rejects another key", () => {
+  assert.deepEqual(parseConfigFile({ limits: { token_budget: { S: 10, M: 20 } } }, FILE), {
+    limits: { token_budget: { S: 10, M: 20 } },
+  });
+  rejects(
+    { limits: { token_budget: { L: 300 } } },
+    `${FILE}: limits.token_budget.L: unknown key, expected one of S, M`,
+  );
+});
+
 test("wrong types are rejected with their path", () => {
   rejects(
     { limits: { max_concurrent: 0 } },
@@ -105,6 +120,10 @@ test("wrong types are rejected with their path", () => {
   rejects(
     { limits: { budget_minutes: { S: 1.5 } } },
     `${FILE}: limits.budget_minutes.S: expected an integer >= 1, got 1.5`,
+  );
+  rejects(
+    { limits: { token_budget: { M: 0 } } },
+    `${FILE}: limits.token_budget.M: expected an integer >= 1, got 0`,
   );
   rejects(
     { daemon: { port: 70_000 } },

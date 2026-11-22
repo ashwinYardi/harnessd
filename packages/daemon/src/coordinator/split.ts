@@ -192,11 +192,25 @@ export async function splitIssue(
     await linear.createBlocksRelation(part.id, qa.id);
     related++;
   }
+  // Parts of one parent run one after another: part n blocks part n+1. A split that was
+  // interrupted gets the missing relations on the next tick (D-040).
+  for (let i = 1; i < parts.length; i++) {
+    const previous = parts[i - 1];
+    const part = parts[i];
+    if (previous === undefined || part === undefined) continue;
+    if (part.blockers.some((b) => b.id === previous.id || b.key === previous.key)) continue;
+    await linear.createBlocksRelation(previous.id, part.id);
+    related++;
+  }
   return { parts, qa, created, related };
 }
 
 /** The parent comment after a split that created something. */
-export function formatSplitComment(result: SplitResult, source: "model" | "fallback"): string {
+export function formatSplitComment(
+  result: SplitResult,
+  source: "model" | "fallback",
+  reason?: string,
+): string {
   const lines = [`**Coordinator split**: ${result.parts.length + 1} sub-issues.`, ""];
   for (const part of result.parts) {
     const role = readPartMarker(part.description)?.role ?? "part";
@@ -205,6 +219,14 @@ export function formatSplitComment(result: SplitResult, source: "model" | "fallb
   lines.push(
     `- ${result.qa.key} qa (${result.qa.size ?? "?"}): blocked by ${result.parts.map((p) => p.key).join(", ")}`,
   );
+  if (result.parts.length > 1) {
+    lines.push(
+      "",
+      reason
+        ? `Reason for more than one part: ${reason}`
+        : "Reason for more than one part: not given.",
+    );
+  }
   if (source === "fallback") {
     lines.push("", "The plan reply was unusable, so this is the one-part fallback.");
   }

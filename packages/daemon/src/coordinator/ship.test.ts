@@ -35,6 +35,7 @@ function fakeGithub(open?: PullRequest) {
       return "https://github.test/o/r/pull/99";
     },
     prFiles: () => Promise.reject(new Error("ship never reads files")),
+    prDiff: () => Promise.reject(new Error("ship never reads the diff")),
     postReview: () => Promise.reject(new Error("ship never reviews")),
     prStatus: () => Promise.reject(new Error("ship never reads the status")),
     mergePr: () => Promise.reject(new Error("ship never merges")),

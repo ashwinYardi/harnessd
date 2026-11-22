@@ -30,6 +30,8 @@ export function buildBoard(issues: readonly BoardIssue[], loop: LoopSnapshot): B
     if (agent !== undefined) out.agent = agent;
     const reason = blocked.get(issue.key);
     if (reason !== undefined) out.blocked = reason;
+    const tokens = loop.usage[issue.id];
+    if (tokens !== undefined) out.tokens = tokens;
     return out;
   });
 }

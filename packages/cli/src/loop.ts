@@ -393,12 +393,14 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
           ? active.linear.listBoard(active.team)
           : Promise.reject(new Error("The loop has not started. Finish setup in Settings.")),
       loop: () =>
-        active ? active.loop.snapshot() : { lastPollAt: null, runs: [], blocked: [], limits: [] },
+        active
+          ? active.loop.snapshot()
+          : { lastPollAt: null, runs: [], blocked: [], limits: [], usage: {} },
     }),
     agents: () =>
       active
         ? agentsView(active.config, active.loop.snapshot())
-        : agentsView(fallback, { lastPollAt: null, runs: [], blocked: [], limits: [] }),
+        : agentsView(fallback, { lastPollAt: null, runs: [], blocked: [], limits: [], usage: {} }),
     logs,
     pause,
   });

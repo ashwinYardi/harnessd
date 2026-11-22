@@ -120,10 +120,11 @@ test("splitIssue creates the parts and a QA sub-issue that every part blocks", a
   const result = await splitIssue(parent, plan, linear);
 
   assert.deepEqual(result.created, ["MET-51", "MET-52", "MET-53"]);
-  assert.equal(result.related, 2);
+  assert.equal(result.related, 3);
   assert.deepEqual(relations, [
     ["id-MET-51", "id-MET-53"],
     ["id-MET-52", "id-MET-53"],
+    ["id-MET-51", "id-MET-52"],
   ]);
   assert.deepEqual(
     creates.map((c) => [c.title, c.state, c.labels]),
@@ -154,11 +155,12 @@ test("splitIssue creates the parts and a QA sub-issue that every part blocks", a
   assert.ok(qa.description.includes("**Size**: M"));
 
   assert.equal(
-    formatSplitComment(result, "model"),
+    formatSplitComment(result, "model", "The UI needs the API first."),
     "**Coordinator split**: 3 sub-issues.\n\n" +
       "- MET-51 backend (S): Serve avatars\n" +
       "- MET-52 frontend (M): Show avatars\n" +
-      "- MET-53 qa (M): blocked by MET-51, MET-52\n",
+      "- MET-53 qa (M): blocked by MET-51, MET-52\n" +
+      "\nReason for more than one part: The UI needs the API first.\n",
   );
 });
 
@@ -173,7 +175,14 @@ test("splitIssue reuses children by marker and only adds what is missing", async
     creates.map((c) => c.title),
     ["Show avatars"],
   );
-  assert.deepEqual(relations, [["id-MET-51", "id-MET-42"]], "MET-41 already blocks QA");
+  assert.deepEqual(
+    relations,
+    [
+      ["id-MET-51", "id-MET-42"],
+      ["id-MET-41", "id-MET-51"],
+    ],
+    "MET-41 already blocks QA; the new part is serial after it",
+  );
   assert.equal(result.qa.key, "MET-42");
 
   const again = fakeLinear([backend, qa, child("MET-51", `${partMarker("frontend")}`, "x", [])]);
@@ -183,7 +192,10 @@ test("splitIssue reuses children by marker and only adds what is missing", async
     second.parts.map((p) => p.key),
     ["MET-41", "MET-51"],
   );
-  assert.deepEqual(again.relations, [["id-MET-51", "id-MET-42"]]);
+  assert.deepEqual(again.relations, [
+    ["id-MET-51", "id-MET-42"],
+    ["id-MET-41", "id-MET-51"],
+  ]);
 });
 
 test("splitIssue refuses an empty plan when nothing exists yet", async () => {

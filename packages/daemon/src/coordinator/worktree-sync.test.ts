@@ -170,6 +170,46 @@ test("an OpenCode run in a repo with no harness files gets AGENTS.md, the skills
   assert.equal(git(worktree, ["status", "--porcelain", "--untracked-files=all"], env), "");
 });
 
+test("a worktree run gets its role's skill set and only the memory MCP server", async () => {
+  const f = await fixture();
+  await mkdir(join(f.globalDir, "skills", "impeccable"), { recursive: true });
+  await writeFile(
+    join(f.globalDir, "skills", "impeccable", "SKILL.md"),
+    "---\nname: impeccable\n---\nDesign well.\n",
+  );
+  await writeFile(
+    join(f.repo, ".harnessd", "config.toml"),
+    '[mcp.docs]\ncommand = "npx"\nargs = ["-y", "docs-mcp"]\n',
+  );
+
+  await syncWorktree({
+    repoDir: f.repo,
+    globalDir: f.globalDir,
+    worktree: f.worktree,
+    runId: "backend-run",
+    agent: { role: "backend" },
+  });
+  const skill = (name: string) => join(f.worktree, ".claude", "skills", name, "SKILL.md");
+  const exists = (path: string) =>
+    readFile(path, "utf8").then(
+      () => true,
+      () => false,
+    );
+  assert.equal(await exists(skill("tdd")), true);
+  assert.equal(await exists(skill("impeccable")), false, "a backend run has no impeccable");
+  const mcp = JSON.parse(await readFile(join(f.worktree, ".mcp.json"), "utf8"));
+  assert.deepEqual(Object.keys(mcp.mcpServers), ["harnessd-memory"]);
+
+  await syncWorktree({
+    repoDir: f.repo,
+    globalDir: f.globalDir,
+    worktree: f.worktree,
+    runId: "frontend-run",
+    agent: { role: "frontend" },
+  });
+  assert.equal(await exists(skill("impeccable")), true, "the UI run gets the full pack");
+});
+
 test("worktree sync applies the run agent's OpenCode permissions", async () => {
   const f = await fixture();
   await syncWorktree({
@@ -178,6 +218,7 @@ test("worktree sync applies the run agent's OpenCode permissions", async () => {
     worktree: f.worktree,
     runId: "MET-1-1",
     agent: {
+      role: "backend",
       opencode_permission: { websearch: "deny", bash: { "npm publish *": "deny" } },
     },
   });

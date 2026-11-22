@@ -47,7 +47,13 @@ import {
 import { formatNotice } from "./notifier.ts";
 import { type ShipInput, type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import { partMarker, readPartMarker } from "./split.ts";
-import { createFileLoopStore, emptyLoopState, type LoopState, type LoopStore } from "./state.ts";
+import {
+  createFileLoopStore,
+  emptyLoopState,
+  type LoopState,
+  type LoopStore,
+  parseLoopState,
+} from "./state.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -214,7 +220,13 @@ class FakeLinear implements LoopLinear {
 interface PendingRun {
   task: Task;
   cwd: string;
-  finish(status?: RunResult["status"], error?: string, text?: string, resetAt?: string): void;
+  finish(
+    status?: RunResult["status"],
+    error?: string,
+    text?: string,
+    resetAt?: string,
+    tokens?: RunResult["tokens"],
+  ): void;
 }
 
 /**
@@ -242,8 +254,14 @@ function fakeAdapter(
         text?: string,
         error?: string,
         resetAt?: string,
+        tokens?: RunResult["tokens"],
       ): RunResult => {
-        const r: RunResult = { status, exitCode: 0, durationMs: 1, tokens: emptyTokenUsage() };
+        const r: RunResult = {
+          status,
+          exitCode: 0,
+          durationMs: 1,
+          tokens: tokens ?? emptyTokenUsage(),
+        };
         if (text !== undefined) r.finalText = text;
         if (error !== undefined) r.error = error;
         if (resetAt !== undefined) r.resetAt = resetAt;
@@ -270,8 +288,8 @@ function fakeAdapter(
         pending.push({
           task,
           cwd,
-          finish: (status = "ok", error, text, resetAt) =>
-            resolve(result(status, text, error, resetAt)),
+          finish: (status = "ok", error, text, resetAt, tokens) =>
+            resolve(result(status, text, error, resetAt, tokens)),
         });
       }
       // Like a real adapter, each iteration replays the run from the start.
@@ -348,6 +366,9 @@ function fakeGitHub() {
     async prFiles() {
       return [{ path: "src/x.ts", additions: 3, deletions: 1 }];
     },
+    async prDiff() {
+      return "diff --git a/src/x.ts b/src/x.ts\n+const x = 1;";
+    },
     async postReview(number, review) {
       reviews.push({ number, ...review });
       return `https://github.test/o/r/pull/${number}#review-${reviews.length}`;
@@ -407,6 +428,14 @@ function memoryStore(initial: LoopState = emptyLoopState()): LoopStore & { state
 function plan(...parts: Array<[string, string, string]>): string {
   return JSON.stringify({
     parts: parts.map(([role, size, title]) => ({ role, size, title, prompt: `Do ${title}.` })),
+    ...(parts.length > 1 ? { reason: "The work does not fit one M part." } : {}),
+  });
+}
+
+/** A multi-part plan with no reason: invalid, so the loop must use the one-part fallback. */
+function planWithoutReason(...parts: Array<[string, string, string]>): string {
+  return JSON.stringify({
+    parts: parts.map(([role, size, title]) => ({ role, size, title, prompt: `Do ${title}.` })),
   });
 }
 
@@ -433,8 +462,24 @@ function setup(
   const notes: DecisionNote[] = [];
   const pings: string[] = [];
   const logs: string[] = [];
+  // Most loop tests predate the serial default (D-040) and exercise several runs at once.
+  // They set max_concurrent explicitly; the default itself is tested on mergeLayers([]).
+  const config =
+    options.config ??
+    mergeLayers([
+      {
+        scope: "workspace",
+        dir: "/repo/.harnessd",
+        settings: { limits: { max_concurrent: 3 } },
+        agents: {},
+        rules: [],
+        skills: [],
+        mcp: {},
+        skillSettings: {},
+      },
+    ]);
   const loop = createCoordinatorLoop({
-    config: options.config ?? mergeLayers([]),
+    config,
     linear,
     adapters: { [adapter.adapter.id]: adapter.adapter },
     worktrees: options.worktrees ?? wt.worktrees,
@@ -513,34 +558,33 @@ test("a Ready issue splits into backend and frontend parts plus a QA part they b
   assert.deepEqual(t.linear.relations, [
     { blocker: backend.id, blocked: qa.id },
     { blocker: frontend.id, blocked: qa.id },
+    { blocker: backend.id, blocked: frontend.id },
   ]);
   assert.equal(parent.state, "In Progress");
   assert.equal(report.split[0], parent.key);
   const splitComment = t.linear.comments.find((c) => c.body.startsWith("**Coordinator split**"));
   assert.match(splitComment?.body ?? "", new RegExp(`${qa.key} qa \\(M\\): blocked by`));
+  assert.match(splitComment?.body ?? "", /Reason for more than one part: The work does not fit/);
 
   // The grill ran first and its comment came before the split comment.
   assert.ok(t.adapter.tasks[0]?.id.startsWith("grill-"));
   assert.ok(t.adapter.tasks[1]?.id.startsWith("plan-"));
   assert.ok(t.linear.comments[0]?.body.startsWith("**Coordinator grill**"));
 
-  // Both parts run right away with their size budgets; QA waits.
-  assert.deepEqual(report.dispatched, [backend.key, frontend.key]);
+  // Serial parts: only part 1 runs; part 2 waits until part 1 is merged.
+  assert.deepEqual(report.dispatched, [backend.key]);
   const runs = t.adapter.runs();
   assert.deepEqual(
     runs.map((r) => [r.id, r.budgetMs]),
-    [
-      [`${backend.key}-1`, 30 * 60_000],
-      [`${frontend.key}-1`, 120 * 60_000],
-    ],
+    [[`${backend.key}-1`, 30 * 60_000]],
   );
   assert.match(runs[0]?.prompt ?? "", /You are backend, the harnessd backend agent\./);
   assert.match(runs[0]?.prompt ?? "", /Do not run `git commit`, `git push` or `gh pr create`/);
   assert.equal(t.adapter.pending[0]?.cwd, `/wt/${backend.key}`);
   assert.equal(backend.state, "In Progress");
   assert.equal(qa.state, "Ready");
-  assert.deepEqual(t.loop.running(), [backend.key, frontend.key]);
-  assert.equal(t.memory.state.inFlight.length, 2);
+  assert.deepEqual(t.loop.running(), [backend.key]);
+  assert.equal(t.memory.state.inFlight.length, 1);
 });
 
 test("a backend-only issue gets no frontend part", async () => {
@@ -599,18 +643,34 @@ test("a re-tick creates nothing new, and an interrupted split is finished withou
   // relating QA: the parent is Ready again and the QA relations are gone.
   parent.state = "Ready";
   t.linear.relations = t.linear.relations.slice(0, 1);
-  const tasks = t.adapter.tasks.length;
+  const coordinatorTasks = t.adapter.tasks.filter((task) => /^(grill|plan)-/.test(task.id)).length;
   const report = await t.loop.tick();
   assert.deepEqual(report.split, [parent.key]);
   assert.deepEqual(t.linear.created, created, "no duplicate sub-issues");
-  assert.equal(t.linear.relations.length, 2, "the missing relation is added back");
-  assert.equal(t.adapter.tasks.length, tasks, "no second grill or plan");
+  assert.equal(t.linear.relations.length, 3, "the missing relations are added back");
+  assert.equal(
+    t.adapter.tasks.filter((task) => /^(grill|plan)-/.test(task.id)).length,
+    coordinatorTasks,
+    "no second grill or plan",
+  );
   assert.equal(t.linear.comments.length, comments, "nothing new to report");
   assert.equal(parent.state, "In Progress");
 });
 
 test("at most 3 agents run at once; a finished run frees a slot", async () => {
-  const t = setup();
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 3 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const t = setup({ config });
   const parent = t.linear.add({ title: "Big one", state: "In Progress" });
   for (let i = 1; i <= 5; i++) {
     t.linear.add({
@@ -705,7 +765,7 @@ test("an L issue is never run: L parts or an L fallback go to Needs input", asyn
   assert.match(t.pings[0] ?? "", /^MET-100 needs input \(split\): /);
 
   assert.deepEqual(t.linear.children(splits).map(roleOf), ["backend", "backend-2", "qa"]);
-  assert.equal(t.adapter.runs().length, 2);
+  assert.equal(t.adapter.runs().length, 1, "only the first serial part runs");
   assert.ok(t.adapter.runs().every((r) => !r.id.startsWith(stillL.key)));
 });
 
@@ -792,7 +852,7 @@ const FRONTEND_ON_CODEX = mergeLayers([
   {
     scope: "workspace",
     dir: "/repo/.harnessd",
-    settings: {},
+    settings: { limits: { max_concurrent: 3 } },
     agents: { frontend: { harness: "codex", label: "frontend", keyPrefix: "agents.frontend" } },
     rules: [],
     skills: [],
@@ -1085,7 +1145,7 @@ const BACKEND_WITH_FALLBACK = mergeLayers([
   {
     scope: "workspace",
     dir: "/repo/.harnessd",
-    settings: {},
+    settings: { limits: { max_concurrent: 3 } },
     agents: {
       backend: {
         model: "opus",
@@ -1247,7 +1307,7 @@ const verdict = (...pass: boolean[]) =>
     testsPassed: true,
   });
 
-test("QA waits for every part, checks the PR out at its head, tests it and approves", async () => {
+test("QA reviews one part as soon as it reaches In Review, at its PR head", async () => {
   const t = setup();
   const parent = t.linear.add({ title: "P", state: "In Progress", description: BODY("M") });
   const backend = t.linear.add({
@@ -1273,8 +1333,6 @@ test("QA waits for every part, checks the PR out at its head, tests it and appro
   );
   t.gh.open(backend.key, 7);
 
-  assert.deepEqual((await t.loop.tick()).dispatched, []);
-  frontend.state = "Done";
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
   assert.equal(qa.state, "In Progress");
   await settle();
@@ -1293,6 +1351,11 @@ test("QA waits for every part, checks the PR out at its head, tests it and appro
   assert.ok((run?.budgetMs ?? 0) <= 120 * 60_000);
   assert.match(run?.prompt ?? "", /1\. Works\n2\. Has tests/);
   assert.match(run?.prompt ?? "", /`pnpm test` passed/);
+  assert.match(run?.prompt ?? "", /diff --git a\/src\/x\.ts/);
+  assert.match(run?.prompt ?? "", /## CI\n- CI \/ test: success/);
+  assert.match(run?.prompt ?? "", /## Part brief\nharnessd part: backend/);
+  assert.match(run?.prompt ?? "", /Open a file only to check a line the diff touches/);
+  assert.doesNotMatch(run?.prompt ?? "", /Read the diff and the code/);
   assert.equal(
     t.memory.state.inFlight[0]?.worktree,
     path,
@@ -1301,15 +1364,25 @@ test("QA waits for every part, checks the PR out at its head, tests it and appro
 
   t.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
-  assert.equal(t.gh.reviews.length, 1, "the Done part is not reviewed");
+  assert.equal(t.gh.reviews.length, 1);
   assert.equal(t.gh.reviews[0]?.event, "APPROVE");
   assert.equal(t.gh.reviews[0]?.commitId, "sha7");
   assert.deepEqual(t.wt.removed, [path]);
-  assert.equal(qa.state, "In Review");
+  assert.equal(qa.state, "Ready", "QA waits Ready for the next part");
   assert.equal(backend.state, "In Review");
+  assert.equal(frontend.state, "In Progress", "the other part is untouched");
   assert.match(t.linear.comments.at(-1)?.body ?? "", /approved.*\n\n.*PR #7.*review-1/s);
   assert.deepEqual(t.memory.state.inFlight, []);
   assert.deepEqual(t.memory.state.qaFailures, {});
+  assert.deepEqual(t.memory.state.reviewedHeads?.[backend.id], {
+    sha: "sha7",
+    verdict: "approved",
+  });
+  assert.deepEqual(
+    t.memory.state.merges.map((m) => [m.qaKey, m.prs.map((p) => [p.number, p.sha])]),
+    [[qa.key, [[7, "sha7"]]]],
+    "one merge entry with one PR",
+  );
 });
 
 test("a failed QA sends the part back with the review; the second failure escalates once", async () => {
@@ -1379,7 +1452,7 @@ async function approved(t: ReturnType<typeof setup>) {
   await settle();
   t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
-  assert.equal(fx.qa.state, "In Review");
+  assert.equal(fx.qa.state, "Ready");
   assert.deepEqual(
     t.memory.state.merges.map((m) => [m.qaKey, m.prs.map((p) => [p.number, p.sha])]),
     [[fx.qa.key, [[7, "sha7"]]]],
@@ -1428,7 +1501,7 @@ test("pending CI or no checks yet waits for a later tick", async () => {
   assert.deepEqual((await t.loop.tick()).merged, []);
   assert.deepEqual(t.gh.merges, []);
   assert.equal(backend.state, "In Review");
-  assert.equal(qa.state, "In Review");
+  assert.equal(qa.state, "Ready");
   assert.equal(parent.state, "In Progress");
   assert.ok(t.logs.some((l) => /PR #7 waits \(CI \/ lint pending\)/.test(l)));
   assert.ok(t.logs.some((l) => /PR #7 waits \(no checks yet\)/.test(l)));
@@ -1473,12 +1546,18 @@ test("failed CI sends the part back once with the failing checks; the second fai
   t.adapter.pending.at(-1)?.finish("ok");
   await t.loop.idle();
 
+  // The rework pushed to the open PR: a new head, still failing CI.
+  const reworked = t.gh.prs[backend.key];
+  assert.ok(reworked);
+  reworked.headRefOid = "sha7-fixed";
+  t.gh.statuses[7] = { ...failed, headRefOid: "sha7-fixed" };
+
   // QA approves again (a QA approval does not reset the gate count), CI fails again.
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
   await settle();
   t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
-  assert.equal(qa.state, "In Review");
+  assert.equal(qa.state, "Ready");
   await t.loop.tick();
   assert.equal(qa.state, "Needs input");
   assert.equal(parent.state, "Needs input");
@@ -1507,7 +1586,7 @@ test("a protected PR gets the needs-human label and one ping, ever; a human merg
   assert.deepEqual(t.gh.labels, [{ number: 7, label: "needs-human" }]);
   assert.equal(parent.state, "Needs input");
   assert.equal(backend.state, "In Review");
-  assert.equal(qa.state, "In Review");
+  assert.equal(qa.state, "Ready");
   assert.match(
     t.linear.comments.find((c) => c.key === parent.key)?.body ?? "",
     /needs a human \(D-013\): touches protected paths.*\n\n- `packages\/daemon\/src\/auth\/token\.ts`/s,
@@ -1558,6 +1637,8 @@ test("no merge while paused, even when the pause lands between the CI check and 
   let pauseAfterView = false;
   const t = setup({ extra: { paused: () => paused || (pauseAfterView && t.gh.views.length > 0) } });
   const { backend } = await approved(t);
+  // The QA run reads the PR's checks; from here the gate's own views are what matter.
+  t.gh.views.length = 0;
 
   paused = true;
   assert.equal((await t.loop.tick()).paused, true);
@@ -2043,7 +2124,7 @@ test("pausing during a QA run cancels it: no review, no QA failure, the worktree
   await t.loop.idle();
   assert.equal(t.gh.reviews.length, 1);
   assert.equal(t.gh.reviews[0]?.event, "APPROVE");
-  assert.equal(qa.state, "In Review");
+  assert.equal(qa.state, "Ready");
 });
 
 test("pausing while QA runs the tests stops them and starts no QA agent", async () => {
@@ -3146,4 +3227,175 @@ test("QA, grill and plan runs never ship", async () => {
   qa.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
   await qa.loop.idle();
   assert.deepEqual(shipped, [], "a QA run does not ship");
+});
+
+// --- token spend (D-040) ----------------------------------------------------
+
+test("the default max_concurrent is 1", async () => {
+  assert.equal(mergeLayers([]).limits.max_concurrent, 1);
+  const t = setup({ config: mergeLayers([]) });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  for (const role of ["backend", "frontend"]) {
+    t.linear.add({
+      title: role,
+      parentId: parent.id,
+      description: `${partMarker(role)}\n**Size**: S`,
+    });
+  }
+  const report = await t.loop.tick();
+  assert.deepEqual(report.dispatched, [t.linear.byKey("MET-101").key]);
+  assert.equal(t.loop.running().length, 1);
+});
+
+test("a plan with two parts and no reason falls back to one part", async () => {
+  const adapter = fakeAdapter({
+    plans: { "MET-100": planWithoutReason(["backend", "S", "API"], ["frontend", "S", "UI"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Big", labels: ["ui"], description: BODY("M") });
+
+  await t.loop.tick();
+
+  assert.deepEqual(t.linear.children(parent).map(roleOf), ["frontend", "qa"]);
+  const comment = t.linear.comments.find((c) => c.key === parent.key && /split/.test(c.body));
+  assert.match(comment?.body ?? "", /one-part fallback/);
+  assert.match(t.logs.join("\n"), /plan fallback: reason: a plan with more than one part/);
+});
+
+test("part 2 waits while part 1 is In Review, and starts after part 1 is merged", async () => {
+  const t = setup();
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const first = t.linear.add({
+    title: "First",
+    parentId: parent.id,
+    state: "In Review",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const second = t.linear.add({
+    title: "Second",
+    parentId: parent.id,
+    description: `${partMarker("frontend")}\n**Size**: S`,
+  });
+  t.linear.relations.push({ blocker: first.id, blocked: second.id });
+
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  assert.equal(second.state, "Ready");
+
+  first.state = "Done";
+  assert.deepEqual((await t.loop.tick()).dispatched, [second.key]);
+  assert.equal(second.state, "In Progress");
+});
+
+test("an approved part with an unchanged head gets no second QA run; a new head runs QA once", async () => {
+  const t = setup();
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+  await t.loop.tick();
+  await settle();
+  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+  assert.deepEqual(t.memory.state.reviewedHeads?.[backend.id], {
+    sha: "sha7",
+    verdict: "approved",
+  });
+
+  // Keep the merge gate waiting so the part stays In Review.
+  t.gh.statuses[7] = { checks: [{ name: "CI / test", state: "pending", detail: "IN_PROGRESS" }] };
+  const qaRuns = () => t.adapter.runs().filter((r) => r.id.includes("-qa-")).length;
+  assert.equal(qaRuns(), 1);
+  await t.loop.tick();
+  await t.loop.tick();
+  assert.equal(qaRuns(), 1, "the approved head is not reviewed again");
+  assert.equal(parent.state, "In Progress");
+
+  // A new head is reviewed exactly once.
+  const pr = t.gh.prs[backend.key];
+  assert.ok(pr);
+  pr.headRefOid = "sha7-pushed-later";
+  t.gh.statuses[7] = { headRefOid: "sha7-pushed-later", checks: [] };
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+  assert.equal(qaRuns(), 2);
+  assert.deepEqual(t.memory.state.reviewedHeads?.[backend.id], {
+    sha: "sha7-pushed-later",
+    verdict: "approved",
+  });
+  await t.loop.tick();
+  assert.equal(qaRuns(), 2, "the new head is reviewed once");
+});
+
+test("a run's usage adds to the parent sum, logs a line and survives a reload", async () => {
+  const t = setup();
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  t.linear.add({
+    title: "API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish("ok", undefined, "Done.", undefined, {
+    input: 100,
+    output: 20,
+    cacheRead: 30,
+    cacheWrite: 5,
+  });
+  await t.loop.idle();
+
+  assert.deepEqual(t.memory.state.usage?.[parent.id], { input: 100, cached: 35, output: 20 });
+  assert.ok(
+    t.logs.some((l) => l.includes("used 100 input, 35 cached, 20 output tokens")),
+    t.logs.join("\n"),
+  );
+
+  const reloaded = parseLoopState(JSON.stringify(t.memory.state));
+  assert.deepEqual(reloaded.usage?.[parent.id], { input: 100, cached: 35, output: 20 });
+});
+
+test("at or over the token budget nothing starts and the parent goes to Needs input", async () => {
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { token_budget: { S: 100, M: 100 } } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  linear.add({
+    title: "API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const store = memoryStore({
+    ...emptyLoopState(),
+    usage: { [parent.id]: { input: 100, cached: 0, output: 0 } },
+  });
+  const t = setup({ config, linear, store });
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.dispatched, []);
+  assert.equal(t.adapter.runs().length, 0, "no run starts");
+  assert.equal(parent.state, "Needs input");
+  assert.match(
+    t.linear.comments.find((c) => c.key === parent.key)?.body ?? "",
+    /used 100 of its 100 tokens/,
+  );
+  assert.equal(t.pings.length, 1);
+  assert.deepEqual(
+    { ...store.state.usageBaseline?.[parent.id], at: "t" },
+    { input: 100, cached: 0, output: 0, at: "t" },
+  );
+
+  // The parent is already Needs input: a later tick does not spam the human.
+  await t.loop.tick();
+  assert.equal(t.pings.length, 1);
 });

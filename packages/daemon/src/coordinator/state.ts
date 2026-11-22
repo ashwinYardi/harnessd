@@ -9,6 +9,7 @@ import {
   isHarnessId,
   type SelfUpdateState,
   type SelfUpdateView,
+  type TokenSum,
 } from "@harnessd/shared";
 import type { WorktreeKeepReason } from "../worktrees/index.ts";
 
@@ -127,6 +128,21 @@ export interface HarnessHold {
   endedAt?: string;
 }
 
+/** What QA decided about one part at one PR head (D-040). */
+export interface ReviewedHead {
+  /** The PR head sha QA read. */
+  sha: string;
+  verdict: "approved" | "changes_requested";
+}
+
+/**
+ * The usage sum before a budget escalation. When a human moves the parent back to Ready,
+ * the budget counts from this point (D-040).
+ */
+export interface UsageBaseline extends TokenSum {
+  at: string;
+}
+
 export interface LoopState {
   version: 1;
   /** ISO time of the last poll, null before the first. */
@@ -152,6 +168,12 @@ export interface LoopState {
   selfUpdate?: SelfUpdateRecord;
   /** Harnesses held by a usage limit (MET-70). */
   limits: Partial<Record<HarnessId, HarnessHold>>;
+  /** The PR head QA last judged, per part id (D-040). Optional for old files. */
+  reviewedHeads?: Record<string, ReviewedHead>;
+  /** Tokens used per parent issue id, across grill, plan, part and QA runs (D-040). */
+  usage?: Record<string, TokenSum>;
+  /** Usage at the last budget escalation, per parent issue id (D-040). */
+  usageBaseline?: Record<string, UsageBaseline>;
 }
 
 export function emptyLoopState(): LoopState {
@@ -367,6 +389,49 @@ function holds(value: unknown): Partial<Record<HarnessId, HarnessHold>> {
   return out;
 }
 
+function reviewedHeads(value: unknown): Record<string, ReviewedHead> {
+  const out: Record<string, ReviewedHead> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const h = raw as Partial<ReviewedHead> | null;
+    if (typeof h !== "object" || h === null) continue;
+    if (typeof h.sha !== "string" || h.sha === "") continue;
+    if (h.verdict !== "approved" && h.verdict !== "changes_requested") continue;
+    out[id] = { sha: h.sha, verdict: h.verdict };
+  }
+  return out;
+}
+
+function tokenSum(value: unknown): TokenSum | undefined {
+  const s = value as Partial<TokenSum> | null;
+  if (typeof s !== "object" || s === null) return undefined;
+  const part = (n: unknown) => (typeof n === "number" && Number.isFinite(n) && n >= 0 ? n : 0);
+  return { input: part(s.input), cached: part(s.cached), output: part(s.output) };
+}
+
+function usageSums(value: unknown): Record<string, TokenSum> {
+  const out: Record<string, TokenSum> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const sum = tokenSum(raw);
+    if (sum !== undefined) out[id] = sum;
+  }
+  return out;
+}
+
+function usageBaselines(value: unknown): Record<string, UsageBaseline> {
+  const out: Record<string, UsageBaseline> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const b = raw as Partial<UsageBaseline> | null;
+    const sum = tokenSum(raw);
+    if (sum === undefined || typeof b !== "object" || b === null) continue;
+    if (typeof b.at !== "string") continue;
+    out[id] = { ...sum, at: b.at };
+  }
+  return out;
+}
+
 /** Reads a state file's JSON, keeping only well-formed parts. Throws on anything unreadable. */
 export function parseLoopState(text: string): LoopState {
   const raw = JSON.parse(text) as Partial<LoopState> | null;
@@ -388,6 +453,11 @@ export function parseLoopState(text: string): LoopState {
     selfUpdateNotices: strings(raw.selfUpdateNotices),
     ...(update ? { selfUpdate: update } : {}),
     limits: holds(raw.limits),
+    ...(raw.reviewedHeads === undefined ? {} : { reviewedHeads: reviewedHeads(raw.reviewedHeads) }),
+    ...(raw.usage === undefined ? {} : { usage: usageSums(raw.usage) }),
+    ...(raw.usageBaseline === undefined
+      ? {}
+      : { usageBaseline: usageBaselines(raw.usageBaseline) }),
   };
 }
 

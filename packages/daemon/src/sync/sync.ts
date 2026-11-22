@@ -27,6 +27,10 @@ export interface SyncOptions {
   home?: string;
   /** The run agent’s OpenCode permission overrides, when syncing a worktree. */
   opencodePermission?: OpenCodePermission;
+  /** Skill names to leave out of this sync, such as impeccable for a non-UI run (D-040). */
+  omitSkills?: readonly string[];
+  /** Limit MCP servers to the built-in memory server, for a worktree run (D-040). */
+  memoryMcpOnly?: boolean;
 }
 
 export interface SyncResult {
@@ -136,13 +140,19 @@ export async function syncRepo(options: SyncOptions): Promise<SyncResult> {
     workspaceDir,
     ...(options.home === undefined ? {} : { home: options.home }),
   });
+  const omit = new Set(options.omitSkills ?? []);
+  const effective =
+    omit.size === 0
+      ? config
+      : { ...config, skills: config.skills.filter((s) => !omit.has(s.name)) };
   // Another repo's layer: point the memory server at that repo's vault.
   const elsewhere = resolve(workspaceDir) !== resolve(ownLayer);
-  const generated = generateSyncFiles(config, {
+  const generated = generateSyncFiles(effective, {
     ...(elsewhere ? { memoryWorkspace: dirname(resolve(workspaceDir)) } : {}),
     ...(options.opencodePermission === undefined
       ? {}
       : { opencodePermission: options.opencodePermission }),
+    ...(options.memoryMcpOnly === true ? { memoryMcpOnly: true } : {}),
   });
   const { files, skipped } = await dropForeign(options.repoDir, generated);
   // Read every settings file before writing any, so a bad one stops sync with nothing written.

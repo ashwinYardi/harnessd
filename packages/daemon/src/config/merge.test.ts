@@ -20,8 +20,9 @@ function layer(scope: ConfigLayer["scope"], extra: Partial<ConfigLayer> = {}): C
 test("no layers gives the defaults", () => {
   const merged = mergeLayers([]);
   assert.deepEqual(merged.limits, {
-    max_concurrent: 3,
+    max_concurrent: 1,
     budget_minutes: { S: 30, M: 120 },
+    token_budget: { S: 5_000_000, M: 12_000_000 },
     qa_max_failures: 2,
   });
   assert.equal(merged.slack.channel, "#harnessd");
@@ -48,6 +49,7 @@ test("scalars override and tables deep-merge, later layer winning", () => {
   assert.deepEqual(merged.limits, {
     max_concurrent: 5,
     budget_minutes: { S: 10, M: 60 },
+    token_budget: { S: 5_000_000, M: 12_000_000 },
     qa_max_failures: 2,
   });
   assert.deepEqual(merged.linear, { team_id: "MET", project: "harnessd" });

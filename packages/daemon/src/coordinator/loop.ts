@@ -23,6 +23,8 @@ import {
   type RunResult,
   type SelfUpdateView,
   type Task,
+  type TokenSum,
+  type TokenUsage,
 } from "@harnessd/shared";
 import { resolveAgentConfig } from "../config/merge.ts";
 import type { GitHub } from "../github/client.ts";
@@ -115,9 +117,6 @@ export interface LoopSelfUpdate {
   /** Writes paused.json with the reason, so the pause survives a restart. */
   pause(reason: string): Promise<unknown>;
 }
-
-/** States in which a part no longer blocks its QA sub-issue. */
-const QA_READY_STATES = new Set(["in review", "done"]);
 
 export interface CoordinatorLoopOptions {
   config: MergedConfig;
@@ -234,6 +233,8 @@ export interface LoopSnapshot {
   selfUpdate?: SelfUpdateView;
   /** Harness holds in force now (MET-82). An expired hold is left out before it is released. */
   limits: HarnessLimit[];
+  /** Tokens used per parent issue id, for the board and the budget (D-040). */
+  usage: Record<string, TokenSum>;
 }
 
 export interface TickReport {
@@ -282,6 +283,40 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/** Tokens of one run: cached is cache read plus cache write (D-040). */
+export function tokenSumOf(tokens: TokenUsage): TokenSum {
+  return {
+    input: tokens.input,
+    cached: tokens.cacheRead + tokens.cacheWrite,
+    output: tokens.output,
+  };
+}
+
+function addSums(a: TokenSum, b: TokenSum): TokenSum {
+  return { input: a.input + b.input, cached: a.cached + b.cached, output: a.output + b.output };
+}
+
+function subtractSums(a: TokenSum, b: TokenSum): TokenSum {
+  return {
+    input: Math.max(0, a.input - b.input),
+    cached: Math.max(0, a.cached - b.cached),
+    output: Math.max(0, a.output - b.output),
+  };
+}
+
+/** Input plus cached plus output. */
+export function sumTokens(sum: TokenSum): number {
+  return sum.input + sum.cached + sum.output;
+}
+
+/** The token budget of a parent by its size; an unknown size counts as M (D-040). */
+export function tokenBudgetFor(
+  size: Issue["size"] | undefined,
+  limits: { token_budget: Record<"S" | "M", number> },
+): number {
+  return size === "S" ? limits.token_budget.S : limits.token_budget.M;
+}
+
 export function createCoordinatorLoop(options: CoordinatorLoopOptions): CoordinatorLoop {
   const { config, linear, adapters, worktrees, github, store, repoDir, team } = options;
   const clock = options.clock ?? systemClock;
@@ -299,10 +334,39 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   const runEnvs = new Map<string, Record<string, string>>();
   /** The sub-issue title, by id, for the commit and PR titles. */
   const runTitles = new Map<string, string>();
+  /** The parent issue id per sub-issue id, for the token sum (D-040). */
+  const runParents = new Map<string, string>();
   const memory: AgentMemory | undefined =
     globalDir === undefined
       ? undefined
       : { workspaceVault: workspaceVaultDir(repoDir), globalVault: join(globalDir, "vault") };
+
+  /** Adds one run's tokens to its parent's sum and logs the one-line usage report (D-040). */
+  function recordUsage(
+    s: LoopState,
+    parentId: string | undefined,
+    key: string,
+    agent: string,
+    tokens: TokenUsage,
+  ): void {
+    const sum = tokenSumOf(tokens);
+    if (parentId !== undefined) {
+      const previous = s.usage?.[parentId] ?? { input: 0, cached: 0, output: 0 };
+      s.usage ??= {};
+      s.usage[parentId] = addSums(previous, sum);
+    }
+    log(
+      `${key}: ${agent} used ${sum.input} input, ${sum.cached} cached, ${sum.output} output tokens`,
+    );
+  }
+
+  /** Tokens of a parent since its last budget escalation. */
+  function usageSince(s: LoopState, parentId: string): TokenSum {
+    const total = s.usage?.[parentId] ?? { input: 0, cached: 0, output: 0 };
+    const base = s.usageBaseline?.[parentId];
+    if (base === undefined) return total;
+    return subtractSums(total, { input: base.input, cached: base.cached, output: base.output });
+  }
 
   /** Syncs the harness files into a run's worktree; returns the run's env. Throws on failure. */
   async function prepareWorktree(
@@ -535,6 +599,38 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     );
   }
 
+  /**
+   * True when the parent is at or over its token budget: then nothing new starts, the
+   * parent goes to Needs input once, and the count continues from here after a human
+   * moves it back to Ready (D-040).
+   */
+  async function overTokenBudget(s: LoopState, parent: Issue): Promise<boolean> {
+    // Already escalated: a human has not moved it back to Ready yet.
+    if (parent.state.toLowerCase() === "needs input") return true;
+    const budget = tokenBudgetFor(parent.size, config.limits);
+    const used = usageSince(s, parent.id);
+    const total = sumTokens(used);
+    if (total < budget) return false;
+    try {
+      if ((await linear.getIssue(parent.id)).state.toLowerCase() === "needs input") return true;
+    } catch {
+      // Cannot tell whether it was already escalated: start nothing, do not spam.
+      log(`${parent.key}: token budget reached; could not read the parent, waiting`);
+      return true;
+    }
+    await escalate(
+      { id: parent.id, key: parent.key, ...(parent.url ? { url: parent.url } : {}) },
+      "token budget",
+      `${total} of ${budget} tokens`,
+      `**harnessd token budget**: ${parent.key} used ${total} of its ${budget} tokens, so the loop starts no new run. ` +
+        "Move it back to Ready to continue with a fresh count (D-040).",
+    );
+    s.usageBaseline ??= {};
+    s.usageBaseline[parent.id] = { ...used, at: clock.now().toISOString() };
+    await save();
+    return true;
+  }
+
   /** The `interrupted` record for a kept worktree. */
   function toInterrupted(
     entry: KeptRun,
@@ -654,6 +750,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const id = entry.issueId;
     let drop = true;
     try {
+      recordUsage(s, runParents.get(entry.issueId), entry.issueKey, entry.agent, result.tokens);
       const stopped = entry.pausedAt !== undefined && result.status !== "ok";
       if (stopped) {
         // A failed move keeps the entry: the next tick's re-queue tries again.
@@ -689,6 +786,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
       runEnvs.delete(entry.issueId);
       runTitles.delete(entry.issueId);
+      runParents.delete(entry.issueId);
       if (entry.worktree !== "") await removeWithGuard(s, entry, entry.worktree);
       if (outcome.status === "ok") {
         delete s.attempts[id];
@@ -768,6 +866,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       report.escalated.push(issue.key);
       return;
     }
+    // The per-issue token budget counts every run of the parent, grill and plan included (D-040).
+    let parentIssue: Issue | undefined = qa?.parent;
+    if (parentIssue === undefined && issue.parentId !== undefined) {
+      try {
+        parentIssue = await linear.getIssue(issue.parentId);
+      } catch (error) {
+        log(`${issue.key}: could not read the parent for the token budget: ${message(error)}`);
+      }
+    }
+    if (parentIssue !== undefined && (await overTokenBudget(s, parentIssue))) return;
     const started = await safely(`move ${issue.key} to In Progress`, () =>
       linear.moveTo(issue.id, "In Progress"),
     );
@@ -787,6 +895,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     };
     s.inFlight.push(entry);
     runTitles.set(issue.id, issue.title);
+    runParents.set(issue.id, qa?.parent.id ?? issue.parentId ?? issue.id);
     const fail = (error: unknown): Promise<void> =>
       finish(s, entry, {
         status: "error",
@@ -1003,13 +1112,18 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             failing: [],
             error: message(error),
           })),
+          tokens: emptyTokenUsage(),
         };
         if (abort.signal.aborted) result.cancelled = true;
       }
       if (result.cancelled === true) await requeueStopped(s, entry);
       live.delete(issue.id);
       syncWatch();
-      if (result.cancelled === true) return;
+      recordUsage(s, qa.parent.id, issue.key, agent.name, result.tokens ?? emptyTokenUsage());
+      if (result.cancelled === true) {
+        await save();
+        return;
+      }
       s.inFlight = s.inFlight.filter((e) => e !== entry);
       if (result.limited === true) {
         // The QA agent's harness hit a usage limit: no review, no QA failure (MET-70).
@@ -1018,6 +1132,15 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         await save();
         return;
       }
+      // The head QA judged, per part: the same head is not reviewed twice (D-040).
+      for (const r of result.reviews) {
+        if (r.pr === undefined || r.decision === "error") continue;
+        s.reviewedHeads ??= {};
+        s.reviewedHeads[r.part.id] = {
+          sha: r.pr.headRefOid,
+          verdict: r.decision === "approve" ? "approved" : "changes_requested",
+        };
+      }
       const settled = await settleQa(s, { qa: issue, parent: qa.parent }, result, {
         linear,
         notifier,
@@ -1025,10 +1148,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         log,
       });
       log(`${issue.key}: QA ${result.outcome}, ${settled}`);
-      if (settled === "approved") {
-        // The merge gate's record, pinned to the heads QA reviewed (docs/LOOP.md "Merge").
-        s.merges = s.merges.filter((m) => m.qaId !== issue.id);
-        s.merges.push(pendingMerge(issue, qa.parent, result.reviews, clock.now()));
+      // Each approved part is its own merge entry, pinned to the head QA reviewed (D-040).
+      for (const r of result.reviews) {
+        if (r.decision !== "approve" || r.pr === undefined) continue;
+        s.merges = s.merges.filter((m) => !m.prs.some((p) => p.partId === r.part.id));
+        s.merges.push(pendingMerge(issue, qa.parent, [r], clock.now()));
       }
       await save();
     })();
@@ -1049,12 +1173,30 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       let qa: QaContext | undefined;
       if (marker.role === "qa") {
         if (issue.parentId === undefined) continue;
-        // The parts that block QA; when Linear lost the relations, every part of the parent.
+        // Per-part QA: review each part that is In Review at a head QA has not approved.
+        // A part whose PR head did not change since its approval is not reviewed again (D-040).
         const children = (await linear.listChildren(issue.parentId)).filter(isWorkPart);
-        const blocking = children.filter((p) => issue.blockers.some((b) => b.id === p.id));
-        const parts = blocking.length > 0 ? blocking : children;
-        const reviewed = parts.every((p) => QA_READY_STATES.has(p.state.toLowerCase()));
-        if (parts.length === 0 || !reviewed) continue;
+        const parts: LinkedIssue[] = [];
+        for (const part of children) {
+          if (part.state.toLowerCase() !== "in review") continue;
+          let pr: { headRefOid: string } | undefined;
+          try {
+            pr = await github.findPrForIssue(part.key);
+          } catch (error) {
+            log(`${issue.key}: could not read the PR of ${part.key}: ${message(error)}`);
+            continue;
+          }
+          const reviewed = s.reviewedHeads?.[part.id];
+          if (
+            reviewed?.verdict === "approved" &&
+            pr !== undefined &&
+            reviewed.sha === pr.headRefOid
+          ) {
+            continue;
+          }
+          parts.push(part);
+        }
+        if (parts.length === 0) continue;
         let parent: Issue;
         try {
           parent = await linear.getIssue(issue.parentId);
@@ -1102,6 +1244,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         notifier,
         decisions,
       });
+      if (state !== undefined) {
+        recordUsage(state, issue.id, issue.key, agent.name, grill.tokens ?? emptyTokenUsage());
+      }
       if (pausedNow) {
         log(`${issue.key}: paused, split skipped`);
         return;
@@ -1120,6 +1265,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         return;
       }
       plan = await planIssue(issue, { adapter, agent, context, cwd: repoDir, calls: grill.calls });
+      if (state !== undefined) {
+        recordUsage(state, issue.id, issue.key, agent.name, plan.tokens ?? emptyTokenUsage());
+      }
       if (pausedNow) {
         log(`${issue.key}: paused, split skipped`);
         return;
@@ -1150,7 +1298,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     if (result.created.length > 0) {
       await linear.comment(
         issue.id,
-        formatSplitComment(result, plan.source === "fallback" ? "fallback" : "model"),
+        formatSplitComment(result, plan.source === "fallback" ? "fallback" : "model", plan.reason),
       );
     }
     await linear.moveTo(issue.id, "In Progress");
@@ -1573,7 +1721,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           })),
       );
       const limits = activeLimits(state?.limits ?? {}, clock.now());
-      const out: LoopSnapshot = { lastPollAt: state?.lastPollAt ?? null, runs, blocked, limits };
+      const out: LoopSnapshot = {
+        lastPollAt: state?.lastPollAt ?? null,
+        runs,
+        blocked,
+        limits,
+        usage: state?.usage ?? {},
+      };
       const u = state?.selfUpdate;
       if (u !== undefined) {
         out.selfUpdate = { from: u.from, to: u.to, at: u.at, state: u.state };
