@@ -97,7 +97,30 @@ test("a plan with more than one part and no reason is invalid (D-040)", () => {
   assert.equal(parsed.ok, false);
   if (!parsed.ok) assert.match(parsed.error, /reason: a plan with more than one part/);
   assert.equal(parsePlanReply(JSON.stringify({ parts: [part("backend")] })).ok, true);
-  assert.equal(parsePlanReply(JSON.stringify({ parts: [part("backend")], reason: " " })).ok, false);
+});
+
+test("a blank reason counts as no reason: one part is valid and keeps its own brief", () => {
+  for (const reason of ["", "  \t"]) {
+    const parsed = parsePlanReply(
+      JSON.stringify({ parts: [{ ...part("backend"), prompt: "Own brief." }], reason }),
+    );
+    assert.equal(parsed.ok, true, JSON.stringify(reason));
+    if (parsed.ok) {
+      assert.equal(parsed.parts.length, 1);
+      assert.equal(parsed.parts[0]?.prompt, "Own brief.");
+      assert.equal("reason" in parsed, false);
+    }
+  }
+});
+
+test("a blank reason is still invalid for a plan with more than one part (D-040)", () => {
+  for (const reason of ["", "  \t"]) {
+    const parsed = parsePlanReply(
+      JSON.stringify({ parts: [part("backend"), part("frontend")], reason }),
+    );
+    assert.equal(parsed.ok, false, JSON.stringify(reason));
+    if (!parsed.ok) assert.match(parsed.error, /more than one part/);
+  }
 });
 
 test("parsePlanReply parses L so the loop can refuse it", () => {
@@ -116,6 +139,9 @@ test("parsePlanReply rejects anything off-shape", () => {
     [{ parts: [{ ...part("backend"), title: " " }] }, /parts\[0\]\.title: expected a non-empty/],
     [{ parts: [part("qa")] }, /role: expected backend or frontend, got "qa"/],
     [{ parts: [part("backend", "XL")] }, /size: expected S or M, got "XL"/],
+    [{ parts: [part("backend")], reason: 5 }, /reason: expected a string/],
+    [{ parts: [part("backend")], reason: null }, /reason: expected a string/],
+    [{ parts: [part("backend")], reason: { why: "x" } }, /reason: expected a string/],
   ];
   for (const [value, error] of cases) {
     const parsed = parsePlanReply(JSON.stringify(value));
@@ -150,6 +176,7 @@ test("buildPlanPrompt carries the rules, the issue, the grill calls and the cont
     "Reply with strict JSON only",
     "Plan ONE part by default",
     '"reason" must say why',
+    'For a one-part plan, leave out "reason".',
     "L is not allowed",
     "Do not plan QA",
     "## Coordinator instructions\nKeep parts small.",
@@ -176,6 +203,38 @@ test("planIssue runs the coordinator harness and returns the model plan", async 
   assert.equal(tasks[0]?.id, "plan-MET-40");
   assert.equal(tasks[0]?.budgetMs, 10 * 60_000);
   assert.equal(tasks[0]?.model, "opus");
+});
+
+test("planIssue keeps a one-part plan with a blank reason and its own brief", async () => {
+  const { adapter } = adapterReplying(
+    JSON.stringify({ parts: [{ ...part("backend"), prompt: "Own brief." }], reason: "" }),
+  );
+  const plan = await planIssue(issue(), {
+    adapter,
+    agent,
+    context: { spec: "", decisions: [] },
+    cwd: "/repo",
+  });
+  assert.equal(plan.source, "model");
+  assert.equal(plan.parts.length, 1);
+  assert.equal(plan.parts[0]?.prompt, "Own brief.");
+  assert.equal("reason" in plan, false);
+});
+
+test("planIssue falls back to one part when a two-part plan has a blank reason", async () => {
+  const { adapter } = adapterReplying(
+    JSON.stringify({ parts: [part("backend"), part("frontend")], reason: "" }),
+  );
+  const plan = await planIssue(issue(), {
+    adapter,
+    agent,
+    context: { spec: "", decisions: [] },
+    cwd: "/repo",
+  });
+  assert.equal(plan.source, "fallback");
+  assert.match(plan.error ?? "", /more than one part/);
+  assert.deepEqual(plan.parts, fallbackPlan(issue()));
+  assert.equal(plan.parts.length, 1);
 });
 
 test("planIssue falls back on a bad reply, a failed run or a harness mismatch", async () => {
