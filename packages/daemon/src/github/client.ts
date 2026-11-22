@@ -15,6 +15,7 @@ export interface PullRequest {
   headRefOid: string;
   baseRefName: string;
   isDraft: boolean;
+  isCrossRepository?: true;
 }
 
 export interface PullRequestFile {
@@ -76,6 +77,8 @@ export interface CreatePrInput {
 
 /** The GitHub calls harnessd makes. `createGhCli` implements it; tests use a fake. */
 export interface GitHub {
+  /** An open PR on this exact head branch, if any. */
+  findPrByHead(branch: string): Promise<PullRequest | undefined>;
   /** The newest open PR whose title carries the issue key ("MET-41"), if any. */
   findPrForIssue(issueKey: string): Promise<PullRequest | undefined>;
   /** Opens a PR for a pushed branch and returns its URL. */
@@ -110,7 +113,7 @@ export interface GhCliOptions {
   timeoutMs?: number;
 }
 
-const PR_FIELDS = "number,title,url,headRefName,headRefOid,baseRefName,isDraft";
+const PR_FIELDS = "number,title,url,headRefName,headRefOid,baseRefName,isDraft,isCrossRepository";
 
 type Obj = Record<string, unknown>;
 
@@ -147,6 +150,7 @@ export function parsePullRequests(text: string): PullRequest[] {
       headRefOid: field<string>(raw, "headRefOid", "string", what),
       baseRefName: field<string>(raw, "baseRefName", "string", what),
       isDraft: raw.isDraft === true,
+      ...(raw.isCrossRepository === true ? { isCrossRepository: true } : {}),
     };
   });
 }
@@ -324,6 +328,22 @@ export function createGhCli(options: GhCliOptions): GitHub {
   }
 
   return {
+    async findPrByHead(branch) {
+      const { stdout } = await gh([
+        "pr",
+        "list",
+        "--head",
+        branch,
+        "--state",
+        "open",
+        "--json",
+        PR_FIELDS,
+      ]);
+      return parsePullRequests(stdout).find(
+        (pr) => pr.headRefName === branch && !pr.isCrossRepository,
+      );
+    },
+
     async findPrForIssue(issueKey) {
       const { stdout } = await gh([
         "pr",

@@ -54,6 +54,8 @@ test("sync writes the pack into the worktree and git status stays clean", async 
     globalDir: f.globalDir,
     worktree: f.worktree,
     runId: "MET-1-1",
+    // Use the fixture repo's excludes even when a builder run sets its own.
+    env: { ...process.env, GIT_CONFIG_COUNT: "0" },
   });
   assert.ok(changed.includes(".claude/skills/tdd/SKILL.md"));
   assert.ok(changed.includes("AGENTS.md"));

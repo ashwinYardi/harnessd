@@ -35,13 +35,13 @@ export interface Shipped {
   /** True when the daemon made a commit; false when the agent had already committed. */
   committed: boolean;
   prUrl: string;
-  /** False when an open PR already carried the issue key: the push updated it. */
+  /** False when an open PR already uses the run branch: the push updated it. */
   created: boolean;
 }
 
 export interface ShipFailed {
   ok: false;
-  /** "no changes", "push failed: …" or "pr failed: …". */
+  /** One line that explains why the daemon could not ship the run. */
   error: string;
 }
 
@@ -212,9 +212,26 @@ export async function shipPart(input: ShipInput): Promise<ShipResult> {
   }
 
   try {
-    const open = await input.github.findPrForIssue(input.issueKey);
+    const open = await input.github.findPrByHead(input.branch);
     if (open !== undefined) {
       return { ok: true, committed, prUrl: open.url, created: false };
+    }
+    const issuePr = await input.github.findPrForIssue(input.issueKey);
+    if (issuePr !== undefined) {
+      // A PR on the same branch may have opened between the two lookups.
+      if (issuePr.headRefName === input.branch) {
+        if (issuePr.isCrossRepository) {
+          return {
+            ok: false,
+            error: `pr failed: the open PR for ${input.issueKey} is from a fork`,
+          };
+        }
+        return { ok: true, committed, prUrl: issuePr.url, created: false };
+      }
+      return {
+        ok: false,
+        error: `the open PR for ${input.issueKey} is on branch ${issuePr.headRefName}, not ${input.branch}`,
+      };
     }
     const prUrl = await input.github.createPr({
       base,

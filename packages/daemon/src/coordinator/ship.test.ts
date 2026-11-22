@@ -24,8 +24,11 @@ function remoteGit(remote: string, ...args: string[]): string {
 function fakeGithub(open?: PullRequest) {
   const created: CreatePrInput[] = [];
   const github: GitHub = {
-    async findPrForIssue() {
-      return open;
+    async findPrByHead(branch) {
+      return open?.headRefName === branch ? open : undefined;
+    },
+    async findPrForIssue(key) {
+      return open?.title.startsWith(`${key}:`) ? open : undefined;
     },
     async createPr(input) {
       created.push(input);
@@ -146,11 +149,11 @@ test("a rejected push fails with push failed and never forces", async () => {
   assert.equal(git(r.worktree.path, "log", "-1", "--format=%s"), "MET-41: Ship it");
 });
 
-test("an open PR is not created twice; the push updates it", async () => {
+test("the push updates an open PR on the run branch even after its PR title changes", async () => {
   const r = await repo();
   const open: PullRequest = {
     number: 7,
-    title: "MET-41: Ship it",
+    title: "Ship it",
     url: "https://github.test/o/r/pull/7",
     headRefName: r.worktree.branch,
     headRefOid: "sha7",
@@ -179,6 +182,34 @@ test("an open PR is not created twice; the push updates it", async () => {
     remoteGit(r.remote, "rev-parse", `refs/heads/${r.worktree.branch}`),
     git(r.worktree.path, "rev-parse", "HEAD"),
   );
+});
+
+test("an open PR for the issue on a different branch blocks a second PR", async () => {
+  const r = await repo();
+  const { github, created } = fakeGithub({
+    number: 7,
+    title: "MET-41: Old title",
+    url: "https://github.test/o/r/pull/7",
+    headRefName: "met-41-old-title",
+    headRefOid: "sha7",
+    baseRefName: "main",
+    isDraft: false,
+  });
+  await writeFile(join(r.worktree.path, "ship.ts"), "export const shipped = true;\n");
+
+  const result = await shipPart({
+    worktree: r.worktree.path,
+    branch: r.worktree.branch,
+    issueKey: "MET-41",
+    title: "Ship it",
+    github,
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    error: `the open PR for MET-41 is on branch met-41-old-title, not ${r.worktree.branch}`,
+  });
+  assert.deepEqual(created, []);
 });
 
 test("the run's excludes file keeps a synced file out of the commit", async () => {

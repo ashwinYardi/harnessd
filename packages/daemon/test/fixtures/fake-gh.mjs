@@ -41,6 +41,7 @@ const [cmd, sub] = argv;
 if (cmd === "pr" && sub === "list") {
   process.stdout.write(
     JSON.stringify([
+      { ...pr(13, "From a fork", "met-41-serve-avatars"), isCrossRepository: true },
       pr(7, "MET-41: Serve avatars", "met-41-serve-avatars"),
       pr(9, "MET-41: Serve avatars, take two", "met-41-take-two"),
       pr(11, "MET-410: Something else", "met-410-else"),

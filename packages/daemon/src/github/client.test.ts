@@ -73,11 +73,28 @@ test("findPrForIssue lists open PRs with --json and picks the newest whose title
     "--limit",
     "30",
     "--json",
-    "number,title,url,headRefName,headRefOid,baseRefName,isDraft",
+    "number,title,url,headRefName,headRefOid,baseRefName,isDraft,isCrossRepository",
   ]);
   assert.equal(call?.env.GH_TOKEN, "ghp_from_env", "the token reaches gh from the environment");
   assert.equal(call?.env.GH_PROMPT_DISABLED, "1");
   assert.equal(await gh.findPrForIssue("MET-99"), undefined);
+});
+
+test("findPrByHead lists open PRs for the exact branch and skips forks", async () => {
+  const { gh, calls } = await client();
+  assert.equal((await gh.findPrByHead("met-41-serve-avatars"))?.number, 7);
+  const [call] = await calls();
+  assert.deepEqual(call?.argv, [
+    "pr",
+    "list",
+    "--head",
+    "met-41-serve-avatars",
+    "--state",
+    "open",
+    "--json",
+    "number,title,url,headRefName,headRefOid,baseRefName,isDraft,isCrossRepository",
+  ]);
+  assert.equal(await gh.findPrByHead("met-41-missing"), undefined);
 });
 
 test("createPr sends the title and the body on stdin and returns the PR URL", async () => {

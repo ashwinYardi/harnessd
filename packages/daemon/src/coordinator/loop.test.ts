@@ -322,6 +322,9 @@ function fakeGitHub() {
   const createdPrs: CreatePrInput[] = [];
   let nextPr = 100;
   const github: GitHub = {
+    async findPrByHead(branch) {
+      return Object.values(prs).find((pr) => pr.headRefName === branch);
+    },
     async findPrForIssue(key) {
       return prs[key];
     },
@@ -371,12 +374,12 @@ function fakeGitHub() {
       labels.push({ number, label });
     },
   };
-  const open = (key: string, number: number): PullRequest => {
+  const open = (key: string, number: number, branch = key.toLowerCase()): PullRequest => {
     const pr: PullRequest = {
       number,
       title: `${key}: work`,
       url: `https://github.test/o/r/pull/${number}`,
-      headRefName: key.toLowerCase(),
+      headRefName: branch,
       headRefOid: `sha${number}`,
       baseRefName: "main",
       isDraft: false,
@@ -2905,7 +2908,8 @@ test("an open PR is pushed to and not created twice", async () => {
     worktrees: r.worktrees,
     extra: { repoDir: r.repo, globalDir: r.globalDir, ship: shipPart },
   });
-  t.gh.open(part.key, 7);
+  const branch = `${part.key.toLowerCase()}-ship-the-run`;
+  t.gh.open(part.key, 7, branch);
 
   await t.loop.tick();
   const worktree = t.adapter.pending[0]?.cwd ?? "";
@@ -2916,7 +2920,6 @@ test("an open PR is pushed to and not created twice", async () => {
 
   assert.equal(part.state, "In Review");
   assert.equal(t.gh.createdPrs.length, 0);
-  const branch = `${part.key.toLowerCase()}-ship-the-run`;
   assert.notEqual(remoteGit(r.remote, "rev-parse", branch), localHead);
 });
 
