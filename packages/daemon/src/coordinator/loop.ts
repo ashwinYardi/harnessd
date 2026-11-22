@@ -39,7 +39,13 @@ import {
 } from "../selfupdate/index.ts";
 import type { TaskWorktrees, WorktreeKeepReason } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
-import { agentForRole, budgetMs, buildPartPrompt, maxTurns as maxTurnsFor } from "./dispatch.ts";
+import {
+  agentForRole,
+  budgetMs,
+  buildPartPrompt,
+  buildResumePrompt,
+  maxTurns as maxTurnsFor,
+} from "./dispatch.ts";
 import { grillIssue } from "./grill.ts";
 import {
   activeLimits,
@@ -72,6 +78,7 @@ import type {
   InterruptedRun,
   LoopState,
   LoopStore,
+  PartSession,
   SelfUpdateRecord,
   SelfUpdateTrigger,
 } from "./state.ts";
@@ -286,6 +293,23 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
+/** Why a send-back cannot resume the part's session; undefined when it can (MET-156). */
+function resumeColdReason(
+  stored: PartSession | undefined,
+  harness: HarnessId,
+  worktree: { path: string; branch: string },
+  adapter: HarnessAdapter,
+): string | undefined {
+  if (stored === undefined) return "no session";
+  if (stored.harness !== harness) {
+    return `session on ${harnessName(stored.harness)}, run on ${harnessName(harness)}`;
+  }
+  if (stored.worktree !== worktree.path || stored.branch !== worktree.branch)
+    return "other worktree";
+  if (adapter.canResume !== true) return `${harnessName(harness)} cannot resume`;
+  return undefined;
+}
+
 /** Tokens of one run: cached is cache read plus cache write (D-040). */
 export function tokenSumOf(tokens: TokenUsage): TokenSum {
   return {
@@ -339,6 +363,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   const runTitles = new Map<string, string>();
   /** The parent issue id per sub-issue id, for the token sum (D-040). */
   const runParents = new Map<string, string>();
+  /** The harness a part run started on, so its session is stored with the right one (MET-156). */
+  const runHarnesses = new Map<string, HarnessId>();
   const memory: AgentMemory | undefined =
     globalDir === undefined
       ? undefined
@@ -827,6 +853,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     entry: InFlightRun,
     result: RunResult,
     deferred = false,
+    resumed = false,
   ): Promise<void> {
     // The run stays in flight until its work is recorded. A tick reads these entries before
     // it re-queues a run or applies a self-update, so neither can restart the daemon under
@@ -842,6 +869,18 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         result.tokens,
         result.turns,
       );
+      // A part run that reported a session keeps it for a QA send-back (MET-156).
+      const harness = runHarnesses.get(entry.issueId);
+      if (harness !== undefined && result.sessionId !== undefined && entry.worktree !== "") {
+        s.sessions ??= {};
+        s.sessions[id] = {
+          harness,
+          sessionId: result.sessionId,
+          worktree: entry.worktree,
+          branch: entry.branch,
+          at: clock.now().toISOString(),
+        };
+      }
       const stopped = entry.pausedAt !== undefined && result.status !== "ok";
       if (stopped) {
         // A failed move keeps the entry: the next tick's re-queue tries again.
@@ -887,8 +926,20 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       runEnvs.delete(entry.issueId);
       runTitles.delete(entry.issueId);
       runParents.delete(entry.issueId);
+      runHarnesses.delete(entry.issueId);
       if (entry.worktree !== "") await removeWithGuard(s, entry, entry.worktree);
-      if (outcome.status === "ok") {
+      if (
+        resumed &&
+        result.status === "error" &&
+        (result.turns === undefined || result.turns === 0)
+      ) {
+        // The harness no longer has the session: drop it and let the next run start cold,
+        // with the full brief. No attempt is counted (MET-156).
+        if (s.sessions !== undefined) delete s.sessions[id];
+        const why = outcome.error ? oneLine(outcome.error) : "no turns";
+        await safely(`re-queue ${entry.issueKey}`, () => linear.moveTo(id, "Ready"));
+        log(`${entry.issueKey}: resume failed (${why}), cold next`);
+      } else if (outcome.status === "ok") {
         delete s.attempts[id];
         delete s.qaFeedback[id];
         await safely(`move ${entry.issueKey} to In Review`, () => linear.moveTo(id, "In Review"));
@@ -1029,6 +1080,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     }
 
     let run: AdapterRun;
+    let resumed = false;
     try {
       // A paused run's worktree is reused: createWorktree picks it back up on the same branch.
       const kept = s.interrupted.find((e) => e.issueId === issue.id);
@@ -1044,14 +1096,24 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         }
       }
       await save();
+      // A part whose qaFeedback is set was sent back by QA or the merge gate (MET-156).
       const review = s.qaFeedback[issue.id];
-      let prompt = buildPartPrompt({
-        agent,
-        issue,
-        branch: worktree.branch,
-        ...(review ? { review } : {}),
-        ...(memory ? { memory } : {}),
-      });
+      const stored = review === undefined ? undefined : s.sessions?.[issue.id];
+      const coldReason =
+        review === undefined
+          ? undefined
+          : resumeColdReason(stored, agent.harness, worktree, adapter);
+      const resumeSessionId = coldReason === undefined ? stored?.sessionId : undefined;
+      let prompt =
+        resumeSessionId !== undefined && review !== undefined
+          ? buildResumePrompt({ issue, review })
+          : buildPartPrompt({
+              agent,
+              issue,
+              branch: worktree.branch,
+              ...(review ? { review } : {}),
+              ...(memory ? { memory } : {}),
+            });
       if (kept?.worktree === worktree.path) prompt += `\n\n${RESUMED_RUN_NOTE}`;
       const id = `${issue.key}-${(s.attempts[issue.id] ?? 0) + 1}`;
       if (globalDir !== undefined) {
@@ -1072,6 +1134,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       };
       if (agent.model !== undefined) task.model = agent.model;
       if (env !== undefined) task.env = env;
+      if (resumeSessionId !== undefined) {
+        task.resumeSessionId = resumeSessionId;
+        resumed = true;
+      }
       if (held(agent.harness)) {
         // Keep a previously paused worktree available for the eventual retry.
         if (kept?.worktree === entry.worktree) {
@@ -1091,7 +1157,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         );
         return;
       }
+      runHarnesses.set(issue.id, agent.harness);
       run = adapter.start(task, worktree.path);
+      if (resumeSessionId !== undefined) {
+        log(`${issue.key}: resuming ${harnessName(agent.harness)} session`);
+      } else if (coldReason !== undefined) {
+        log(`${issue.key}: cold run (${coldReason})`);
+      }
       report.dispatched.push(issue.key);
     } catch (error) {
       await fail(error);
@@ -1101,7 +1173,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const done = run.result.then(
       (result) => {
         noteRun(agent.harness, result);
-        return finish(s, entry, result);
+        return finish(s, entry, result, false, resumed);
       },
       (error) => fail(error),
     );

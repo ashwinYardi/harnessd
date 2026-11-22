@@ -15,6 +15,8 @@ export interface Task {
   maxTurns?: number;
   /** Harness model name or alias. Omitted means the harness default. */
   model?: string;
+  /** Continue the part's earlier session on a QA send-back (MET-156). */
+  resumeSessionId?: string;
   /** Extra environment for this run, over the adapter's own (e.g. git config for the worktree). */
   env?: Record<string, string>;
 }
@@ -78,6 +80,8 @@ export interface AdapterRun {
 /** One harness CLI driven headless (D-002). */
 export interface HarnessAdapter {
   id: HarnessId;
+  /** True when `Task.resumeSessionId` is honored (MET-156). Unset means a cold run. */
+  canResume?: boolean;
   /** Starts the task with the worktree as working directory. */
   start(task: Task, worktree: string): AdapterRun;
 }

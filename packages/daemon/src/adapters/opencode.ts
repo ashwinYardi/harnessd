@@ -34,12 +34,14 @@ export interface OpenCodeOptions {
 
 /**
  * Builds the argv for `opencode run --format json` (D-036). The model keeps its `#variant`:
- * OpenCode 2.x reads the thinking level from it. The run never continues a session.
+ * OpenCode 2.x reads the thinking level from it. MET-156: a QA send-back continues the part's
+ * own session with `--session <id>`; `--standalone` and the temp config dir stay.
  */
 export function openCodeArgs(task: Task, options: OpenCodeOptions = {}): string[] {
   // --standalone: a private server for this run, not the owner's background service.
   // --auto answers pending permission requests inside the CLI.
   const args = ["run", "--format", "json", "--standalone", "--auto"];
+  if (task.resumeSessionId !== undefined) args.push("--session", task.resumeSessionId);
   const model = task.model ?? options.model;
   if (model) args.push("-m", model);
   args.push("--", task.prompt);
@@ -49,6 +51,7 @@ export function openCodeArgs(task: Task, options: OpenCodeOptions = {}): string[
 export function createOpenCodeAdapter(options: OpenCodeOptions = {}): HarnessAdapter {
   return {
     id: "opencode",
+    canResume: true,
     start: (task, worktree) => {
       // D-036 isolation: an empty global config dir replaces ~/.config/opencode for this run.
       const configDir = mkdtempSync(join(tmpdir(), "harnessd-opencode-config-"));

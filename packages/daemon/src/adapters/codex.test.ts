@@ -92,6 +92,30 @@ test("codexArgs runs exec --json with full access and no approvals", () => {
   assert.deepEqual(codexArgs(task(), {}, repo), [...BASE, "--", "Say hi"]);
 });
 
+test("a resumed run uses exec resume and keeps every isolation flag", () => {
+  const argv = codexArgs(task({ resumeSessionId: "thread-1" }), {}, repo);
+  assert.deepEqual(argv, [
+    "exec",
+    "resume",
+    "thread-1",
+    "--json",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--dangerously-bypass-hook-trust",
+    // `codex exec resume` on 0.171.0 refuses --sandbox, so the same setting is a -c override.
+    "-c",
+    'sandbox_mode="danger-full-access"',
+    "-c",
+    'approval_policy="never"',
+    "-c",
+    "tool_output_token_limit=5000",
+    "--",
+    "Say hi",
+  ]);
+  assert.ok(!argv.includes("--sandbox"), "the subcommand refuses it");
+  assert.equal(createCodexAdapter().canResume, true);
+});
+
 test("codexArgs passes --model from the task, then the options, and omits it when unset", () => {
   const tail = (argv: string[]) => argv.slice(BASE.length);
   assert.deepEqual(tail(codexArgs(task({ model: "gpt-5.5" }), { model: "o3" }, repo)), [

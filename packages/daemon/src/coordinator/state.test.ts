@@ -99,6 +99,15 @@ const state: LoopState = {
       at: "2026-11-19T10:02:00.000Z",
     },
   },
+  sessions: {
+    "id-1": {
+      harness: "claude-code",
+      sessionId: "sess-1",
+      worktree: "/wt/met-41",
+      branch: "met-41-api",
+      at: "2026-11-19T10:05:00.000Z",
+    },
+  },
 };
 
 test("a missing file loads as the empty state", async () => {
@@ -124,6 +133,7 @@ test("save writes loop.json atomically with a .gitignore, and load reads it back
   assert.deepEqual(loaded.selfUpdate, state.selfUpdate);
   assert.deepEqual(loaded.limits, state.limits, "a harness hold survives a reload");
   assert.deepEqual(loaded.splits, state.splits, "a split record survives a reload");
+  assert.deepEqual(loaded.sessions, state.sessions, "a part session survives a reload");
   const files = (await readdir(join(dir, ".harnessd", "state"))).sort();
   assert.deepEqual(files, [".gitignore", "loop.json"], "no tmp files left behind");
   assert.equal(await readFile(join(dir, ".harnessd", "state", ".gitignore"), "utf8"), "*\n");
@@ -189,6 +199,25 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
   );
   assert.deepEqual(parseLoopState('{"inFlight":[]}').interrupted, [], "MET-12 files still load");
   assert.throws(() => parseLoopState("[]"), /no inFlight array/);
+});
+
+test("sessions are optional, and a malformed one is dropped", () => {
+  assert.equal(parseLoopState('{"inFlight":[]}').sessions, undefined, "old files still load");
+  const good = state.sessions?.["id-1"];
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      sessions: {
+        a: good,
+        b: { ...good, harness: "nope" },
+        c: { ...good, sessionId: "" },
+        d: { ...good, worktree: "" },
+      },
+      qaFeedback: { a: { failing: ["x"], testTail: "not ok" } },
+    }),
+  );
+  assert.deepEqual(parsed.sessions, { a: good });
+  assert.equal(parsed.qaFeedback.a?.testTail, "not ok");
 });
 
 test("an interrupted run from before the keep reasons loads as paused", () => {

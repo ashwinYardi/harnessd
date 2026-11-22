@@ -165,7 +165,10 @@ export interface MergeReport {
   paused: boolean;
 }
 
-type GateState = Pick<LoopState, "merges" | "gateFailures" | "humanPings" | "qaFeedback">;
+type GateState = Pick<
+  LoopState,
+  "merges" | "gateFailures" | "humanPings" | "qaFeedback" | "sessions"
+>;
 
 /** A PR the gate sends back to its part, with one line per reason. */
 interface GateFailure {
@@ -296,6 +299,8 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
       deps.linear.comment(pr.partId, `**harnessd merge**: [PR #${pr.number}](${pr.url}) ${how}.\n`),
     );
     await safely(`move ${pr.partKey} to Done`, () => deps.linear.moveTo(pr.partId, "Done"));
+    // The part is done: its session is no longer needed for a send-back (MET-156).
+    if (state.sessions !== undefined) delete state.sessions[pr.partId];
     // D-015: one line per merge.
     await safely("send the merge line", () =>
       deps.notifier.notify({
@@ -332,7 +337,10 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
     drop(entry);
     if (count >= deps.maxFailures) {
       delete state.gateFailures[entry.parentId];
-      for (const { pr } of failures) delete state.qaFeedback[pr.partId];
+      for (const { pr } of failures) {
+        delete state.qaFeedback[pr.partId];
+        if (state.sessions !== undefined) delete state.sessions[pr.partId];
+      }
       await deps.save();
       const body = [
         `**harnessd merge**: the merge gate failed ${times(count)} for ${entry.parentKey}, so this needs a human (D-014). ` +

@@ -159,6 +159,16 @@ test("adds --max-turns and the bash output cap to every run", async () => {
   assert.equal(result.status, "ok");
 });
 
+test("a resumed run adds --resume and keeps every isolation flag and the turn cap", () => {
+  const argv = claudeArgs(task({ resumeSessionId: "sess-1", maxTurns: 80 }), {}, scratch);
+  assert.equal(argv[argv.indexOf("--resume") + 1], "sess-1");
+  for (const flag of ["--setting-sources", "--strict-mcp-config", "--mcp-config"]) {
+    assert.ok(argv.includes(flag), flag);
+  }
+  assert.deepEqual(argv.slice(-2), ["--max-turns", "80"]);
+  assert.equal(createClaudeCodeAdapter().canResume, true);
+});
+
 test("an error_max_turns result is an error with turn cap and no reason", async () => {
   const { run: r } = run("max-turns", task({ maxTurns: 80 }));
   const result = await r.result;

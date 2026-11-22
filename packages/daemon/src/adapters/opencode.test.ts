@@ -127,11 +127,17 @@ test("openCodeArgs keeps a #variant on the model, so the thinking level reaches 
   ]);
 });
 
-test("openCodeArgs never continues, resumes or forks a session", () => {
+test("openCodeArgs never continues or forks a session without a resume id", () => {
   const argv = openCodeArgs(task({ model: "a/b" }));
   for (const flag of ["--continue", "-c", "--session", "-s", "--fork"]) {
     assert.ok(!argv.includes(flag), flag);
   }
+});
+
+test("a resumed run adds --session and keeps --standalone and --auto", () => {
+  const argv = openCodeArgs(task({ resumeSessionId: "ses_1" }));
+  assert.deepEqual(argv, [...BASE, "--session", "ses_1", "--", "Say hi"]);
+  assert.equal(createOpenCodeAdapter().canResume, true);
 });
 
 test("openCodeArgs keeps a prompt that starts with a dash after --", () => {
