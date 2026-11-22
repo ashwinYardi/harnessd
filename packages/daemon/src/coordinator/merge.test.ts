@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_SETTINGS, type WorkflowStateName } from "@harnessd/shared";
+import { DEFAULT_SETTINGS, type LinkedIssue, type WorkflowStateName } from "@harnessd/shared";
 import type { PullRequestStatus } from "../github/client.ts";
 import { advanceMerges, ciVerdict, globToRegExp, type MergeDeps, protectedFiles } from "./merge.ts";
 import { formatNotice } from "./notifier.ts";
+import { partMarker } from "./split.ts";
 import { emptyLoopState, type LoopState } from "./state.ts";
 
 test("globs: ** spans directories, * and ? stay in one, braces pick, case is ignored", () => {
@@ -177,4 +178,38 @@ test("an unreadable pause flag never lets a merge through", async () => {
   assert.equal(report.paused, true);
   assert.deepEqual(merged, []);
   assert.equal(state.merges.length, 1);
+});
+
+test("a canceled part does not block Done: QA and the parent move to Done", async () => {
+  const state = emptyLoopState();
+  const { d, moves } = deps({}, state);
+  const part = (id: string, key: string, marker: string, partState: string): LinkedIssue =>
+    ({
+      id,
+      key,
+      title: key,
+      description: partMarker(marker),
+      priority: 3,
+      state: partState,
+      labels: [],
+      size: "S",
+      doneWhen: [],
+      url: `https://linear.test/${key}`,
+      blockedBy: [],
+      blockers: [],
+    }) as LinkedIssue;
+  d.linear.listChildren = async () => [
+    part("part", "MET-2", "backend", "Done"),
+    part("gone", "MET-9", "backend-2", "Canceled"),
+  ];
+
+  const report = await advanceMerges(state, d);
+
+  assert.deepEqual(report.done, ["MET-1"]);
+  assert.deepEqual(moves, [
+    ["part", "Done"],
+    ["qa", "Done"],
+    ["parent", "Done"],
+  ]);
+  assert.deepEqual(state.merges, []);
 });
