@@ -666,6 +666,122 @@ test("a re-tick creates nothing new, and an interrupted split is finished withou
   assert.equal(parent.state, "In Progress");
 });
 
+test("a stale Linear read after a split skips the parent instead of grilling it again", async () => {
+  const adapter = fakeAdapter({
+    plans: { "MET-100": plan(["backend", "S", "API"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Feature", labels: ["ui"], description: BODY("S") });
+
+  await t.loop.tick();
+  const record = t.memory.state.splits?.[parent.id];
+  assert.ok(record, "the split is recorded in loop.json");
+  const tasks = t.adapter.tasks.length;
+  const created = [...t.linear.created];
+
+  // Linear lags a few seconds: the parent still looks Ready with no children.
+  parent.state = "Ready";
+  const children = t.linear.listChildren.bind(t.linear);
+  t.linear.listChildren = async (id: string) => (id === parent.id ? [] : children(id));
+
+  const report = await t.loop.tick();
+  assert.deepEqual(report.split, [], "the parent is not split again");
+  assert.equal(t.adapter.tasks.length, tasks, "no second grill or plan");
+  assert.deepEqual(t.linear.created, created, "no duplicate sub-issues");
+  assert.ok(
+    t.logs.includes(`${parent.key}: already split at ${record.at}, Linear read is stale; skipped`),
+    "the stale read is logged",
+  );
+});
+
+test("a part that appears in the children read after the grill is reused, not created again", async () => {
+  const adapter = fakeAdapter({
+    plans: { "MET-100": plan(["backend", "S", "API"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Feature", labels: ["ui"], description: BODY("S") });
+  const late = t.linear.add({
+    title: "API",
+    state: "Backlog",
+    parentId: parent.id,
+    description: partMarker("backend"),
+  });
+  // The first read is stale and misses the part; the read after grill and plan sees it.
+  const reads: number[] = [];
+  const children = t.linear.listChildren.bind(t.linear);
+  t.linear.listChildren = async (id: string) => {
+    if (id !== parent.id) return children(id);
+    const list = reads.length === 0 ? [] : await children(id);
+    reads.push(list.length);
+    return list;
+  };
+
+  await t.loop.tick();
+
+  assert.deepEqual(reads.slice(0, 2), [0, 1], "the children are read again before the create");
+  assert.deepEqual(
+    t.linear
+      .children(parent)
+      .filter((c) => roleOf(c) === "backend")
+      .map((c) => c.id),
+    [late.id],
+    "the late part is reused",
+  );
+  assert.equal(t.linear.created.includes(late.key), false, "the late part is not created again");
+  assert.equal(t.linear.children(parent).filter((c) => roleOf(c) === "qa").length, 1);
+  assert.equal(parent.state, "In Progress");
+});
+
+test("a parent whose recorded parts are all canceled is grilled again", async () => {
+  const adapter = fakeAdapter({
+    plans: { "MET-100": plan(["backend", "S", "API"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Feature", labels: ["ui"], description: BODY("S") });
+
+  await t.loop.tick();
+  const recorded = t.memory.state.splits?.[parent.id];
+  assert.ok(recorded);
+  const grills = t.adapter.tasks.filter((task) => task.id.startsWith("grill-")).length;
+
+  // The owner canceled every part and moved the parent back to Ready on purpose.
+  parent.state = "Ready";
+  for (const child of t.linear.children(parent)) {
+    if (roleOf(child) !== "qa") child.state = "Canceled";
+  }
+
+  await t.loop.tick();
+
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.startsWith("grill-")).length,
+    grills + 1,
+    "the grill runs again",
+  );
+  const next = t.memory.state.splits?.[parent.id];
+  assert.ok(next, "the new split is recorded");
+  assert.ok(
+    next.parts.every((id) => !recorded.parts.includes(id)),
+    "the canceled parts are gone from the record",
+  );
+  assert.equal(parent.state, "In Progress");
+});
+
+test("the sweep drops a split record when the parent is Done", async () => {
+  const adapter = fakeAdapter({
+    plans: { "MET-100": plan(["backend", "S", "API"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Feature", labels: ["ui"], description: BODY("S") });
+
+  await t.loop.tick();
+  assert.ok(t.memory.state.splits?.[parent.id]);
+
+  parent.state = "Done";
+  await t.loop.tick();
+
+  assert.equal(t.memory.state.splits?.[parent.id], undefined, "the record is dropped");
+});
+
 test("at most 3 agents run at once; a finished run frees a slot", async () => {
   const config = mergeLayers([
     {

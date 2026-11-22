@@ -170,6 +170,12 @@ export function isWorkPart(child: { description: string }): boolean {
   return marker !== undefined && marker.role !== "qa";
 }
 
+/** True for Linear's Canceled state, whichever spelling the workflow uses. */
+export function isCanceledState(state: string): boolean {
+  const name = state.toLowerCase();
+  return name === "canceled" || name === "cancelled";
+}
+
 /**
  * Creates one sub-issue per planned part and one QA sub-issue that every part blocks.
  * Sub-issues already present (matched by marker) are reused, never duplicated. When the

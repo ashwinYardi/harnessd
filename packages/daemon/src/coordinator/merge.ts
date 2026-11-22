@@ -14,7 +14,7 @@ import type { GitHub, PullRequestCheck, PullRequestStatus } from "../github/clie
 import type { LinearClient } from "../linear/client.ts";
 import type { Notice, NoticeIssue, NoticePr, Notifier } from "./notifier.ts";
 import type { PrReview } from "./qa.ts";
-import { isWorkPart } from "./split.ts";
+import { isCanceledState, isWorkPart } from "./split.ts";
 import type { LoopState, MergePr, PendingMerge } from "./state.ts";
 
 function message(error: unknown): string {
@@ -397,7 +397,10 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
       return;
     }
     const merged = new Set(entry.prs.map((p) => p.partId));
-    const open = parts.filter((p) => p.state.toLowerCase() !== "done" && !merged.has(p.id));
+    // A canceled part never gets a PR, so it must not hold the parent and QA open (MET-154).
+    const open = parts.filter(
+      (p) => p.state.toLowerCase() !== "done" && !isCanceledState(p.state) && !merged.has(p.id),
+    );
     drop(entry);
     if (open.length > 0) {
       // Per-part QA: the QA sub-issue stays until the last part of the parent is merged.

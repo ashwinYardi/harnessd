@@ -58,6 +58,7 @@ import { type CommandRunner, type QaRunResult, runQa, settleQa } from "./qa.ts";
 import { type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import {
   formatSplitComment,
+  isCanceledState,
   isWorkPart,
   PART_MARKER_PREFIX,
   readPartMarker,
@@ -583,6 +584,30 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   }
 
   // --- state repair -------------------------------------------------------
+
+  /**
+   * Drops a split record once Linear shows the parent Done or Canceled (MET-154). The record
+   * only guards splitReady against a stale read, so it must not outlive the parent. A read
+   * error keeps it, and a later tick sweeps it again.
+   */
+  async function repairSplits(s: LoopState): Promise<void> {
+    if (s.splits === undefined) return;
+    let changed = false;
+    for (const [id, record] of Object.entries(s.splits)) {
+      let issue: Issue;
+      try {
+        issue = await linear.getIssue(id);
+      } catch (error) {
+        log(`${record.key}: could not read it for the split record check: ${message(error)}`);
+        continue;
+      }
+      if (issue.state.toLowerCase() === "done" || isCanceledState(issue.state)) {
+        delete s.splits[id];
+        changed = true;
+      }
+    }
+    if (changed) await save();
+  }
 
   /**
    * A Linear GitHub automation can move a part to In Progress when its PR opens, after the
@@ -1317,7 +1342,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const adapter = tracked(harness);
     logFallback(issue.key, main, agent);
 
-    const children = await linear.listChildren(issue.id);
+    const children = (await linear.listChildren(issue.id)).filter(
+      (child) => !isCanceledState(child.state),
+    );
     let plan: SplitPlan = { parts: [], source: "model" };
     /** The grill's calls, rendered into each new part body (D-044). */
     let grillCalls: Call[] = [];
@@ -1406,7 +1433,24 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
     }
 
-    const result = await splitIssue(issue, plan.parts, linear, children, grillCalls);
+    // Read the children again after the grill and plan: a part created in between is reused,
+    // never duplicated. Canceled parts do not count as existing work.
+    const fresh = (await linear.listChildren(issue.id)).filter(
+      (child) => !isCanceledState(child.state),
+    );
+    const result = await splitIssue(issue, plan.parts, linear, fresh, grillCalls);
+    if (state !== undefined) {
+      state.splits ??= {};
+      state.splits[issue.id] = {
+        key: issue.key,
+        parts: result.parts.map((part) => part.id),
+        qa: result.qa.id,
+        at: clock.now().toISOString(),
+      };
+      // Saved now, not at the end of the tick: the next tick must see the split even if this
+      // process stops right after the move to In Progress (MET-154).
+      await save();
+    }
     if (result.created.length > 0) {
       await linear.comment(
         issue.id,
@@ -1428,6 +1472,30 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const context = await loadContext();
     for (const issue of issues) {
       if (pausedNow) break;
+      const record = state?.splits?.[issue.id];
+      if (record !== undefined) {
+        let children: LinkedIssue[];
+        try {
+          children = await linear.listChildren(issue.id);
+        } catch (error) {
+          log(`${issue.key}: could not read the children, retrying next tick: ${message(error)}`);
+          continue;
+        }
+        const ids = new Set(children.map((child) => child.id));
+        if (![...record.parts, record.qa].every((id) => ids.has(id))) {
+          // The read lags the split: grilling again would split the parent twice (MET-154).
+          log(`${issue.key}: already split at ${record.at}, Linear read is stale; skipped`);
+          continue;
+        }
+        const recorded = children.filter((child) => record.parts.includes(child.id));
+        if (recorded.every((child) => isCanceledState(child.state))) {
+          // The owner canceled every part and moved the parent back to Ready on purpose.
+          if (state?.splits !== undefined) {
+            delete state.splits[issue.id];
+            await save();
+          }
+        }
+      }
       try {
         await splitOne(issue, context, report);
       } catch (error) {
@@ -1706,6 +1774,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     // Before dispatch, so QA can start on the same tick: a shipped part Linear moved back to
     // In Progress is In Review again (MET-128). It runs while a self-update waits: it starts nothing.
     await repairShipped(s);
+    await repairSplits(s);
     const up = options.selfUpdate;
     if (pausedSeen) {
       pausedSeen = false;

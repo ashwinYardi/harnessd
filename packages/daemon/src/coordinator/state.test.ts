@@ -91,6 +91,14 @@ const state: LoopState = {
       backoffMs: 900_000,
     },
   },
+  splits: {
+    "parent-1": {
+      key: "MET-40",
+      parts: ["id-1"],
+      qa: "qa-1",
+      at: "2026-11-19T10:02:00.000Z",
+    },
+  },
 };
 
 test("a missing file loads as the empty state", async () => {
@@ -115,6 +123,7 @@ test("save writes loop.json atomically with a .gitignore, and load reads it back
   assert.deepEqual(loaded.selfUpdateNotices, state.selfUpdateNotices);
   assert.deepEqual(loaded.selfUpdate, state.selfUpdate);
   assert.deepEqual(loaded.limits, state.limits, "a harness hold survives a reload");
+  assert.deepEqual(loaded.splits, state.splits, "a split record survives a reload");
   const files = (await readdir(join(dir, ".harnessd", "state"))).sort();
   assert.deepEqual(files, [".gitignore", "loop.json"], "no tmp files left behind");
   assert.equal(await readFile(join(dir, ".harnessd", "state", ".gitignore"), "utf8"), "*\n");
@@ -233,6 +242,7 @@ test("reviewed heads and usage load additively, and an old file still loads", ()
   assert.equal(old.usage, undefined);
   assert.equal(old.usageBaseline, undefined);
   assert.equal(old.shipped, undefined);
+  assert.equal(old.splits, undefined);
 
   const next = parseLoopState(
     JSON.stringify({
@@ -253,6 +263,16 @@ test("reviewed heads and usage load additively, and an old file still loads", ()
         "part-2": { key: "", branch: "met-42", prUrl: "", at: "t" },
         "part-3": { key: "MET-43", branch: "", prUrl: "", at: "t" },
       },
+      splits: {
+        "parent-1": {
+          key: "MET-40",
+          parts: ["part-1", "part-2"],
+          qa: "qa-1",
+          at: "t",
+        },
+        "parent-2": { key: "", parts: ["part-3"], qa: "", at: "t" },
+        "parent-3": { key: "MET-44", parts: [], qa: "qa-3", at: "t" },
+      },
     }),
   );
   assert.deepEqual(next.reviewedHeads?.["part-1"], { sha: "sha7", verdict: "approved" });
@@ -272,6 +292,14 @@ test("reviewed heads and usage load additively, and an old file still loads", ()
       key: "MET-41",
       branch: "met-41-ship-it",
       prUrl: "https://github.test/pull/7",
+      at: "t",
+    },
+  });
+  assert.deepEqual(next.splits, {
+    "parent-1": {
+      key: "MET-40",
+      parts: ["part-1", "part-2"],
+      qa: "qa-1",
       at: "t",
     },
   });

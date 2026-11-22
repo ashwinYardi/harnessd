@@ -155,6 +155,20 @@ export interface UsageBaseline extends TokenSum {
   at: string;
 }
 
+/**
+ * A Ready parent the loop split, by parent id (MET-154). Linear reads can lag a few seconds
+ * behind writes, so this guards against a second grill and split from a stale read. Dropped
+ * when Linear shows the parent Done or Canceled, or when the owner canceled every part.
+ */
+export interface SplitRecord {
+  key: string;
+  /** The work-part ids this split created or reused. */
+  parts: string[];
+  /** The QA sub-issue id. */
+  qa: string;
+  at: string;
+}
+
 export interface LoopState {
   version: 1;
   /** ISO time of the last poll, null before the first. */
@@ -188,6 +202,8 @@ export interface LoopState {
   usage?: Record<string, TokenSum>;
   /** Usage at the last budget escalation, per parent issue id (D-040). */
   usageBaseline?: Record<string, UsageBaseline>;
+  /** Parents the loop split, per parent issue id (MET-154). Optional for old files. */
+  splits?: Record<string, SplitRecord>;
 }
 
 export function emptyLoopState(): LoopState {
@@ -434,6 +450,22 @@ function shippedParts(value: unknown): Record<string, ShippedPart> {
   return out;
 }
 
+function splitRecords(value: unknown): Record<string, SplitRecord> {
+  const out: Record<string, SplitRecord> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const s = raw as Partial<SplitRecord> | null;
+    if (typeof s !== "object" || s === null) continue;
+    if (typeof s.key !== "string" || s.key === "") continue;
+    if (!Array.isArray(s.parts) || s.parts.length === 0) continue;
+    if (!s.parts.every((p) => typeof p === "string" && p !== "")) continue;
+    if (typeof s.qa !== "string" || s.qa === "") continue;
+    if (typeof s.at !== "string" || s.at === "") continue;
+    out[id] = { key: s.key, parts: s.parts, qa: s.qa, at: s.at };
+  }
+  return out;
+}
+
 function tokenSum(value: unknown): TokenSum | undefined {
   const s = value as Partial<TokenSum> | null;
   if (typeof s !== "object" || s === null) return undefined;
@@ -491,6 +523,7 @@ export function parseLoopState(text: string): LoopState {
     ...(raw.usageBaseline === undefined
       ? {}
       : { usageBaseline: usageBaselines(raw.usageBaseline) }),
+    ...(raw.splits === undefined ? {} : { splits: splitRecords(raw.splits) }),
   };
 }
 
