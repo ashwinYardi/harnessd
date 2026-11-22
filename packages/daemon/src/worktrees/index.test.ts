@@ -257,6 +257,19 @@ describe("worktrees", () => {
     assert.ok(existsSync(join(wt.path, "local.txt")));
   });
 
+  test("a detached scratch checkout with a local-only commit and no remote branch is kept", async () => {
+    const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "scratch local", root });
+    git(wt.path, "checkout", "-q", "--detach");
+    await writeFile(join(wt.path, "local-only.txt"), "never pushed\n");
+    git(wt.path, "add", ".");
+    git(wt.path, "commit", "-q", "-m", "local only");
+
+    const result = await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
+
+    assert.deepEqual(result, { removed: false, kept: "commits not on the remote" });
+    assert.ok(existsSync(join(wt.path, "local-only.txt")));
+  });
+
   test("a branch deleted on the remote leaves its commits unsent", async () => {
     const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "deleted", root });
     await writeFile(join(wt.path, "deleted.txt"), "remote branch deleted\n");

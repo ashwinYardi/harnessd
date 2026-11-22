@@ -495,7 +495,7 @@ export interface RemoveWorktreeResult {
  * work counts only when it is not on the remote branch; with no remote branch, every
  * commit ahead of base is unshipped. A scratch checkout is detached from a PR head, so
  * its commits may live on a fork: it is judged on the remote branch when one exists,
- * and otherwise on its uncommitted changes only.
+ * and otherwise on whether any remote ref holds its commits.
  */
 async function keepReason(
   repoDir: string,
@@ -519,7 +519,11 @@ async function keepReason(
     if (!(await refExists(repoDir, `${remoteHead}^{commit}`))) return "commits not on the remote";
     return (await commitsAhead(path, remoteHead)) > 0 ? "commits not on the remote" : undefined;
   }
-  if (scratch) return undefined;
+  if (scratch) {
+    // No remote branch to judge by: any commit that no remote ref holds is unpushed.
+    const unpushed = await git(path, ["rev-list", "-n", "1", "HEAD", "--not", "--remotes"]);
+    return unpushed.trim() === "" ? undefined : "commits not on the remote";
+  }
   for (const ref of [`origin/${base}`, base]) {
     if (await refExists(repoDir, ref)) {
       return (await commitsAhead(path, ref)) > 0 ? "commits not on the remote" : undefined;
