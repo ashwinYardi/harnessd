@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import type { CreatePrInput, GitHub, PullRequest } from "../github/client.ts";
 import { createGitWorktrees } from "../worktrees/index.ts";
-import { MAX_COMMIT_BODY, prBody, shipPart } from "./ship.ts";
+import { MAX_COMMIT_BODY, prBody, shipPart, shipTitle } from "./ship.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -106,6 +106,40 @@ test("shipPart commits the worktree, pushes the branch and opens a PR as the dae
       body: "Add the ship step.\n\nChecked with pnpm test.\n\nIssue: https://linear.test/MET-41",
     },
   ]);
+});
+
+test("a part title with a parent key prefix gives a commit and PR title with one key", async () => {
+  const r = await repo();
+  const { github, created } = fakeGithub();
+  await writeFile(join(r.worktree.path, "ship.ts"), "export const shipped = true;\n");
+
+  const result = await shipPart({
+    worktree: r.worktree.path,
+    branch: r.worktree.branch,
+    issueKey: "MET-124",
+    title: "MET-123: cut token spend per parent",
+    github,
+  });
+
+  assert.equal(result.ok, true);
+  const subject = "MET-124: cut token spend per parent";
+  assert.equal(git(r.worktree.path, "log", "-1", "--format=%s"), subject);
+  assert.equal(created[0]?.title, subject, "the PR names only the part key");
+  assert.deepEqual(created[0]?.title.match(/MET-\d+/g), ["MET-124"]);
+});
+
+test("shipTitle cuts leading key prefixes only, and never adds a second key", () => {
+  assert.equal(shipTitle("MET-124", "MET-123: cut spend"), "MET-124: cut spend");
+  assert.equal(shipTitle("MET-124", "[MET-123] cut spend"), "MET-124: cut spend");
+  assert.equal(shipTitle("MET-124", "MET-123 cut spend"), "MET-124: cut spend");
+  assert.equal(shipTitle("MET-124", "MET-123: MET-120: cut spend"), "MET-124: cut spend");
+  assert.equal(shipTitle("MET-124", "MET-123"), "MET-124", "a title that is only a key");
+  assert.equal(
+    shipTitle("MET-124", "Cut MET-123 from the title"),
+    "MET-124: Cut MET-123 from the title",
+  );
+  assert.equal(shipTitle("MET-124", "UTF-8 support"), "MET-124: UTF-8 support");
+  assert.equal(shipTitle("MET-124", "OTHER-9: work"), "MET-124: OTHER-9: work");
 });
 
 test("a run with no changes fails as no changes and pushes nothing", async () => {

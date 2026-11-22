@@ -82,6 +82,15 @@ The exit code is 1 when any check is `fail` or `missing`, 0 otherwise, and 2 for
 
 Harnesses are checked once for each harness an agent uses as its `harness` or `fallback_harness`. Checks run in parallel. No command runs past 5 s, so `doctor` returns within a few seconds. No check spends tokens. Sign-in checks read only the exit code and named JSON fields, never the account or the token. Output never shows a key, a token or a webhook: each value of 6 characters or more of an environment variable with KEY, TOKEN, SECRET, PASSWORD or WEBHOOK in its name, and each value read from the secret store, is replaced by `***`. The loop and the Slack notifier read through the same lookup (D-030).
 
+## Linear GitHub automation
+Linear's GitHub integration can move an issue when a PR opens or merges. harnessd expects these settings, in Linear, Team settings, Integrations, GitHub:
+- **On PR open:** no state move, or a move to In Review.
+- **On PR merge:** a move to Done is fine.
+
+harnessd moves a part to In Review after the ship step opens its PR. A PR-open move to In Progress would send a shipped part back, and QA starts only on parts in In Review. When Linear moves a shipped part to In Progress anyway, the loop moves it back to In Review on the next tick and logs one line (docs/LOOP.md "Ship"). harnessd does not read or change the setting; it repairs the state when the setting differs.
+
+A PR title names one issue: `<part key>: <part title>`. A leading copy of the parent key is cut from the part title, so Linear's title link moves no second issue.
+
 ## Codex
 An agent with `harness = "codex"` runs on the Codex CLI (D-032, docs/CONFIG.md "Codex agents").
 1. Install it: `npm install -g @openai/codex`.

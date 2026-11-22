@@ -154,9 +154,42 @@ export function prBody(finalText: string | undefined, issueUrl: string | undefin
 }
 
 function commitMessage(issueKey: string, title: string, finalText: string | undefined): string {
-  const subject = `${issueKey}: ${title}`;
+  const subject = shipTitle(issueKey, title);
   const body = finalText?.trim() ?? "";
   return body === "" ? subject : `${subject}\n\n${cut(body, MAX_COMMIT_BODY)}`;
+}
+
+/** The team key of an issue key, escaped for a regex: "MET" from "MET-128". */
+function escapedTeamKey(issueKey: string): string {
+  return issueKey.replace(/-\d+$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
+ * The part title without leading copies of its team's issue keys: "[MET-123] cut spend" and
+ * "MET-123: MET-120: cut spend" both become "cut spend". Only a prefix is cut, since a key
+ * in the middle of a title carries meaning. A key that looks like a word ("UTF-8") is kept
+ * unless it is this team's key.
+ */
+function stripKeyPrefix(issueKey: string, title: string): string {
+  const prefix = new RegExp(`^\\[?${escapedTeamKey(issueKey)}-\\d+\\]?(?::[ \\t]*|[ \\t]+|$)`, "i");
+  let rest = title.trim();
+  while (rest !== "") {
+    const match = prefix.exec(rest);
+    if (match === null) break;
+    rest = rest.slice(match[0].length).trim();
+  }
+  return rest;
+}
+
+/**
+ * The commit subject and PR title: `<part key>: <part title>`, with any leading copy of a
+ * key of the same team cut from the title, so the title names one issue (MET-128). A Linear
+ * GitHub automation moves each issue named in a PR title, so a second key moves a second
+ * issue. A title that is only a key becomes the part key, with no second key.
+ */
+export function shipTitle(issueKey: string, title: string): string {
+  const rest = stripKeyPrefix(issueKey, title);
+  return rest === "" ? issueKey : `${issueKey}: ${rest}`;
 }
 
 /**
@@ -236,7 +269,7 @@ export async function shipPart(input: ShipInput): Promise<ShipResult> {
     const prUrl = await input.github.createPr({
       base,
       head: input.branch,
-      title: `${input.issueKey}: ${input.title}`,
+      title: shipTitle(input.issueKey, input.title),
       body: prBody(input.finalText, input.issueUrl),
     });
     return { ok: true, committed, prUrl, created: true };
