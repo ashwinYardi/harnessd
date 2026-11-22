@@ -86,6 +86,8 @@ class StreamJsonParser implements LineParser {
   sessionId: string | undefined;
   finalText: string | undefined;
   costUsd: number | undefined;
+  /** `num_turns` from the result event, when the harness reports it (D-043). */
+  turns: number | undefined;
   /** undefined until a `result` event arrives. */
   isError: boolean | undefined;
   errorSubtype: string | undefined;
@@ -137,6 +139,7 @@ class StreamJsonParser implements LineParser {
   outcome(exitCode: number | null): ParsedOutcome {
     const out: ParsedOutcome = { ok: this.isError === false, tokens: this.tokens() };
     if (this.costUsd !== undefined) out.costUsd = this.costUsd;
+    if (this.turns !== undefined) out.turns = this.turns;
     if (this.sessionId !== undefined) out.sessionId = this.sessionId;
     if (this.finalText !== undefined) out.finalText = this.finalText;
     if (exitCode === 0 && out.ok) return out;
@@ -218,6 +221,9 @@ class StreamJsonParser implements LineParser {
     if (typeof value.session_id === "string") this.sessionId = value.session_id;
     if (typeof value.result === "string") this.finalText = value.result;
     if (typeof value.total_cost_usd === "number") this.costUsd = value.total_cost_usd;
+    if (typeof value.num_turns === "number" && Number.isFinite(value.num_turns)) {
+      this.turns = value.num_turns;
+    }
     const usage = parseUsage(value.usage);
     if (usage) this.#resultUsage = usage;
     if (usage || this.costUsd !== undefined) this.#emitUsage();

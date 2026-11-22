@@ -159,6 +159,7 @@ test("a real 2.0.20 run streams tool, usage and text, with cost and the session 
   assert.equal(result.exitCode, 0);
   assert.equal(result.sessionId, "ses_fake1");
   assert.equal(result.finalText, "hello");
+  assert.equal(result.turns, 2);
   assert.equal(result.costUsd, 0.001502886);
   assert.equal(result.error, undefined);
   assert.equal(result.reason, undefined);

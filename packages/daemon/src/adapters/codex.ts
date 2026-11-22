@@ -184,6 +184,7 @@ class CodexJsonParser implements LineParser {
   outcome(exitCode: number | null): ParsedOutcome {
     const ok = this.#turns > 0 && this.#failure === undefined;
     const out: ParsedOutcome = { ok, tokens: { ...this.#tokens } };
+    if (this.#turns > 0) out.turns = this.#turns;
     if (this.#sessionId !== undefined) out.sessionId = this.#sessionId;
     if (this.#finalText !== undefined) out.finalText = this.#finalText;
     const message = this.#failure ?? (!ok || exitCode !== 0 ? this.#lastStderr : undefined);

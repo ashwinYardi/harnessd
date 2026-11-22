@@ -24,8 +24,10 @@ export type BudgetSize = (typeof BUDGET_SIZES)[number];
 export interface LimitsConfig {
   max_concurrent: number;
   budget_minutes: Record<BudgetSize, number>;
-  /** Tokens one parent may spend across its grill, plan, part and QA runs (D-040). */
+  /** Weighted tokens one parent may spend across its grill, plan, part and QA runs (D-043). */
   token_budget: Record<BudgetSize, number>;
+  /** Rate of a cached token against a new input token in the token budget, 0 to 1 (D-043). */
+  cached_token_weight: number;
   qa_max_failures: number;
 }
 
@@ -321,7 +323,8 @@ export const DEFAULT_SETTINGS: Settings = {
   limits: {
     max_concurrent: 1,
     budget_minutes: { S: 30, M: 120 },
-    token_budget: { S: 5_000_000, M: 12_000_000 },
+    token_budget: { S: 3_000_000, M: 6_000_000 },
+    cached_token_weight: 0.1,
     qa_max_failures: 2,
   },
   linear: {},
@@ -473,6 +476,14 @@ class Checker {
   positiveInt(value: unknown, path: string): number {
     if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
       this.fail(path, `expected an integer >= 1, got ${describe(value)}`);
+    }
+    return value;
+  }
+
+  /** A number from 0 to 1, both inclusive. */
+  unitNumber(value: unknown, path: string): number {
+    if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
+      this.fail(path, `expected a number from 0 to 1, got ${describe(value)}`);
     }
     return value;
   }
@@ -631,6 +642,7 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
       "max_concurrent",
       "budget_minutes",
       "token_budget",
+      "cached_token_weight",
       "qa_max_failures",
     ]);
     const limits: NonNullable<ConfigFile["limits"]> = {};
@@ -656,6 +668,12 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
         }
       }
       limits.token_budget = budget;
+    }
+    if (t.cached_token_weight !== undefined) {
+      limits.cached_token_weight = c.unitNumber(
+        t.cached_token_weight,
+        "limits.cached_token_weight",
+      );
     }
     if (t.qa_max_failures !== undefined) {
       limits.qa_max_failures = c.positiveInt(t.qa_max_failures, "limits.qa_max_failures");

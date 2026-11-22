@@ -109,6 +109,7 @@ test("ok run streams events in order and reports totals", async () => {
   assert.equal(result.costUsd, 0.0123);
   assert.equal(result.sessionId, "fake-session-1");
   assert.equal(result.finalText, "Done.");
+  assert.equal(result.turns, 2);
   assert.equal(result.error, undefined);
   assert.ok(result.durationMs >= 0);
 });
@@ -220,6 +221,7 @@ test("non-zero exit is an error", async () => {
   assert.equal(result.exitCode, 1);
   assert.equal(result.error, "error_during_execution");
   assert.deepEqual(result.tokens, { input: 4, output: 2, cacheRead: 0, cacheWrite: 0 });
+  assert.equal(result.turns, undefined, "no num_turns in the result event");
   assert.equal(events.at(-1)?.type, "end");
 });
 

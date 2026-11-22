@@ -234,8 +234,8 @@ export function noteTitle(question: string): string {
 
 /** A run's reply. `limited` is set when the harness hit a usage limit (MET-70). */
 export type RunReply =
-  | { ok: true; text: string; tokens: TokenUsage }
-  | { ok: false; error: string; limited?: true; tokens: TokenUsage };
+  | { ok: true; text: string; tokens: TokenUsage; turns?: number }
+  | { ok: false; error: string; limited?: true; tokens: TokenUsage; turns?: number };
 
 /** Runs one task to the end and returns the final assistant text, or why there is none. */
 export async function runForReply(
@@ -248,6 +248,7 @@ export async function runForReply(
   let status: string | undefined;
   let runError: string | undefined;
   let tokens: TokenUsage = emptyTokenUsage();
+  let turns: number | undefined;
   try {
     const run = adapter.start(task, cwd);
     for await (const event of run.events) {
@@ -258,6 +259,7 @@ export async function runForReply(
         finalText = event.result.finalText;
         runError = event.result.error;
         tokens = event.result.tokens;
+        turns = event.result.turns;
       }
     }
   } catch (error) {
@@ -266,14 +268,14 @@ export async function runForReply(
   if (status !== "ok") {
     const error = `harness run ${status ?? "ended without a result"}${runError ? `: ${runError}` : ""}`;
     return status === "limited"
-      ? { ok: false, error, limited: true, tokens }
-      : { ok: false, error, tokens };
+      ? { ok: false, error, limited: true, tokens, ...(turns === undefined ? {} : { turns }) }
+      : { ok: false, error, tokens, ...(turns === undefined ? {} : { turns }) };
   }
   const text = finalText ?? lastText;
   if (text === undefined || text.trim() === "") {
-    return { ok: false, error: "empty reply", tokens };
+    return { ok: false, error: "empty reply", tokens, ...(turns === undefined ? {} : { turns }) };
   }
-  return { ok: true, text, tokens };
+  return { ok: true, text, tokens, ...(turns === undefined ? {} : { turns }) };
 }
 
 /**
@@ -310,6 +312,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
 
   let parsed: ParsedGrillReply = { ok: false, error: "not run" };
   let spent: TokenUsage = emptyTokenUsage();
+  let turns: number | undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
     const text =
       attempt === 1
@@ -322,9 +325,17 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       cacheRead: spent.cacheRead + reply.tokens.cacheRead,
       cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
     };
+    if (reply.turns !== undefined) turns = (turns ?? 0) + reply.turns;
     if (!reply.ok && reply.limited) {
       // A usage limit is no bad reply: no retry, nothing written, the issue stays (MET-70).
-      return { calls: [], escalation: null, outcome: "limited", error: reply.error, tokens: spent };
+      return {
+        calls: [],
+        escalation: null,
+        outcome: "limited",
+        error: reply.error,
+        tokens: spent,
+        ...(turns === undefined ? {} : { turns }),
+      };
     }
     parsed = reply.ok ? parseGrillReply(reply.text) : reply;
     if (parsed.ok) break;
@@ -343,6 +354,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       outcome: "error",
       error: parsed.error,
       tokens: spent,
+      ...(turns === undefined ? {} : { turns }),
     };
   }
 
@@ -405,6 +417,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       terms,
       precedents,
       tokens: spent,
+      ...(turns === undefined ? {} : { turns }),
     };
   }
   return {
@@ -414,5 +427,6 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     terms,
     precedents,
     tokens: spent,
+    ...(turns === undefined ? {} : { turns }),
   };
 }

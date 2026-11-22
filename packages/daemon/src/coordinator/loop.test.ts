@@ -19,6 +19,7 @@ import {
   type RunResult,
   type Task,
   type WorkflowStateName,
+  weightedTokens,
 } from "@harnessd/shared";
 import { createClaudeCodeAdapter } from "../adapters/claude-code.ts";
 import { mergeLayers } from "../config/merge.ts";
@@ -43,6 +44,8 @@ import {
   type LoopSelfUpdate,
   RESUMED_RUN_NOTE,
   systemClock,
+  tokenBudgetFor,
+  tokenSumOf,
 } from "./loop.ts";
 import { formatNotice } from "./notifier.ts";
 import { type ShipInput, type ShipResult, type ShipRun, shipPart } from "./ship.ts";
@@ -226,6 +229,7 @@ interface PendingRun {
     text?: string,
     resetAt?: string,
     tokens?: RunResult["tokens"],
+    turns?: number,
   ): void;
 }
 
@@ -255,6 +259,7 @@ function fakeAdapter(
         error?: string,
         resetAt?: string,
         tokens?: RunResult["tokens"],
+        turns?: number,
       ): RunResult => {
         const r: RunResult = {
           status,
@@ -265,6 +270,7 @@ function fakeAdapter(
         if (text !== undefined) r.finalText = text;
         if (error !== undefined) r.error = error;
         if (resetAt !== undefined) r.resetAt = resetAt;
+        if (turns !== undefined) r.turns = turns;
         return r;
       };
       let resolve: (r: RunResult) => void = () => {};
@@ -288,8 +294,8 @@ function fakeAdapter(
         pending.push({
           task,
           cwd,
-          finish: (status = "ok", error, text, resetAt, tokens) =>
-            resolve(result(status, text, error, resetAt, tokens)),
+          finish: (status = "ok", error, text, resetAt, tokens, turns) =>
+            resolve(result(status, text, error, resetAt, tokens, turns)),
         });
       }
       // Like a real adapter, each iteration replays the run from the start.
@@ -3512,22 +3518,47 @@ test("a run's usage adds to the parent sum, logs a line and survives a reload", 
   });
 
   await t.loop.tick();
-  t.adapter.pending[0]?.finish("ok", undefined, "Done.", undefined, {
-    input: 100,
-    output: 20,
-    cacheRead: 30,
-    cacheWrite: 5,
-  });
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    "Done.",
+    undefined,
+    {
+      input: 100,
+      output: 20,
+      cacheRead: 30,
+      cacheWrite: 5,
+    },
+    4,
+  );
   await t.loop.idle();
 
   assert.deepEqual(t.memory.state.usage?.[parent.id], { input: 100, cached: 35, output: 20 });
   assert.ok(
-    t.logs.some((l) => l.includes("used 100 input, 35 cached, 20 output tokens")),
+    t.logs.some((l) => l.includes("used 100 input, 35 cached, 20 output tokens in 4 turns")),
     t.logs.join("\n"),
   );
 
   const reloaded = parseLoopState(JSON.stringify(t.memory.state));
   assert.deepEqual(reloaded.usage?.[parent.id], { input: 100, cached: 35, output: 20 });
+});
+
+test("the run log line keeps its old form when the harness reports no turns", async () => {
+  const t = setup();
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  t.linear.add({
+    title: "API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish("ok", undefined, "Done.");
+  await t.loop.idle();
+
+  const line = t.logs.find((l) => l.includes("used 0 input, 0 cached, 0 output tokens"));
+  assert.ok(line, t.logs.join("\n"));
+  assert.doesNotMatch(line ?? "", /turns/);
 });
 
 test("at or over the token budget nothing starts and the parent goes to Needs input", async () => {
@@ -3563,7 +3594,7 @@ test("at or over the token budget nothing starts and the parent goes to Needs in
   assert.equal(parent.state, "Needs input");
   assert.match(
     t.linear.comments.find((c) => c.key === parent.key)?.body ?? "",
-    /used 100 of its 100 tokens/,
+    /used 100 of its 100 weighted tokens \(100 input \+ 0 cached × 0\.1 → 0 weighted \+ 0 output\)/,
   );
   assert.equal(t.pings.length, 1);
   assert.deepEqual(
@@ -3618,7 +3649,7 @@ test("a second budget escalation counts from its own point after the human moves
   assert.equal(t2.pings.length, 1);
   assert.match(
     t2.linear.comments.findLast((c) => c.key === parent.key)?.body ?? "",
-    /used 110 of its 100 tokens/,
+    /used 110 of its 100 weighted tokens/,
   );
   // The baseline is the cumulative sum, so the count restarts from here.
   assert.deepEqual(
@@ -3632,4 +3663,87 @@ test("a second budget escalation counts from its own point after the human moves
   assert.deepEqual(report.dispatched, [part.key]);
   assert.equal(parent.state, "In Progress");
   assert.equal(t2.pings.length, 1);
+});
+
+test("the budget weighs cached tokens, so the parent escalates once at the weighted sum", async () => {
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { token_budget: { S: 200, M: 200 } } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  linear.add({
+    title: "API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  // 50 input + 50 output + 1000 cached × 0.1 = 200 weighted: exactly the budget.
+  const store = memoryStore({
+    ...emptyLoopState(),
+    usage: { [parent.id]: { input: 50, cached: 1000, output: 50 } },
+  });
+  const t = setup({ config, linear, store });
+
+  await t.loop.tick();
+  assert.equal(parent.state, "Needs input");
+  assert.equal(t.adapter.runs().length, 0, "no run starts");
+  assert.equal(t.pings.length, 1);
+  const body = t.linear.comments.find((c) => c.key === parent.key)?.body ?? "";
+  assert.match(body, /used 200 of its 200 weighted tokens/);
+  assert.match(body, /50 input \+ 1000 cached × 0\.1 → 100 weighted \+ 50 output/);
+
+  // A second tick does not escalate again.
+  await t.loop.tick();
+  assert.equal(t.pings.length, 1);
+});
+
+test("the MET-128 build, a rework, one QA round and grill plus plan stay under the M default", async () => {
+  const { limits } = mergeLayers([]);
+  // The recorded MET-128 run, on 2026-11-22.
+  const build = { input: 186_944, output: 57_383, cacheRead: 12_257_280, cacheWrite: 0 };
+  // A representative QA round: one PR diff plus a few file reads. The headroom below
+  // (about 2.2M tokens) is what keeps this test about the small build, not this guess.
+  const qa = { input: 300_000, output: 20_000, cacheRead: 150_000, cacheWrite: 0 };
+  const buildSum = tokenSumOf(build);
+  const qaSum = tokenSumOf(qa);
+  // Raw input, cached and output of the grill and plan for the same ticket.
+  const grillPlan = { input: 540_000, cached: 0, output: 0 };
+
+  assert.equal(weightedTokens(buildSum, limits.cached_token_weight), 1_470_055);
+  const total =
+    weightedTokens(buildSum, limits.cached_token_weight) * 2 +
+    weightedTokens(qaSum, limits.cached_token_weight) +
+    weightedTokens(grillPlan, limits.cached_token_weight);
+  assert.ok(total < tokenBudgetFor("M", limits), `${total} of ${limits.token_budget.M}`);
+  // At the old full count, one build alone was over the M default.
+  assert.ok(weightedTokens(buildSum, 1) > limits.token_budget.M);
+
+  // A parent that already spent exactly that still starts its next part under the default.
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const part = linear.add({
+    title: "API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const raw = {
+    input: build.input * 2 + qa.input + grillPlan.input,
+    cached: buildSum.cached * 2 + qaSum.cached + grillPlan.cached,
+    output: build.output * 2 + qa.output + grillPlan.output,
+  };
+  assert.equal(weightedTokens(raw, limits.cached_token_weight), total);
+  const store = memoryStore({ ...emptyLoopState(), usage: { [parent.id]: raw } });
+  const t = setup({ linear, store });
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+  assert.equal(parent.state, "In Progress");
+  assert.equal(t.adapter.runs().length, 1);
 });

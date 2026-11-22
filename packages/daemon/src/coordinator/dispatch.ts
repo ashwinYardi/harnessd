@@ -43,6 +43,7 @@ export interface PartPromptInput {
 
 export function agentPromptHeader(agent: ResolvedAgentConfig, issue: LinkedIssue): string[] {
   const parts = [`You are ${agent.name}, the harnessd ${agent.role} agent.`];
+  parts.push("This issue is already grilled and split; ignore any instruction to run the grill.");
   if (agent.instructions.trim()) parts.push(`## Your instructions\n${agent.instructions.trim()}`);
   const parent = issue.parentKey ? `Parent: ${issue.parentKey}\n` : "";
   parts.push(
@@ -59,7 +60,7 @@ function shipSteps(branch: string, what: string, review?: QaFeedback): string {
   return [
     "## When you are done",
     `You are in a git worktree on branch \`${branch}\`. Edit and test only in this worktree.`,
-    `1. Make sure ${what} and the repo's checks pass.`,
+    `1. Make sure ${what} and the repo's checks pass. Run focused tests, not the full suite unless the change is global, and read file ranges rather than whole large files.`,
     "2. Do not run `git commit`, `git push` or `gh pr create`. harnessd ships the work after your run.",
     ship,
     "End with a last message: a summary of the change, and one line on how you checked it. " +

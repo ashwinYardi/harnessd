@@ -43,7 +43,10 @@ const agent: ResolvedAgentConfig = {
   skills: [],
 };
 
-function adapterReplying(reply: string | { status: RunResult["status"]; error: string }) {
+function adapterReplying(
+  reply: string | { status: RunResult["status"]; error: string },
+  turns?: number,
+) {
   const tasks: Task[] = [];
   const adapter: HarnessAdapter = {
     id: "claude-code",
@@ -55,6 +58,7 @@ function adapterReplying(reply: string | { status: RunResult["status"]; error: s
         durationMs: 1,
         tokens: emptyTokenUsage(),
       };
+      if (turns !== undefined) result.turns = turns;
       if (typeof reply === "string") result.finalText = reply;
       else result.error = reply.error;
       return {
@@ -203,6 +207,25 @@ test("planIssue runs the coordinator harness and returns the model plan", async 
   assert.equal(tasks[0]?.id, "plan-MET-40");
   assert.equal(tasks[0]?.budgetMs, 10 * 60_000);
   assert.equal(tasks[0]?.model, "opus");
+});
+
+test("planIssue returns the turn count the harness reports, so the log line shows it", async () => {
+  const { adapter } = adapterReplying(JSON.stringify({ parts: [part("backend")] }), 7);
+  const plan = await planIssue(issue(), {
+    adapter,
+    agent,
+    context: { spec: "", decisions: [] },
+    cwd: "/repo",
+  });
+  assert.equal(plan.turns, 7);
+  const { adapter: silent } = adapterReplying(JSON.stringify({ parts: [part("backend")] }));
+  const none = await planIssue(issue(), {
+    adapter: silent,
+    agent,
+    context: { spec: "", decisions: [] },
+    cwd: "/repo",
+  });
+  assert.equal(none.turns, undefined);
 });
 
 test("planIssue keeps a one-part plan with a blank reason and its own brief", async () => {

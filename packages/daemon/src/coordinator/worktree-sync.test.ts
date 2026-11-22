@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { excludeLine, syncWorktree } from "./worktree-sync.ts";
+import { excludeLine, syncWorktree, withheldSkills } from "./worktree-sync.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -270,6 +270,25 @@ test("a committed skill folder is withheld from a non-UI run and git stays clean
   });
   assert.equal(await exists(join(backend, ".claude/skills/impeccable/SKILL.md")), true);
   assert.equal(git(backend, ["status", "--porcelain", "--untracked-files=all"], env), "");
+});
+
+test("each role gets only the skills its work needs (D-040, D-043)", () => {
+  // The frontend run keeps impeccable and drops the coordinator's four skills.
+  assert.deepEqual(withheldSkills("frontend"), [
+    "grilling",
+    "domain-modeling",
+    "research",
+    "prototype",
+  ]);
+  // The coordinator keeps those four and drops the UI skill (D-040).
+  assert.deepEqual(withheldSkills("coordinator"), ["impeccable"]);
+  for (const role of ["backend", "qa"] as const) {
+    assert.deepEqual(
+      withheldSkills(role),
+      ["impeccable", "grilling", "domain-modeling", "research", "prototype"],
+      role,
+    );
+  }
 });
 
 test("worktree sync applies the run agent's OpenCode permissions", async () => {

@@ -25,6 +25,7 @@ import {
   type Task,
   type TokenSum,
   type TokenUsage,
+  weightedTokens,
 } from "@harnessd/shared";
 import { resolveAgentConfig } from "../config/merge.ts";
 import type { GitHub } from "../github/client.ts";
@@ -304,7 +305,7 @@ function subtractSums(a: TokenSum, b: TokenSum): TokenSum {
   };
 }
 
-/** Input plus cached plus output. */
+/** Input plus cached plus output, unweighted. The budget weighs the cached part (D-043). */
 export function sumTokens(sum: TokenSum): number {
   return sum.input + sum.cached + sum.output;
 }
@@ -348,6 +349,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     key: string,
     agent: string,
     tokens: TokenUsage,
+    turns?: number,
   ): void {
     const sum = tokenSumOf(tokens);
     if (parentId !== undefined) {
@@ -355,9 +357,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       s.usage ??= {};
       s.usage[parentId] = addSums(previous, sum);
     }
-    log(
-      `${key}: ${agent} used ${sum.input} input, ${sum.cached} cached, ${sum.output} output tokens`,
-    );
+    const line = `${key}: ${agent} used ${sum.input} input, ${sum.cached} cached, ${sum.output} output tokens`;
+    log(turns === undefined ? line : `${line} in ${turns} turns`);
   }
 
   /** Tokens of a parent since its last budget escalation. */
@@ -651,16 +652,17 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   }
 
   /**
-   * True when the parent is at or over its token budget: then nothing new starts, the
-   * parent goes to Needs input once, and the count continues from here after a human
-   * moves it back to Ready (D-040).
+   * True when the parent is at or over its weighted token budget: then nothing new starts,
+   * the parent goes to Needs input once, and the count continues from here after a human
+   * moves it back to Ready (D-040, D-043).
    */
   async function overTokenBudget(s: LoopState, parent: Issue): Promise<boolean> {
     // Already escalated: a human has not moved it back to Ready yet.
     if (parent.state.toLowerCase() === "needs input") return true;
     const budget = tokenBudgetFor(parent.size, config.limits);
+    const weight = config.limits.cached_token_weight;
     const used = usageSince(s, parent.id);
-    const total = sumTokens(used);
+    const total = weightedTokens(used, weight);
     if (total < budget) return false;
     try {
       if ((await linear.getIssue(parent.id)).state.toLowerCase() === "needs input") return true;
@@ -672,9 +674,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     await escalate(
       { id: parent.id, key: parent.key, ...(parent.url ? { url: parent.url } : {}) },
       "token budget",
-      `${total} of ${budget} tokens`,
-      `**harnessd token budget**: ${parent.key} used ${total} of its ${budget} tokens, so the loop starts no new run. ` +
-        "Move it back to Ready to continue with a fresh count (D-040).",
+      `${total} of ${budget} weighted tokens`,
+      `**harnessd token budget**: ${parent.key} used ${total} of its ${budget} weighted tokens ` +
+        `(${used.input} input + ${used.cached} cached × ${weight} → ${Math.round(used.cached * weight)} weighted + ${used.output} output), ` +
+        "so the loop starts no new run. " +
+        "Move it back to Ready to continue with a fresh count (D-040, D-043).",
     );
     // usageSince subtracts this from the parent's cumulative sum, so store the sum, not the
     // delta since the last escalation. A second escalation must count from its own point too.
@@ -804,7 +808,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const id = entry.issueId;
     let drop = true;
     try {
-      recordUsage(s, runParents.get(entry.issueId), entry.issueKey, entry.agent, result.tokens);
+      recordUsage(
+        s,
+        runParents.get(entry.issueId),
+        entry.issueKey,
+        entry.agent,
+        result.tokens,
+        result.turns,
+      );
       const stopped = entry.pausedAt !== undefined && result.status !== "ok";
       if (stopped) {
         // A failed move keeps the entry: the next tick's re-queue tries again.
@@ -1184,7 +1195,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       if (result.cancelled === true) await requeueStopped(s, entry);
       live.delete(issue.id);
       syncWatch();
-      recordUsage(s, qa.parent.id, issue.key, agent.name, result.tokens ?? emptyTokenUsage());
+      recordUsage(
+        s,
+        qa.parent.id,
+        issue.key,
+        agent.name,
+        result.tokens ?? emptyTokenUsage(),
+        result.turns,
+      );
       if (result.cancelled === true) {
         await save();
         return;
@@ -1310,7 +1328,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         decisions,
       });
       if (state !== undefined) {
-        recordUsage(state, issue.id, issue.key, agent.name, grill.tokens ?? emptyTokenUsage());
+        recordUsage(
+          state,
+          issue.id,
+          issue.key,
+          agent.name,
+          grill.tokens ?? emptyTokenUsage(),
+          grill.turns,
+        );
       }
       if (pausedNow) {
         log(`${issue.key}: paused, split skipped`);
@@ -1331,7 +1356,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
       plan = await planIssue(issue, { adapter, agent, context, cwd: repoDir, calls: grill.calls });
       if (state !== undefined) {
-        recordUsage(state, issue.id, issue.key, agent.name, plan.tokens ?? emptyTokenUsage());
+        recordUsage(
+          state,
+          issue.id,
+          issue.key,
+          agent.name,
+          plan.tokens ?? emptyTokenUsage(),
+          plan.turns,
+        );
       }
       if (pausedNow) {
         log(`${issue.key}: paused, split skipped`);
