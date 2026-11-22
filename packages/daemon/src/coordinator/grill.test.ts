@@ -359,6 +359,15 @@ test("parseGrillReply validates strictly", () => {
   assert.match(bad("[]"), /expected a JSON object/);
 });
 
+test("extractJson finds a JSON object that follows prose", () => {
+  const verdict =
+    '{\n  "items": [{ "text": "a", "pass": true, "evidence": "b" }],\n  "testsPassed": true\n}';
+  assert.equal(extractJson(`The spec and the diff match.\n\n${verdict}`), verdict);
+  assert.equal(extractJson(`Done.\n${verdict}\nThanks.`), verdict);
+  assert.equal(extractJson("No JSON here."), "No JSON here.");
+  assert.equal(extractJson("Text {not json}"), "Text {not json}");
+});
+
 test("extractJson tolerates a json or bare fence", () => {
   assert.equal(extractJson('```json\n{"a":1}\n```'), '{"a":1}');
   assert.equal(extractJson('```\n{"a":1}\n```'), '{"a":1}');
