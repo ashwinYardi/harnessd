@@ -124,7 +124,7 @@ The minimum tested version is 2.0.20. Below it, `harness.opencode.version` is `w
 
 `HARNESSD_HOME` is passed on when it was set for `init`.
 
-When the service works on its own install clone, it pulls, rebuilds and restarts itself through launchd after each merge to the default branch (docs/LOOP.md "Self-update"). Set `[daemon] self_update = false` to turn it off.
+When the service works on its own install clone, it pulls, rebuilds, syncs and restarts itself through launchd after each merge to the default branch (docs/LOOP.md "Self-update"). Files that `harnessd sync` writes, `.harnessd/vault/` and `.harnessd/config.toml` may stay changed and do not block an update; any other local change does, and the log names it. A startup check that fails by timeout is retried, 3 runs in total with a 15 s limit; a check that passes on a retry starts the loop with no Start press. Set `[daemon] self_update = false` to turn the update off.
 
 launchd does not load nvm or your shell profile. The service sees only the PATH in the plist, and `harnessd init` writes that PATH. The from-source wrapper in the README names its Node by an absolute path, so the service always runs that Node, whatever Node is first on PATH. After you change Node, run the README Install block again with the new Node active, then run `harnessd init` again.
 

@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Exec, execFile } from "../status/detect.ts";
 import { isLaunchdServiceProcess } from "../status/launchd.ts";
+import { SYNC_OUTPUT_PATHS } from "../sync/generate.ts";
 
 export interface SelfUpdateRunner {
   exec: Exec;
@@ -21,7 +22,7 @@ const systemRunner: SelfUpdateRunner = {
   },
 };
 
-type Detection = { kind: "off" } | { kind: "on"; installRoot: string };
+export type Detection = { kind: "off" } | { kind: "on"; installRoot: string };
 
 interface DetectOptions {
   /** Pass import.meta.url from the running CLI entry point. */
@@ -37,6 +38,51 @@ export type UpdateCheck =
   | { kind: "none" }
   | { kind: "pending"; from: string; to: string }
   | { kind: "blocked"; reason: string };
+
+/**
+ * Local changes a self-update keeps (D-042): the files `harnessd sync` writes, the workspace
+ * vault and the workspace config. Every other change still blocks. The sync list is imported,
+ * not copied, so the two stay one list.
+ */
+export const SELF_UPDATE_KEPT_PATHS: readonly string[] = [
+  ...SYNC_OUTPUT_PATHS,
+  ".harnessd/vault/",
+  ".harnessd/config.toml",
+];
+
+/** A porcelain path is quoted with C-style escapes when it holds a space or a control byte. */
+function porcelainPath(text: string): string {
+  if (!text.startsWith('"') || !text.endsWith('"')) return text;
+  try {
+    return JSON.parse(text) as string;
+  } catch {
+    return text.slice(1, -1);
+  }
+}
+
+/** Every path a `git status --porcelain` line touches; a rename line names two. */
+function changedPaths(line: string): string[] {
+  return line.slice(3).split(" -> ").map(porcelainPath);
+}
+
+/** True when a repo-relative path is one a self-update keeps (D-042). */
+export function isSelfUpdateKeptPath(path: string): boolean {
+  return SELF_UPDATE_KEPT_PATHS.some((kept) =>
+    kept.endsWith("/") ? path === kept.slice(0, -1) || path.startsWith(kept) : path === kept,
+  );
+}
+
+/**
+ * The changed paths in `git status --porcelain` output that block a self-update: every line
+ * whose path harnessd does not write itself. An empty list means only kept changes remain.
+ */
+export function blockingLocalChanges(status: string): string[] {
+  return status
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .filter((line) => !changedPaths(line).every(isSelfUpdateKeptPath))
+    .map((line) => line.slice(3));
+}
 
 // Keep each command scoped to its cwd even when the daemon inherits Git's repo context.
 const gitRepositoryEnv = [
@@ -133,11 +179,10 @@ export async function checkForUpdate(
   );
   if (status.code !== 0) return blocked("Cannot check the install clone for local changes.");
   if (status.stdout) {
-    const files = status.stdout
-      .trimEnd()
-      .split("\n")
-      .map((line) => line.slice(3));
-    return blocked(`Local changes in the install clone: ${files.join(", ")}`);
+    const files = blockingLocalChanges(status.stdout);
+    if (files.length > 0) {
+      return blocked(`Local changes in the install clone: ${files.join(", ")}`);
+    }
   }
 
   for (const marker of ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD"]) {
@@ -188,4 +233,35 @@ export async function checkForUpdate(
   if (ancestor.code !== 0)
     return blocked("Cannot check whether the install clone can fast-forward.");
   return { kind: "pending", from, to };
+}
+
+/**
+ * The branch `origin/HEAD` names in the install clone, such as `main`, or undefined when it is
+ * not set. The self-update uses it when GitHub cannot name the default branch (MET-137).
+ */
+export async function originHeadBranch(
+  installRoot: string,
+  runner: SelfUpdateRunner = systemRunner,
+): Promise<string | undefined> {
+  const head = await git(
+    runner,
+    installRoot,
+    "symbolic-ref",
+    "--quiet",
+    "--short",
+    "refs/remotes/origin/HEAD",
+  );
+  const name = head.stdout.trim();
+  if (head.code !== 0 || !name.startsWith("origin/")) return undefined;
+  return name.slice("origin/".length);
+}
+
+/** The commit the install clone is on, or undefined. A new process reads it after a restart. */
+export async function headCommit(
+  installRoot: string,
+  runner: SelfUpdateRunner = systemRunner,
+): Promise<string | undefined> {
+  const head = await git(runner, installRoot, "rev-parse", "--verify", "HEAD^{commit}");
+  const sha = head.stdout.trim();
+  return head.code === 0 && sha !== "" ? sha : undefined;
 }

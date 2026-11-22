@@ -1,5 +1,5 @@
 # D-033 harnessd updates itself at a safe point
-Status: accepted 2026-11-21. Issue: MET-63 (loop part MET-66).
+Status: accepted 2026-11-21. Issue: MET-63 (loop part MET-66). Amended by D-042 (MET-137): harnessd-written changes and the workspace config no longer block a self-update, and a startup check retries a timeout.
 
 - When the repo the loop works on is harnessd's own install clone, a merge to its default branch starts a self-update. A merge by a human counts too. One check also runs at daemon start.
 - While an update waits, a tick dispatches nothing and skips grills, splits and merges. Runs in flight finish normally.

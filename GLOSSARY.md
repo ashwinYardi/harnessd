@@ -90,6 +90,8 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Self-update**: harnessd pulls, rebuilds and restarts its own install after a merge to its own repo's default branch (MET-63, docs/LOOP.md "Self-update"). _Avoid_: auto-upgrade, `harnessd update` (that updates a harness CLI).
 
+**Kept local change**: a local change in the install clone under a path harnessd writes: the output of `harnessd sync`, `.harnessd/vault/` or `.harnessd/config.toml`. A self-update stashes it, fast-forwards, pops it and syncs again; it never blocks the update (D-042). Any other local change blocks. _Avoid_: dirty file, ignored change.
+
 **Safe point**: the first tick with no run in flight while a self-update waits. Only then is the update applied. _Avoid_: idle point.
 
 **Trigger issue**: the parent issue whose merge started a self-update check. A blocked or failed update comments on it and moves it to Needs input. The check at daemon start has none.

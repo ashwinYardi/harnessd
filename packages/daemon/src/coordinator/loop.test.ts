@@ -341,6 +341,9 @@ function fakeGitHub() {
   const createdPrs: CreatePrInput[] = [];
   let nextPr = 100;
   const github: GitHub = {
+    async defaultBranch() {
+      return "main";
+    },
     async findPrByHead(branch) {
       return Object.values(prs).find((pr) => pr.headRefName === branch);
     },

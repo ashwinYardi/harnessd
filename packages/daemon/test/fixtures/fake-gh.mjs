@@ -38,7 +38,9 @@ const pr = (number, title, branch) => ({
 });
 
 const [cmd, sub] = argv;
-if (cmd === "pr" && sub === "list") {
+if (cmd === "repo" && sub === "view") {
+  process.stdout.write(JSON.stringify({ defaultBranchRef: { name: "main" } }));
+} else if (cmd === "pr" && sub === "list") {
   process.stdout.write(
     JSON.stringify([
       { ...pr(13, "From a fork", "met-41-serve-avatars"), isCrossRepository: true },

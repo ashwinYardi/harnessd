@@ -15,7 +15,7 @@ export interface SelfUpdateTarget {
 }
 
 /** The step of an update that failed. */
-export type SelfUpdateStep = "pull" | "install" | "build" | "restart";
+export type SelfUpdateStep = "pull" | "install" | "build" | "sync" | "restart";
 
 export type SelfUpdateResult =
   /** The new build is in place and the restart is under way. */
@@ -26,7 +26,7 @@ export type SelfUpdateResult =
   | { status: "failed"; step: SelfUpdateStep; error: string };
 
 export interface SelfUpdater {
-  /** Commit embedded in the running build, independent of the install clone's HEAD. */
+  /** Commit the running build came from, read once at startup, independent of later HEAD moves. */
   readonly runningCommit?: string;
 
   /**
