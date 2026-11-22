@@ -566,8 +566,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         continue;
       }
       if (entry.worktree !== "") {
-        // A QA round's checkout is detached and holds no branch work.
-        await removeWithGuard(s, entry, entry.worktree, { scratch: entry.role === "qa" });
+        // A QA checkout is never kept: a crash re-queue removes it without the guard.
+        await removeWithGuard(s, entry, entry.worktree, { force: entry.role === "qa" });
       }
       const moved = await safely(`re-queue ${entry.issueKey}`, () =>
         linear.moveTo(entry.issueId, "Ready"),
@@ -764,12 +764,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     s: LoopState,
     entry: KeptRun,
     path: string,
-    options: { scratch?: boolean; resumable?: boolean } = {},
+    options: { force?: boolean; resumable?: boolean } = {},
   ): Promise<void> {
     try {
       const remove = {
         ...(entry.excludesFile ? { excludesFile: entry.excludesFile } : {}),
-        ...(options.scratch ? { scratch: true } : {}),
+        ...(options.force ? { force: true } : {}),
       };
       const result = await worktrees.remove(path, remove);
       if (!result.removed && result.kept !== undefined) {
@@ -978,9 +978,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       const oldCheckout = s.interrupted.find((e) => e.issueId === issue.id);
       if (oldCheckout !== undefined) {
         s.interrupted = s.interrupted.filter((e) => e !== oldCheckout);
-        // It is a detached PR-head checkout: no branch work to keep.
+        // A QA checkout is never kept: remove the old one even with local changes.
         await removeWithGuard(s, oldCheckout, oldCheckout.worktree, {
-          scratch: true,
+          force: true,
           resumable: false,
         });
         await save();

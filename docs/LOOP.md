@@ -102,7 +102,7 @@ When the split is done, the parent moves to In Progress.
 
 harnessd expects this from Linear's GitHub pull request automation: on PR open, no state move or a move to In Review; on PR merge, a move to Done is fine. harnessd does not change the setting. When the setting moves a shipped part to In Progress, the repair above puts it back (docs/INSTALL.md "Linear GitHub automation").
 
-The worktree is removed after a run when it holds no unshipped work. A worktree with **uncommitted changes** or **commits not on the remote** is kept, with one Linear comment: "worktree kept at <path>: uncommitted changes" or "…: commits not on the remote". It is listed under `interrupted`, so the next run resumes it on the same branch. If the issue was renamed, the branch changed and the old worktree cannot be resumed; it is still kept and commented on. A pause keeps its worktree too (see Pause). The keep guard also applies to a QA PR-head scratch checkout. If the checkout has no remote branch, the guard asks each remote for its live branch heads (`git ls-remote`), because a local tracking ref can outlive a deleted branch. If no live head holds the checkout's HEAD, or the remote cannot be reached, the daemon keeps the checkout and reports "commits not on the remote".
+The worktree is removed after a run when it holds no unshipped work. A worktree with **uncommitted changes** or **commits not on the remote** is kept, with one Linear comment: "worktree kept at <path>: uncommitted changes" or "…: commits not on the remote". It is listed under `interrupted`, so the next run resumes it on the same branch. If the issue was renamed, the branch changed and the old worktree cannot be resumed; it is still kept and commented on. A pause keeps its worktree too (see Pause). A QA checkout is never kept; the loop removes it after the round. The keep guard reads the run's excludes file, so files the worktree sync wrote never count as unshipped work.
 
 ## What an agent run sees
 A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch already exists on the remote (a part QA sent back), so it holds only what the repo commits. harnessd fills in the rest before the agent starts.
@@ -184,7 +184,7 @@ Before a review, the loop reads the PR's `headRefOid` and compares it with the p
 
 For each part:
 1. **Find the PR.** It is the newest open PR with the part's key in its title (`gh pr list --json`). With no PR, the part is sent back.
-2. **Check it out.** The PR's head commit is checked out in a worktree of its own, detached, and removed afterwards (D-012).
+2. **Check it out.** The PR's head commit is checked out in a worktree of its own, detached, and removed afterwards even when it has local changes. A QA checkout is never kept (D-041).
 3. **Run the tests.** harnessd runs `qa.setup_command` and then `qa.test_command` (default `pnpm test`) in that worktree.
 4. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the parent's "Done when"; the part brief; the CI result from `statusCheckRollup`; and the harnessd test result. It judges from the diff, the CI result and the tests, and opens a file only to check a line the diff touches. Its last message must be strict JSON, one item per "Done when" item:
 
@@ -194,7 +194,7 @@ For each part:
 
 5. **Review.** harnessd approves only when every item passes and the tests pass, both when harnessd ran them and for the agent. Otherwise it requests changes and lists each failing item with its evidence. GitHub does not let you approve your own PR, so when every agent shares one `gh` login, the verdict is posted as a comment review.
 
-Output that is not valid JSON, or that has the wrong number of items, is a failed QA run. No review is posted for it.
+Output that is not valid JSON, or that has the wrong number of items, is a failed QA run: it counts a failure. No review is posted for it.
 
 After the round:
 
@@ -202,7 +202,7 @@ After the round:
 |---|---|
 | approved | The part's PR goes to `merges` in `loop.json` as one entry with one PR, pinned to the reviewed head, and the merge gate takes it. QA stays Ready for the next part. |
 | changes requested, first failure | The part goes back to Ready with a comment that links its review. The reviewed head records `changes_requested`; QA runs again only on a new head. |
-| QA could not judge a PR, first failure | QA goes back to Ready and runs again. |
+| QA could not set up the review | QA goes back to Ready and runs again. No QA failure is counted and no comment is posted: the PR lookup, checkout, worktree sync, or the budget before the agent failed (D-041). |
 | second failure | QA and the parent move to Needs input. One comment goes on the parent and one notice is sent. Nothing is sent back again (D-014). |
 
 The QA sub-issue moves to Done after the last part of the parent merges. The final check on main and the follow-up issue stay in MET-86.

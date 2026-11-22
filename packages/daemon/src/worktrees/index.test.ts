@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
@@ -220,7 +220,7 @@ describe("worktrees", () => {
       });
       await writeFile(join(wt.path, "draft.txt"), "not shipped\n");
 
-      const result = await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
+      const result = await removeWorktree({ repoDir, path: wt.path, root });
 
       assert.deepEqual(result, { removed: false, kept: "uncommitted changes" });
       assert.ok(existsSync(join(wt.path, "draft.txt")));
@@ -229,11 +229,11 @@ describe("worktrees", () => {
     }
   });
 
-  test("a QA retry keeps a detached checkout whose commit only a stale origin/main holds", async () => {
+  test("checkoutWorktree replaces an existing detached checkout that has local changes", async () => {
     const source = await createWorktree({
       repoDir,
       issueKey: nextKey(),
-      title: "QA stale src",
+      title: "QA replace src",
       root,
     });
     git(source.path, "commit", "-q", "--allow-empty", "-m", "PR head");
@@ -241,8 +241,8 @@ describe("worktrees", () => {
     git(source.path, "push", "-q", "origin", source.branch);
     const input = {
       repoDir,
-      issueKey: "MET-900",
-      title: "QA stale",
+      issueKey: "MET-901",
+      title: "QA replace",
       branch: source.branch,
       sha,
       root,
@@ -252,110 +252,25 @@ describe("worktrees", () => {
     git(wt.path, "add", ".");
     git(wt.path, "commit", "-q", "-m", "local only");
     const local = git(wt.path, "rev-parse", "HEAD");
-    git(repoDir, "update-ref", "refs/remotes/origin/main", local);
-    git(origin, "branch", "-D", source.branch);
+    assert.notEqual(local, sha);
 
-    try {
-      await assert.rejects(
-        checkoutWorktree(input),
-        /worktree kept at .*: commits not on the remote/,
-      );
-      assert.equal(git(wt.path, "rev-parse", "HEAD"), local);
-      assert.ok(existsSync(join(wt.path, "local-only.txt")));
-    } finally {
-      git(repoDir, "update-ref", "refs/remotes/origin/main", git(origin, "rev-parse", "main"));
-    }
+    const again = await checkoutWorktree(input);
+
+    assert.equal(again.path, wt.path, "the same path is reused");
+    assert.equal(git(wt.path, "rev-parse", "HEAD"), sha, "back at the PR head");
+    assert.equal(existsSync(join(wt.path, "local-only.txt")), false, "local changes are gone");
   });
 
-  test("a clean scratch checkout is removed", async () => {
-    const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "scratch", root });
-
-    const result = await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
-
-    assert.deepEqual(result, { removed: true });
-    assert.equal(existsSync(wt.path), false);
-  });
-
-  test("a scratch checkout with uncommitted changes is kept", async () => {
-    const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "scratch dirty", root });
+  test("force removes a worktree even when it holds unshipped work", async () => {
+    const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "forced", root });
     await writeFile(join(wt.path, "draft.txt"), "not shipped\n");
-
-    const result = await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
-
-    assert.deepEqual(result, { removed: false, kept: "uncommitted changes" });
-    assert.ok(existsSync(join(wt.path, "draft.txt")));
-    assert.match(registered(), new RegExp(`worktree ${wt.path}`));
-  });
-
-  test("a scratch checkout with a commit not on the remote is kept", async () => {
-    const other = join(tmp, "scratch-commit");
-    git(tmp, "clone", "-q", origin, other);
-    git(other, "switch", "-q", "-c", "met-62-scratch-head");
-    await writeFile(join(other, "pr.txt"), "pr\n");
-    git(other, "add", ".");
-    git(other, "commit", "-q", "-m", "pr");
-    const sha = git(other, "rev-parse", "HEAD");
-    git(other, "push", "-q", "origin", "met-62-scratch-head");
-
-    const wt = await checkoutWorktree({
-      repoDir,
-      issueKey: "MET-62",
-      title: "scratch head",
-      branch: "met-62-scratch-head",
-      sha,
-      root,
-    });
-    await writeFile(join(wt.path, "local.txt"), "detached work\n");
-    git(wt.path, "add", ".");
-    git(wt.path, "commit", "-q", "-m", "detached work");
-
-    const result = await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
-
-    assert.deepEqual(result, { removed: false, kept: "commits not on the remote" });
-    assert.ok(existsSync(join(wt.path, "local.txt")));
-  });
-
-  test("a detached scratch checkout with a local-only commit and no remote branch is kept", async () => {
-    const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "scratch local", root });
-    git(wt.path, "checkout", "-q", "--detach");
-    await writeFile(join(wt.path, "local-only.txt"), "never pushed\n");
     git(wt.path, "add", ".");
     git(wt.path, "commit", "-q", "-m", "local only");
 
-    const result = await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
+    const result = await removeWorktree({ repoDir, path: wt.path, root, force: true });
 
-    assert.deepEqual(result, { removed: false, kept: "commits not on the remote" });
-    assert.ok(existsSync(join(wt.path, "local-only.txt")));
-  });
-
-  test("a detached scratch checkout is kept after its remote branch is deleted", async () => {
-    const source = await createWorktree({ repoDir, issueKey: nextKey(), title: "QA source", root });
-    git(source.path, "commit", "-q", "--allow-empty", "-m", "PR head");
-    const sha = git(source.path, "rev-parse", "HEAD");
-    git(source.path, "push", "-q", "origin", source.branch);
-
-    const wt = await checkoutWorktree({
-      repoDir,
-      issueKey: nextKey(),
-      title: "QA checkout",
-      branch: source.branch,
-      sha,
-      root,
-    });
-    git(origin, "branch", "-D", source.branch);
-    assert.equal(git(repoDir, "rev-parse", `refs/remotes/origin/${source.branch}`), sha);
-
-    const result = await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
-
-    assert.deepEqual(result, { removed: false, kept: "commits not on the remote" });
-    assert.equal(git(wt.path, "rev-parse", "HEAD"), sha);
-
-    git(source.path, "push", "-q", "origin", "HEAD:refs/heads/qa-republished");
-    assert.deepEqual(await removeWorktree({ repoDir, path: wt.path, root, scratch: true }), {
-      removed: true,
-    });
+    assert.deepEqual(result, { removed: true });
     assert.equal(existsSync(wt.path), false);
-    git(origin, "branch", "-D", "qa-republished");
   });
 
   test("a branch deleted on the remote leaves its commits unsent", async () => {
@@ -387,6 +302,22 @@ describe("worktrees", () => {
     await writeFile(join(wt.path, "AGENTS.md"), "synced\n");
     const excludesFile = join(tmp, "excludes.gitignore");
     await writeFile(excludesFile, "/AGENTS.md\n");
+
+    const kept = await removeWorktree({ repoDir, path: wt.path, root });
+    assert.deepEqual(kept, { removed: false, kept: "uncommitted changes" });
+
+    const result = await removeWorktree({ repoDir, path: wt.path, root, excludesFile });
+    assert.deepEqual(result, { removed: true });
+    assert.equal(existsSync(wt.path), false);
+  });
+
+  test("a worktree whose only changes are .agents sync output is removed", async () => {
+    const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "agents only", root });
+    await mkdir(join(wt.path, ".agents", "skills", "grill"), { recursive: true });
+    await writeFile(join(wt.path, ".agents", "skills", "grill", "SKILL.md"), "synced\n");
+    await writeFile(join(wt.path, "AGENTS.md"), "synced\n");
+    const excludesFile = join(tmp, "sync-excludes.gitignore");
+    await writeFile(excludesFile, "/.agents/\n/AGENTS.md\n");
 
     const kept = await removeWorktree({ repoDir, path: wt.path, root });
     assert.deepEqual(kept, { removed: false, kept: "uncommitted changes" });
@@ -506,23 +437,19 @@ describe("worktrees", () => {
 
     const draft = join(wt.path, "scratch.txt");
     await writeFile(draft, "left behind\n");
-    assert.deepEqual(await removeWorktree({ repoDir, path: wt.path, root, scratch: true }), {
+    assert.deepEqual(await removeWorktree({ repoDir, path: wt.path, root }), {
       removed: false,
       kept: "uncommitted changes",
     });
-    await assert.rejects(checkoutWorktree(input), /worktree kept at .*: uncommitted changes/);
-    assert.equal(await readFile(draft, "utf8"), "left behind\n");
 
     git(wt.path, "add", "scratch.txt");
     git(wt.path, "commit", "-q", "-m", "local QA work");
-    const localHead = git(wt.path, "rev-parse", "HEAD");
-    await assert.rejects(checkoutWorktree(input), /worktree kept at .*: commits not on the remote/);
-    assert.equal(git(wt.path, "rev-parse", "HEAD"), localHead);
-    assert.equal(await readFile(draft, "utf8"), "left behind\n");
+    const again = await checkoutWorktree(input);
+    assert.equal(again.path, wt.path, "the same checkout path is reused");
+    assert.equal(git(wt.path, "rev-parse", "HEAD"), sha, "the old checkout is replaced");
+    assert.equal(existsSync(draft), false, "its local work is gone");
 
-    git(wt.path, "reset", "--hard", sha);
-    assert.equal((await checkoutWorktree(input)).path, wt.path);
-    await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
+    await removeWorktree({ repoDir, path: wt.path, root });
     assert.equal(existsSync(wt.path), false);
     assert.equal(await entry(wt.path), undefined);
     assert.ok(!registered().includes(wt.path));
