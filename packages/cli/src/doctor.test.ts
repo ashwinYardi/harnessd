@@ -166,6 +166,8 @@ test("doctor checks the worktree write afresh, so a root that became unwritable 
   assert.equal(await run(["doctor"], m.io), 0, m.out.join("\n"));
   assert.match(m.out.join("\n"), /^ok {6}harness\.claude-code\.worktree_write /m);
 
+  // The check leaves the repo's worktrees folder. Remove it so the root must make it.
+  await rm(join(root, "repo"), { recursive: true, force: true });
   await chmod(root, 0o555);
   try {
     assert.equal(await run(["doctor"], m.io), 1);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -923,14 +923,26 @@ test("the worktree-write check is ok for Codex and OpenCode, and removes its scr
     assert.equal(check.state, "ok", `${id}: ${check.detail}`);
     assert.equal(check.fix, "");
   }
-  // Every scratch worktree is gone; only the root remains.
-  assert.deepEqual(await readdir(join(w.globalDir, "worktrees")), []);
+  // Every scratch folder is gone. The repo folder the builder uses stays, empty.
+  const root = join(w.globalDir, "worktrees");
+  assert.deepEqual(await readdir(root), ["repo"]);
+  assert.deepEqual(await readdir(join(root, "repo")), []);
+});
+
+test("the check keeps a repo worktrees folder that holds a real worktree", async () => {
+  const w = await world();
+  const repoRoot = join(w.globalDir, "worktrees", "repo");
+  await mkdir(join(repoRoot, "met-1-real"), { recursive: true });
+  const check = byId(await runStatus(w.options), "harness.claude-code.worktree_write");
+  assert.equal(check.state, "ok", check.detail);
+  assert.deepEqual(await readdir(repoRoot), ["met-1-real"]);
 });
 
 test("a worktrees root the daemon cannot write fails with the reason and the fix", async () => {
   const w = await world();
   const root = join(w.globalDir, "worktrees");
-  await runStatus(w.options); // Creates the root.
+  await runStatus(w.options); // Creates the root and the repo folder.
+  await rm(join(root, "repo"), { recursive: true, force: true });
   await unwritable(root);
   try {
     const check = byId(
@@ -939,10 +951,36 @@ test("a worktrees root the daemon cannot write fails with the reason and the fix
     );
     assert.equal(check.state, "fail");
     assert.match(check.detail, /EACCES|permission denied/i);
-    assert.equal(check.fix, `Make ${root} writable by the daemon user.`);
+    assert.equal(
+      check.fix,
+      `Make ${root} writable by the daemon user, and make ${join(root, "repo")} a folder, not a file.`,
+    );
     assert.ok(isBlocking(check));
   } finally {
     await writable(root);
+  }
+});
+
+test("a file where the builder's repo folder goes fails, with EEXIST and the fix", async () => {
+  const w = await world();
+  const root = join(w.globalDir, "worktrees");
+  const repoRoot = join(root, "repo");
+  await mkdir(root, { recursive: true });
+  await writeFile(repoRoot, "not a folder\n");
+  try {
+    const check = byId(
+      await runStatus({ ...w.options, freshWorktreeWrite: true }),
+      "harness.claude-code.worktree_write",
+    );
+    assert.equal(check.state, "fail");
+    assert.match(check.detail, /EEXIST|file already exists/i);
+    assert.match(check.detail, /worktrees\/repo/);
+    assert.match(check.fix, /make .*worktrees\/repo a folder, not a file/);
+    assert.ok(isBlocking(check));
+    // The check does not delete what it did not make.
+    assert.equal(await readFile(repoRoot, "utf8"), "not a folder\n");
+  } finally {
+    await rm(repoRoot, { force: true });
   }
 });
 
@@ -978,6 +1016,7 @@ test("GET /api/status reuses the worktree-write result for ten minutes; doctor a
   const w = await world();
   const root = join(w.globalDir, "worktrees");
   assert.equal(byId(await runStatus(w.options), "harness.claude-code.worktree_write").state, "ok");
+  await rm(join(root, "repo"), { recursive: true, force: true });
   await unwritable(root);
   try {
     // The cached result stands: a poll makes no worktree.
@@ -1037,7 +1076,7 @@ test("Codex in a sandboxed mode writes through `codex sandbox`, with a fixed arg
   assert.equal(args[args.indexOf("-C") + 1], args[args.indexOf("--") - 1]);
   assert.equal(args[args.indexOf("--") + 1], "/usr/bin/touch", "no shell runs the write");
   assert.ok(!args.includes("-c"), "the built-in profile needs no config overrides");
-  assert.deepEqual(await readdir(root), [], "the scratch worktree is removed");
+  assert.deepEqual(await readdir(join(root, "repo")), [], "the scratch folder is removed");
 });
 
 test("Codex read-only mode runs through the read-only sandbox profile", async () => {

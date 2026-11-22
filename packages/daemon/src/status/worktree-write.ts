@@ -1,5 +1,7 @@
 // The harness worktree-write check (MET-115): inside the harness's own sandbox, can a
 // run write one file in a worktree? It starts no model and spends no tokens (D-023).
+// The check makes the same folder shape as createWorktree: `<root>/<repo>/<branch>`, so
+// a root or a file at `<root>/<repo>` fails here, not in the builder.
 //
 // A harness with no OS sandbox writes as the daemon user, which is what its runs do.
 // Codex reads its sandbox mode from the adapter's argv. A sandboxed Codex runs the
@@ -90,17 +92,20 @@ export interface WorktreeWriteOptions {
 }
 
 async function checkWrite(options: WorktreeWriteOptions): Promise<Check> {
-  const { id, root } = options;
+  const { id, root, name } = options;
+  const repoRoot = join(root, name);
   const sandboxed =
     options.sandboxMode !== undefined && options.sandboxMode !== "danger-full-access";
   const fix = sandboxed
-    ? `Set Codex --sandbox danger-full-access (D-032), or make ${root} writable in the ${options.sandboxMode} sandbox.`
-    : `Make ${root} writable by the daemon user.`;
+    ? `Set Codex --sandbox danger-full-access (D-032), or make ${root} writable in the ${options.sandboxMode} sandbox. Also make ${repoRoot} a folder, not a file.`
+    : `Make ${root} writable by the daemon user, and make ${repoRoot} a folder, not a file.`;
 
   let dir: string | undefined;
   try {
-    await mkdir(root, { recursive: true });
-    dir = await mkdtemp(join(root, `${options.name}-check-`));
+    // The builder makes `<root>/<repo>/<branch>` (createWorktree). The check makes the
+    // same shape, so a file where the repo folder goes fails here, not in the builder.
+    await mkdir(repoRoot, { recursive: true });
+    dir = await mkdtemp(join(repoRoot, "check-"));
     const file = join(dir, WORKTREE_WRITE_FILE);
 
     if (sandboxed) {
