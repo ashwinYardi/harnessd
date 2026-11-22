@@ -52,6 +52,10 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Ship step**: the daemon's commit, push and open or update of the PR after an ok part run (D-039). The agent does no git write and needs no GitHub login. _Avoid_: publish, release.
 
+**Shipped part**: a part whose ship step opened or found its PR (D-039, MET-128). The loop keeps it in In Review until the PR merges or closes, or until a run or a human moves it on. _Avoid_: published part, finished part.
+
+**State repair**: the loop's move of a shipped part with an open PR back to In Review after a Linear automation moved it to In Progress (D-039, MET-128). The loop logs one line. _Avoid_: state fix, resync, revert.
+
 **Kept worktree**: a worktree that the loop does not remove because it holds unshipped work, or because a run was paused, stopped or limited. The next run resumes it on the same branch (D-039). _Avoid_: leftover worktree.
 
 **Unshipped work**: uncommitted changes in a run's worktree, or commits on its branch that are not on `origin/<branch>`. A worktree with unshipped work is kept, not removed (MET-114, docs/LOOP.md "Dispatch"). _Avoid_: dirty tree, local only.

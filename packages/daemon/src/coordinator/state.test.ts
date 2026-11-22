@@ -232,6 +232,7 @@ test("reviewed heads and usage load additively, and an old file still loads", ()
   assert.equal(old.reviewedHeads, undefined);
   assert.equal(old.usage, undefined);
   assert.equal(old.usageBaseline, undefined);
+  assert.equal(old.shipped, undefined);
 
   const next = parseLoopState(
     JSON.stringify({
@@ -242,6 +243,16 @@ test("reviewed heads and usage load additively, and an old file still loads", ()
       },
       usage: { "parent-1": { input: 100, cached: 35, output: 20 } },
       usageBaseline: { "parent-1": { input: 50, cached: 0, output: 5, at: "t" } },
+      shipped: {
+        "part-1": {
+          key: "MET-41",
+          branch: "met-41-ship-it",
+          prUrl: "https://github.test/pull/7",
+          at: "t",
+        },
+        "part-2": { key: "", branch: "met-42", prUrl: "", at: "t" },
+        "part-3": { key: "MET-43", branch: "", prUrl: "", at: "t" },
+      },
     }),
   );
   assert.deepEqual(next.reviewedHeads?.["part-1"], { sha: "sha7", verdict: "approved" });
@@ -255,5 +266,13 @@ test("reviewed heads and usage load additively, and an old file still loads", ()
     cached: 0,
     output: 5,
     at: "t",
+  });
+  assert.deepEqual(next.shipped, {
+    "part-1": {
+      key: "MET-41",
+      branch: "met-41-ship-it",
+      prUrl: "https://github.test/pull/7",
+      at: "t",
+    },
   });
 });

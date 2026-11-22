@@ -3,12 +3,19 @@ Status: accepted 2026-11-22. Issue: MET-109 (part 4, MET-116). Amends D-032 and 
 
 **The ship step.**
 - After a part run ends `ok`, the daemon commits the worktree, pushes the branch and opens or updates the PR. The agent does not commit, push or open a PR.
-- The commit uses the run's excludes file, so generated harness files stay out. The commit subject is `<key>: <title>`; the body is the agent's last message.
+- The commit uses the run's excludes file, so generated harness files stay out. The body is the agent's last message.
+- The commit subject and the PR title are `<part key>: <part title>`. A leading copy of a key of the same team is cut from the part title, so the title names one issue: Linear's GitHub automation moves every issue a PR title names (MET-128). Only a PR the daemon opens gets this title; an existing PR keeps its title.
 - The daemon pushes with `git push -u origin <branch>`. It never force-pushes.
 - The daemon looks for an open PR with the run's head branch. The push updates that PR. If there is no match, the daemon looks for an open PR with the issue key in its title. If that PR has a different head branch, the run fails and reports both branches. The daemon opens a PR with `gh pr create` only if both lookups find no PR. It puts the issue key in the title and uses the agent's last message in the body.
 - A run with no new commit and no commit ahead of base fails as `no changes`. A failed commit or push fails as `push failed: <reason>`. A failed PR fails as `pr failed: <reason>`.
 - A ship failure is a failed run. It counts an attempt, as an error run does. It is never "done, In Review".
 - The QA round keeps its own path: it reads the PR, checks it out and posts the review.
+
+**State repair (MET-128).**
+- After a successful ship, the daemon records the part under `shipped` in `loop.json` and moves it to In Review. The record holds the key, branch, PR url and time.
+- Early in every tick, before dispatch, the loop reads each shipped part once more. One in In Progress, with no run in flight and an open PR on its branch, goes back to In Review, with one log line. A Linear PR-open automation that moves the part to In Progress does not stall QA.
+- A part in a state other than In Progress or In Review drops its record, and so does a part that runs again. An In Progress part whose PR is no longer open drops it too. So the loop never fights a human move, and a part with an in-flight run is never moved.
+- A failed repair move is logged and the record stays; the next tick tries again.
 
 **The keep guard.**
 - `removeWorktree` refuses a worktree with unshipped work: uncommitted changes, or commits that are not on `origin/<branch>`.
@@ -30,5 +37,5 @@ Why:
 
 Consequences:
 - D-032 keeps full access for the agent's build and tests. The agent still needs no git write and no GitHub login to ship.
-- docs/LOOP.md "Dispatch" describes the ship step, the failure texts and the keep guard.
+- docs/LOOP.md "Dispatch" describes the ship step, the failure texts and the keep guard. Its "Ship" section describes the one-key PR title and the state repair.
 - A new term, "ship step", is in `GLOSSARY.md`.

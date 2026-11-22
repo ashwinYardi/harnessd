@@ -580,6 +580,57 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     if (report.requeued.length > 0) await save();
   }
 
+  // --- state repair -------------------------------------------------------
+
+  /**
+   * A Linear GitHub automation can move a part to In Progress when its PR opens, after the
+   * ship step moved it to In Review (MET-128). QA then has nothing to review, so on each
+   * tick the loop reads every shipped part again: one in In Progress, with an open PR and
+   * no run in flight, goes back to In Review, with one line in the log. A part in another
+   * state drops its record, and so does an In Progress part with no open PR. So a human
+   * move to Ready or Needs input is never fought, and a part that runs again is not moved.
+   */
+  async function repairShipped(s: LoopState): Promise<void> {
+    if (s.shipped === undefined) return;
+    let changed = false;
+    for (const [id, record] of Object.entries(s.shipped)) {
+      if (s.inFlight.some((e) => e.issueId === id)) continue;
+      let issue: Issue;
+      try {
+        issue = await linear.getIssue(id);
+      } catch (error) {
+        log(`${record.key}: could not read it for the state check: ${message(error)}`);
+        continue;
+      }
+      const current = issue.state.toLowerCase();
+      if (current === "in review") continue;
+      if (current !== "in progress") {
+        delete s.shipped[id];
+        changed = true;
+        continue;
+      }
+      let open: boolean;
+      try {
+        open = (await github.findPrByHead(record.branch)) !== undefined;
+      } catch (error) {
+        log(`${record.key}: could not read its PR for the state check: ${message(error)}`);
+        continue;
+      }
+      if (!open) {
+        delete s.shipped[id];
+        changed = true;
+        continue;
+      }
+      const moved = await safely(`move ${record.key} to In Review`, () =>
+        linear.moveTo(id, "In Review"),
+      );
+      if (moved) {
+        log(`${record.key}: Linear moved it to In Progress after its PR opened; back to In Review`);
+      }
+    }
+    if (changed) await save();
+  }
+
   // --- dispatch -----------------------------------------------------------
 
   /** Needs input: one comment, the state move and one ping (D-011, D-014). */
@@ -782,6 +833,15 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           shipped = { ok: false, error: `push failed: ${oneLine(message(error))}` };
         }
         if (shipped.ok) {
+          // The part is recorded as shipped before the move, so a Linear automation that moves
+          // it back to In Progress is repaired on the next tick, and a failed move too (MET-128).
+          s.shipped ??= {};
+          s.shipped[entry.issueId] = {
+            key: entry.issueKey,
+            branch: entry.branch,
+            prUrl: shipped.prUrl,
+            at: clock.now().toISOString(),
+          };
           log(`${entry.issueKey}: ${shipped.created ? "opened" : "updated"} PR ${shipped.prUrl}`);
         } else {
           outcome = { ...result, status: "error", error: shipped.error };
@@ -897,6 +957,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       pid,
     };
     s.inFlight.push(entry);
+    // A part that runs again is no longer shipped: its state is not repaired (MET-128).
+    if (s.shipped !== undefined) delete s.shipped[issue.id];
     runTitles.set(issue.id, issue.title);
     runParents.set(issue.id, qa?.parent.id ?? issue.parentId ?? issue.id);
     const fail = (error: unknown): Promise<void> =>
@@ -1594,6 +1656,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       return report;
     }
     s.lastPollAt = clock.now().toISOString();
+    // Before dispatch, so QA can start on the same tick: a shipped part Linear moved back to
+    // In Progress is In Review again (MET-128). It runs while a self-update waits: it starts nothing.
+    await repairShipped(s);
     const up = options.selfUpdate;
     if (pausedSeen) {
       pausedSeen = false;

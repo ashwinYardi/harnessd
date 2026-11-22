@@ -128,6 +128,18 @@ export interface HarnessHold {
   endedAt?: string;
 }
 
+/**
+ * A part whose ship step opened or found its PR. The loop reads it again on each tick, so a
+ * Linear automation that moves it to In Progress does not hide it from QA (MET-128).
+ */
+export interface ShippedPart {
+  key: string;
+  /** The PR's head branch, so the state check can see whether the PR is still open. */
+  branch: string;
+  prUrl: string;
+  at: string;
+}
+
 /** What QA decided about one part at one PR head (D-040). */
 export interface ReviewedHead {
   /** The PR head sha QA read. */
@@ -170,6 +182,8 @@ export interface LoopState {
   limits: Partial<Record<HarnessId, HarnessHold>>;
   /** The PR head QA last judged, per part id (D-040). Optional for old files. */
   reviewedHeads?: Record<string, ReviewedHead>;
+  /** Parts the ship step moved to In Review, per part id (MET-128). Optional for old files. */
+  shipped?: Record<string, ShippedPart>;
   /** Tokens used per parent issue id, across grill, plan, part and QA runs (D-040). */
   usage?: Record<string, TokenSum>;
   /** Usage at the last budget escalation, per parent issue id (D-040). */
@@ -402,6 +416,24 @@ function reviewedHeads(value: unknown): Record<string, ReviewedHead> {
   return out;
 }
 
+function shippedParts(value: unknown): Record<string, ShippedPart> {
+  const out: Record<string, ShippedPart> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const p = raw as Partial<ShippedPart> | null;
+    if (typeof p !== "object" || p === null) continue;
+    if (typeof p.key !== "string" || p.key === "") continue;
+    if (typeof p.branch !== "string" || p.branch === "") continue;
+    out[id] = {
+      key: p.key,
+      branch: p.branch,
+      prUrl: typeof p.prUrl === "string" ? p.prUrl : "",
+      at: typeof p.at === "string" ? p.at : "",
+    };
+  }
+  return out;
+}
+
 function tokenSum(value: unknown): TokenSum | undefined {
   const s = value as Partial<TokenSum> | null;
   if (typeof s !== "object" || s === null) return undefined;
@@ -454,6 +486,7 @@ export function parseLoopState(text: string): LoopState {
     ...(update ? { selfUpdate: update } : {}),
     limits: holds(raw.limits),
     ...(raw.reviewedHeads === undefined ? {} : { reviewedHeads: reviewedHeads(raw.reviewedHeads) }),
+    ...(raw.shipped === undefined ? {} : { shipped: shippedParts(raw.shipped) }),
     ...(raw.usage === undefined ? {} : { usage: usageSums(raw.usage) }),
     ...(raw.usageBaseline === undefined
       ? {}

@@ -3010,6 +3010,37 @@ function onePart(linear: FakeLinear) {
   });
 }
 
+/** A FakeLinear whose next move to In Review waits until the test releases it. */
+class GatedLinear extends FakeLinear {
+  gate: Promise<void> | undefined;
+  /** Resolves once a held move to In Review is waiting. */
+  held: Promise<void> = Promise.resolve();
+  #release: () => void = () => {};
+  #entered: () => void = () => {};
+
+  holdNextInReview(): void {
+    this.gate = new Promise((resolve) => {
+      this.#release = resolve;
+    });
+    this.held = new Promise((resolve) => {
+      this.#entered = resolve;
+    });
+  }
+
+  releaseGate(): void {
+    this.#release();
+    this.gate = undefined;
+  }
+
+  override async moveTo(issueId: string, state: WorkflowStateName): Promise<void> {
+    if (state === "In Review" && this.gate !== undefined) {
+      this.#entered();
+      await this.gate;
+    }
+    return super.moveTo(issueId, state);
+  }
+}
+
 test("a Codex part run gets a commit, a push and a PR, then goes to In Review", async () => {
   const r = await shipRepo();
   const linear = new FakeLinear();
@@ -3047,6 +3078,99 @@ test("a Codex part run gets a commit, a push and a PR, then goes to In Review", 
     localHead,
     "the daemon committed",
   );
+});
+
+test("a part Linear moved to In Progress after its PR opened goes back to In Review on the next tick", async () => {
+  const t = setup();
+  const part = onePart(t.linear);
+
+  await t.loop.tick();
+  t.gh.open(part.key, 7);
+  t.adapter.pending[0]?.finish("ok");
+  await t.loop.idle();
+  assert.equal(part.state, "In Review");
+  assert.equal(t.memory.state.shipped?.[part.id]?.key, part.key, "the part is recorded as shipped");
+
+  // Linear's GitHub link moves the issue when the PR opens, a second after the ship step.
+  part.state = "In Progress";
+  await t.loop.tick();
+
+  assert.equal(part.state, "In Review");
+  const line = `${part.key}: Linear moved it to In Progress after its PR opened; back to In Review`;
+  assert.deepEqual(
+    t.logs.filter((l) => l === line),
+    [line],
+    "one line, once",
+  );
+  assert.ok(t.memory.state.shipped?.[part.id], "the record stays for the next check");
+});
+
+test("a part with an in-flight run is never moved back to In Review", async () => {
+  const linear = new GatedLinear();
+  const t = setup({ linear });
+  const part = onePart(linear);
+
+  await t.loop.tick();
+  t.gh.open(part.key, 7);
+  // The run's own move to In Review waits, so the run stays in flight.
+  linear.holdNextInReview();
+  t.adapter.pending[0]?.finish("ok");
+  await linear.held;
+  assert.deepEqual(t.loop.running(), [part.key]);
+  assert.deepEqual(
+    t.memory.state.inFlight.map((e) => e.issueKey),
+    [part.key],
+  );
+  assert.equal(part.state, "In Progress");
+
+  await t.loop.tick();
+  assert.equal(part.state, "In Progress", "the run is not moved");
+  assert.ok(!t.logs.some((l) => l.includes("after its PR opened")));
+
+  linear.releaseGate();
+  await t.loop.idle();
+  assert.equal(part.state, "In Review");
+});
+
+test("a shipped part in In Progress whose PR is no longer open is not moved", async () => {
+  const t = setup();
+  const part = onePart(t.linear);
+  await t.loop.tick();
+  t.gh.open(part.key, 7);
+  t.adapter.pending[0]?.finish("ok");
+  await t.loop.idle();
+  assert.equal(part.state, "In Review");
+
+  // The PR is closed without a merge, and Linear moves the part to In Progress.
+  delete t.gh.prs[part.key];
+  part.state = "In Progress";
+  await t.loop.tick();
+
+  assert.equal(part.state, "In Progress", "no open PR, no move");
+  assert.equal(t.memory.state.shipped?.[part.id], undefined, "the record is dropped");
+  assert.ok(!t.logs.some((l) => l.includes("after its PR opened")));
+});
+
+test("a shipped part a human moved to Ready drops its record and is not moved", async () => {
+  const t = setup();
+  const part = onePart(t.linear);
+  t.gh.open(part.key, 7);
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish("ok");
+  await t.loop.idle();
+  assert.equal(part.state, "In Review");
+
+  // A human moves it back for a rerun; a blocker keeps dispatch off it this tick.
+  part.state = "Ready";
+  const blocker = t.linear.add({ title: "Blocker", state: "In Progress" });
+  t.linear.relations.push({ blocker: blocker.id, blocked: part.id });
+  const moves = t.linear.moves.length;
+  await t.loop.tick();
+
+  assert.equal(part.state, "Ready");
+  assert.deepEqual(t.linear.moves.slice(moves), [], "the loop does not move it");
+  assert.equal(t.memory.state.shipped?.[part.id], undefined, "the record is dropped");
+  assert.ok(!t.logs.some((l) => l.includes("after its PR opened")));
 });
 
 test("a run with no changes fails as no changes and does not go to In Review", async () => {
