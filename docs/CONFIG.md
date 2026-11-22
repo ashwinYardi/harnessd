@@ -160,6 +160,16 @@ model = "opencode-go/deepseek-v4.1-flash#high"   # optional, passed as -m
   3. else `opencode` on PATH.
 - Sign in to each provider with `opencode auth login`. The minimum tested version is 2.0.20.
 
+Set `[agents.<name>.opencode_permission]` to override the OpenCode permissions for one run agent.
+
+```toml
+[agents.backend.opencode_permission]
+websearch = "deny"
+bash = { "npm publish *" = "deny" }
+```
+
+Each tool takes `"allow"`, `"deny"`, or a table of patterns with those actions. Config rejects `"ask"`. Workspace values override global values. Pattern tables merge by pattern. Worktree sync merges the result over the defaults. A plain `harnessd sync` uses the defaults.
+
 ## skills/<folder>/SKILL.md
 Optional frontmatter with `name` (defaults to the folder name) and `description`. Sync copies other frontmatter keys (such as `disable-model-invocation`) as they are. The frontmatter is flat `key: value` lines; indented lines continue the previous value. Sync copies every other file in the folder too.
 

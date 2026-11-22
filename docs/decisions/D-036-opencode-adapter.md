@@ -12,14 +12,30 @@ opencode run --format json --standalone --auto [-m <provider>/<model>[#variant]]
 ```
 - `--format json` gives the event stream that the adapter maps to `AdapterEvent`s.
 - `--standalone` starts a private server for this run. Without it, the run attaches to the owner's background service, which has the owner's config and state.
-- `--auto` approves every permission that is not explicitly denied. No human is there to answer a prompt.
+- `--auto` lets OpenCode approve pending permission requests. This includes requests for unlisted tools such as MCP tools.
 - `-m` is set only when the agent config sets `model`. The `#variant` part (for example `#high`) sets the thinking level. OpenCode 2.x has no separate `--variant` flag; `-m` takes `provider/model#variant`.
 - `--` ends the flags, so a prompt that starts with `-` is not read as a flag.
 - The run never passes `--continue`, `--session` or `--fork`. Each task is a new session.
 
 **No sandbox.**
-- `--auto` with no OS sandbox is acceptable. Claude Code runs have no OS sandbox either (D-031), and Codex runs use full access (D-032 amendment).
+- OpenCode runs without an OS sandbox, as do Claude Code (D-031) and Codex (D-032 amendment).
 - Each agent still works in its own worktree (D-012).
+
+## Permissions and input requests (MET-118)
+
+D-038 extends the OpenCode sync ownership in D-037. Sync also owns `permission` and `websearch` in `opencode.json`. Sync writes `websearch = { "provider": "random" }` to avoid the provider consent form. We checked this setting on OpenCode 2.3.2.
+
+| Tool or permission | Default |
+| --- | --- |
+| `read`, `edit`, `glob`, `grep`, `list`, `lsp`, `skill`, `task`, `todowrite`, `webfetch`, `websearch` | Allow |
+| `bash` | Allow `*`. Deny `git push *`. |
+| `external_directory`, `question`, `doom_loop` | Deny |
+
+Owner sync writes the defaults. Worktree sync merges `[agents.<name>.opencode_permission]` over them. Each action is `allow` or `deny`. A move to the OpenCode 2.3.x `permissions` ruleset is a follow-up.
+
+OpenCode handles permission requests and forms inside the CLI. OpenCode cancels unsupported input forms, emits a JSON error with the form title, and exits 1 after the session goes idle. The adapter logs the cancellation in one line. It accepts exit 1 when a step started and the cancellation was the only error. A later failure still determines the result.
+
+Bash can reach paths outside the worktree. OpenCode runs without an OS sandbox, as do Claude Code and Codex.
 
 **Isolation (D-031).**
 - `OPENCODE_CONFIG_DIR` points to a new, empty temp folder per run. With `--standalone`, it replaces `~/.config/opencode` as the global config folder. So the owner's `opencode.json`, agents, MCP servers and global `AGENTS.md` do not load. The adapter deletes the folder when the run ends.
@@ -32,16 +48,16 @@ opencode run --format json --standalone --auto [-m <provider>/<model>[#variant]]
 **The gap.**
 - OpenCode 2.0.20 still loads skills from `~/.claude/skills` and `~/.agents/skills`. It has no switch that skips them. A follow-up issue tracks this.
 - Impeccable hooks (D-028) do not run under OpenCode. OpenCode uses JS plugins, not `hooks.json`. A follow-up issue tracks an OpenCode plugin for skill hooks.
-- Sync does not yet write an OpenCode MCP config, so the run has no `harnessd-memory` server. The run reads `AGENTS.md` and the project skill folders. MET-71 part 2 covers the sync.
+- Sync writes OpenCode MCP entries, including `harnessd-memory` (D-037). The run reads `AGENTS.md` and the project skill folders.
 
 **Events.**
 - `text` gives a `text` event. The last text is `finalText`.
 - `tool_use` gives a `tool` event with the tool name and a one-line summary of its input, once per call id. A failed tool call adds its error to the summary; the run goes on.
 - `step_finish` gives a `usage` event with running totals.
 - `sessionID` on any event gives `sessionId`.
-- `error` sets the failure. The first error wins.
+- The first `error` that reports a failure wins. Cancelled input is a log event.
 - Any other line, such as `reasoning`, goes to the log.
-- OpenCode 2.0.20 exits before it prints the `step_finish` of the last step. So the run counts a step at `step_start`. The run is ok with at least one step, no `error` event and exit code 0. The last step's tokens and cost are lost; the totals are low by that step.
+- OpenCode 2.0.20 exits before it prints the `step_finish` of the last step. So the run counts a step at `step_start`. A run needs at least one step, no failure, and an exit code that indicates success or a cancelled input request. The last step's tokens and cost are lost; the totals are low by that step.
 
 **Usage and cost.**
 - `tokens.input` already excludes cache reads, so the adapter takes it as it is. A real 2.0.20 run showed it: a step with 11968 cached tokens reported fewer input tokens than that. The brief said to subtract cache reads; that would count the input twice down to zero. `cacheRead` and `cacheWrite` come from `tokens.cache`. Output tokens include reasoning tokens.

@@ -300,10 +300,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   async function prepareWorktree(
     worktree: string,
     runId: string,
+    agent: ResolvedAgentConfig,
   ): Promise<Record<string, string> | undefined> {
     if (globalDir === undefined) return undefined;
     try {
-      return (await syncWorktree({ repoDir, globalDir, worktree, runId })).env;
+      return (await syncWorktree({ repoDir, globalDir, worktree, runId, agent })).env;
     } catch (error) {
       throw new Error(`harnessd sync into the worktree failed: ${message(error)}`);
     }
@@ -771,7 +772,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       if (kept?.worktree === worktree.path) prompt += `\n\n${RESUMED_RUN_NOTE}`;
       const id = `${issue.key}-${(s.attempts[issue.id] ?? 0) + 1}`;
       // Before the agent starts, never in the adapter (D-002). A failure fails the run.
-      const env = await prepareWorktree(worktree.path, id);
+      const env = await prepareWorktree(worktree.path, id, agent);
       if (env !== undefined) runEnvs.set(issue.id, env);
       const task: Task = {
         id,
@@ -909,7 +910,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
               : {
                   // runQa wraps a throw in the same "sync failed" message as a part run.
                   prepare: async (worktree, runId) =>
-                    (await syncWorktree({ repoDir, globalDir, worktree, runId })).env,
+                    (await syncWorktree({ repoDir, globalDir, worktree, runId, agent })).env,
                 }),
             ...(memory ? { memory } : {}),
             log,

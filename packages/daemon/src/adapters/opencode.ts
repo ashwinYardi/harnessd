@@ -2,6 +2,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import {
   type AdapterEvent,
   type AdapterRun,
@@ -37,7 +38,7 @@ export interface OpenCodeOptions {
  */
 export function openCodeArgs(task: Task, options: OpenCodeOptions = {}): string[] {
   // --standalone: a private server for this run, not the owner's background service.
-  // --auto: nobody is there to approve a permission prompt (D-036, as D-031 for Claude).
+  // --auto answers pending permission requests inside the CLI.
   const args = ["run", "--format", "json", "--standalone", "--auto"];
   const model = task.model ?? options.model;
   if (model) args.push("-m", model);
@@ -121,6 +122,8 @@ interface Failure {
   retryAfterMs?: number;
 }
 
+const CANCELLED_INPUT = "Cancelled a request for input this run cannot answer:";
+
 /** Turns `opencode run --format json` lines into adapter events and tracks run totals. */
 class OpenCodeJsonParser implements LineParser {
   #emit: (event: AdapterEvent) => void;
@@ -129,8 +132,10 @@ class OpenCodeJsonParser implements LineParser {
   #tokens = emptyTokenUsage();
   #cost: number | undefined;
   #steps = 0;
+  #cancelledInput = false;
   #failure: Failure | undefined;
   #lastStderr: string | undefined;
+  #stderrError: string | undefined;
   /** Tool calls already shown, so a call is shown once. */
   #shown = new Set<string>();
 
@@ -152,7 +157,9 @@ class OpenCodeJsonParser implements LineParser {
   }
 
   stderr(line: string): void {
-    if (line.trim() !== "") this.#lastStderr = line.trim();
+    const message = stripVTControlCharacters(line).trim();
+    if (message !== "") this.#lastStderr = message;
+    if (message.startsWith("Error: ")) this.#stderrError ??= message;
   }
 
   outcome(exitCode: number | null): ParsedOutcome {
@@ -162,17 +169,30 @@ class OpenCodeJsonParser implements LineParser {
     if (this.#sessionId !== undefined) out.sessionId = this.#sessionId;
     if (this.#finalText !== undefined) out.finalText = this.#finalText;
     let failure = this.#failure;
-    if (failure === undefined && (!ok || exitCode !== 0) && this.#lastStderr !== undefined) {
-      failure = { message: this.#lastStderr };
+    if (failure === undefined && (!ok || exitCode !== 0)) {
+      const message = this.#stderrError ?? this.#lastStderr;
+      if (message !== undefined) failure = { message };
+    }
+    const reason =
+      failure === undefined
+        ? undefined
+        : ((failure.type === undefined ? undefined : TYPED_REASON[failure.type]) ??
+          openCodeFailureReason(failure.message));
+    if (
+      ok &&
+      this.#cancelledInput &&
+      exitCode === 1 &&
+      this.#stderrError === undefined &&
+      reason === undefined
+    ) {
+      out.exitExplained = true;
+      return out;
     }
     if (failure === undefined) {
       if (exitCode !== 0) out.error = `exited with code ${exitCode}`;
       else if (this.#steps === 0) out.error = "no step event";
       return out;
     }
-    const reason =
-      (failure.type === undefined ? undefined : TYPED_REASON[failure.type]) ??
-      openCodeFailureReason(failure.message);
     if (reason === undefined) {
       out.error = failure.message;
       return out;
@@ -261,11 +281,17 @@ class OpenCodeJsonParser implements LineParser {
   }
 
   #error(error: unknown): void {
-    // The first error is the cause; later ones (such as an abort) follow from it.
-    if (this.#failure !== undefined) return;
     const e = isRecord(error) ? error : {};
     const message =
       typeof e.message === "string" && e.message !== "" ? e.message : "harness reported an error";
+    if (message.startsWith(CANCELLED_INPUT)) {
+      this.#cancelledInput = true;
+      const title = message.slice(CANCELLED_INPUT.length).trim();
+      this.#raw(`${oneLine(title)} request cancelled; the run goes on`);
+      return;
+    }
+    // Keep the first failure. Cancelled input is only a log event.
+    if (this.#failure !== undefined) return;
     const failure: Failure = { message };
     if (typeof e.type === "string") failure.type = e.type;
     const retry = e.retryAfterMs ?? (isRecord(e.rateLimit) ? e.rateLimit.retryAfterMs : undefined);
