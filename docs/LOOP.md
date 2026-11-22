@@ -64,20 +64,27 @@ When the split is done, the parent moves to In Progress.
   - uses the adapter for its agent's harness;
   - gets a prompt made of the agent's layered instructions plus the sub-issue body;
   - runs within the budget for its size.
-- The prompt tells the agent to commit, run `git push -u origin <branch>` and run `gh pr create`, with the sub-issue key in the PR title. A part that QA sent back gets the failing items and is told to push to its open PR instead.
+- The prompt tells the agent to edit and test in the worktree only. It does not commit, push or open the PR: the daemon ships the work after the run (D-039). A part that QA sent back gets the failing items and works on its open PR.
 - A QA sub-issue runs the QA round below instead of a single agent run.
 - When the sub-issue starts it moves to In Progress. When the run finishes:
 
 | Result | What happens |
 |---|---|
-| ok | The sub-issue moves to In Review. |
+| ok | The daemon ships the run (see Ship). The sub-issue then moves to In Review. |
 | error or timeout, first time | A comment is posted and the sub-issue goes back to Ready for one retry. |
 | error or timeout, second time | A comment is posted, the sub-issue moves to Needs input and one notice is sent. |
 | cancelled | The sub-issue goes back to Ready. No attempt is counted. |
 | limited | The harness hit a usage or rate limit. The sub-issue goes back to Ready. No attempt is counted. |
 | cancelled by a pause | The worktree is kept. See Pause. |
 
-The worktree is removed after a run when it holds no unshipped work. A worktree with **uncommitted changes** or **commits not on the remote** is kept, with one comment: "worktree kept at <path>: uncommitted changes" or "…: commits not on the remote". It is listed under `interrupted`, so the next run resumes it on the same branch. If the issue was renamed, the branch changed and the old worktree cannot be resumed; it is still kept and commented on. A pause keeps its worktree too (see Pause). A QA PR-head checkout is a scratch tree; it is removed after the round when it is clean, and kept with its reason when it holds unshipped work. A branch deleted on the remote counts as unshipped: the guard asks the remote, not the local tracking ref.
+**Ship.** After an `ok` part run, the daemon ships the work before it moves the sub-issue to In Review (D-039).
+- It commits the worktree with the run's excludes file, so generated files stay out of the commit. The commit subject is `<key>: <title>` and the body is the agent's last message.
+- It compares the branch with the remote default branch (`origin/main` or `origin/master`). With no new commit and no commit ahead of base, the run fails as `no changes`.
+- It pushes with `git push -u origin <branch>`. It never force-pushes.
+- The daemon looks for an open PR with the run's head branch. The push updates that PR. If there is no match, the daemon looks for an open PR with the issue key in its title. If that PR has a different head branch, the run fails and reports both branches. The daemon opens a PR with `gh pr create` only if both lookups find no PR. It puts the issue key in the title and uses the agent's last message in the body.
+- A failed commit or push fails the run as `push failed: <reason>`. A failed PR fails it as `pr failed: <reason>`, and a run with nothing to ship fails as `no changes`. Such a run is never "done, In Review": it counts an attempt, as an error run does.
+
+The worktree is removed after a run when it holds no unshipped work. A worktree with **uncommitted changes** or **commits not on the remote** is kept, with one Linear comment: "worktree kept at <path>: uncommitted changes" or "…: commits not on the remote". It is listed under `interrupted`, so the next run resumes it on the same branch. If the issue was renamed, the branch changed and the old worktree cannot be resumed; it is still kept and commented on. A pause keeps its worktree too (see Pause). The keep guard also applies to a QA PR-head scratch checkout. If the checkout has no remote branch, the guard asks each remote for its live branch heads (`git ls-remote`), because a local tracking ref can outlive a deleted branch. If no live head holds the checkout's HEAD, or the remote cannot be reached, the daemon keeps the checkout and reports "commits not on the remote".
 
 ## What an agent run sees
 A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch already exists on the remote (a part QA sent back), so it holds only what the repo commits. harnessd fills in the rest before the agent starts.
@@ -165,7 +172,7 @@ The whole round runs within the QA sub-issue's size budget. Failures are counted
 ## Usage limits
 A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.
 
-- **Part run.** The worktree is removed when it holds no unshipped work (see Dispatch), and the sub-issue goes back to Ready. No attempt is counted and no comment is posted.
+- **Part run.** The worktree is removed when it holds no unshipped work, or kept with its keep comment when it holds some (see Dispatch). The sub-issue goes back to Ready. No attempt is counted and no other comment is posted.
 - **QA run.** See QA: no review and no QA failure.
 - **Grill or plan run.** Nothing is written, nothing escalates and the issue stays in Ready. A limited plan is not replaced by the fallback plan.
 
