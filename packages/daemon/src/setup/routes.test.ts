@@ -60,14 +60,14 @@ const CHECKS: Check[] = [
   },
 ];
 
-async function serve(extra: Partial<SetupOptions> = {}) {
+async function serve(extra: Partial<SetupOptions> = {}, workspace = WORKSPACE) {
   const root = await mkdtemp(join(tmpdir(), "harnessd-setup-"));
   roots.push(root);
   const repoDir = join(root, "repo");
   const globalDir = join(root, "global");
   await mkdir(join(repoDir, ".harnessd"), { recursive: true });
   await mkdir(globalDir, { recursive: true });
-  await writeFile(join(repoDir, ".harnessd", "config.toml"), WORKSPACE);
+  await writeFile(join(repoDir, ".harnessd", "config.toml"), workspace);
   await writeFile(join(globalDir, "config.toml"), "# Machine settings.\n[daemon]\nport = 4747\n");
   const runs: string[] = [];
   const syncs: string[] = [];
@@ -151,6 +151,25 @@ test("GET /api/harnesses has one card per harness, from the status checks", asyn
       update: "npm install -g @anthropic-ai/claude-code@latest",
       signin: "claude auth login",
     });
+  } finally {
+    await s.close();
+  }
+});
+
+test("a fallback harness is required in setup, because the status engine checks it", async () => {
+  const s = await serve({}, `${WORKSPACE}fallback_harness = "codex"\n`);
+  try {
+    const body = (await s.get("/api/harnesses")) as {
+      harnesses: Array<{ id: string; required: boolean }>;
+    };
+    assert.deepEqual(
+      body.harnesses.map((h) => [h.id, h.required]),
+      [
+        ["claude-code", true],
+        ["codex", true],
+        ["opencode", false],
+      ],
+    );
   } finally {
     await s.close();
   }

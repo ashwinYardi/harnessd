@@ -436,9 +436,11 @@ function HarnessCardView({
     ? "Not found"
     : !s.signedIn
       ? "Not signed in"
-      : s.warning
-        ? "Known bad version"
-        : "Ready";
+      : s.worktreeWrite
+        ? "Cannot write worktrees"
+        : s.warning
+          ? "Known bad version"
+          : "Ready";
   const primary: HarnessAction | undefined = !s.found
     ? "install"
     : !s.signedIn && !perProvider
@@ -500,6 +502,14 @@ function HarnessCardView({
             )}
           </dd>
         </dl>
+        {s.worktreeWrite && (
+          <p
+            className="rounded-lg bg-error-surface px-3 py-2 text-destructive-foreground text-xs"
+            role="alert"
+          >
+            {sentence(s.worktreeWrite.reason)} {s.worktreeWrite.fix}
+          </p>
+        )}
         {s.warning && (
           <p
             className="rounded-lg bg-warning-surface px-3 py-2 text-warning-foreground text-xs"
