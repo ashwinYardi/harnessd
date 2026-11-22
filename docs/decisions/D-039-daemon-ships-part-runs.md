@@ -14,7 +14,7 @@ Status: accepted 2026-11-22. Issue: MET-109 (part 4, MET-116). Amends D-032 and 
 - `removeWorktree` refuses a worktree with unshipped work: uncommitted changes, or commits that are not on `origin/<branch>`.
 - The loop keeps that worktree, lists it under `interrupted`, and posts one Linear comment: "worktree kept at <path>: uncommitted changes" or "…: commits not on the remote". The next run resumes it on the same branch.
 - The guard runs on every removal, so a failed, cancelled or limited run keeps its worktree too when it holds unshipped work. The keep comment is the only comment such a run posts.
-- The daemon removes a QA PR-head scratch checkout only if it has no uncommitted changes and no commits ahead of its remote branch. If there is no remote branch, the guard checks only for uncommitted changes, because the detached PR head can come from a fork.
+- The keep guard also applies to a QA PR-head scratch checkout. If the checkout has no remote branch, the guard checks whether every commit is reachable from a remote-tracking ref. If a commit is missing from all those refs, the daemon keeps the checkout and reports "commits not on the remote".
 - A run that a pause (D-014) or a self-update (D-033) stopped keeps its worktree.
 
 **The `harness.<id>.worktree_write` check.**
