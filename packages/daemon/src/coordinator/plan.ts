@@ -56,7 +56,7 @@ export type ParsedPlanReply =
 /** The JSON shape the coordinator must reply with. */
 export const PLAN_REPLY_SHAPE = `{
   "parts": [{ "role": "backend" | "frontend", "title": "string", "prompt": "string", "size": "S" | "M" }],
-  "reason": "why the issue needs more than one part (required when it has more than one)"
+  "reason": "why the issue needs more than one part (only for a plan with more than one part; leave it out for a one-part plan)"
 }`;
 
 type Obj = Record<string, unknown>;
@@ -86,10 +86,11 @@ export function parsePlanReply(text: string): ParsedPlanReply {
   }
   let reason: string | undefined;
   if (value.reason !== undefined) {
-    if (typeof value.reason !== "string" || value.reason.trim() === "") {
-      return { ok: false, error: "reason: expected a non-empty string" };
+    if (typeof value.reason !== "string") {
+      return { ok: false, error: "reason: expected a string" };
     }
-    reason = value.reason.trim();
+    const trimmed = value.reason.trim();
+    if (trimmed !== "") reason = trimmed;
   }
   if (value.parts.length > 1 && reason === undefined) {
     return {
@@ -174,7 +175,7 @@ export function buildPlanPrompt({ issue, context, instructions, calls }: PlanPro
       "- Plan ONE part by default: one part is one PR. Split only when the issue's Size is L, or one part cannot fit the M budget (about 2 hours).",
       "- Only plan parts with real work. An issue with no UI work gets no frontend part; one with only UI work gets no backend part.",
       "- Each part is size S (about 30 minutes) or M (about 2 hours). L is not allowed: split larger work into more parts (D-014).",
-      '- When you plan more than one part, "reason" must say why the issue cannot ship as one part. A plan with more than one part and no reason is invalid.',
+      '- When you plan more than one part, "reason" must say why the issue cannot ship as one part. A plan with more than one part and no reason is invalid. For a one-part plan, leave out "reason".',
       "- Do not plan QA; harnessd adds the QA part itself.",
       '- "prompt" is the full brief for the agent: what to change, where, and which "Done when" items it covers.',
       "You may read files in this repo; do not edit anything.",
