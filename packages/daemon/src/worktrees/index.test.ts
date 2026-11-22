@@ -270,6 +270,36 @@ describe("worktrees", () => {
     assert.ok(existsSync(join(wt.path, "local-only.txt")));
   });
 
+  test("a detached scratch checkout is kept after its remote branch is deleted", async () => {
+    const source = await createWorktree({ repoDir, issueKey: nextKey(), title: "QA source", root });
+    git(source.path, "commit", "-q", "--allow-empty", "-m", "PR head");
+    const sha = git(source.path, "rev-parse", "HEAD");
+    git(source.path, "push", "-q", "origin", source.branch);
+
+    const wt = await checkoutWorktree({
+      repoDir,
+      issueKey: nextKey(),
+      title: "QA checkout",
+      branch: source.branch,
+      sha,
+      root,
+    });
+    git(origin, "branch", "-D", source.branch);
+    assert.equal(git(repoDir, "rev-parse", `refs/remotes/origin/${source.branch}`), sha);
+
+    const result = await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
+
+    assert.deepEqual(result, { removed: false, kept: "commits not on the remote" });
+    assert.equal(git(wt.path, "rev-parse", "HEAD"), sha);
+
+    git(source.path, "push", "-q", "origin", "HEAD:refs/heads/qa-republished");
+    assert.deepEqual(await removeWorktree({ repoDir, path: wt.path, root, scratch: true }), {
+      removed: true,
+    });
+    assert.equal(existsSync(wt.path), false);
+    git(origin, "branch", "-D", "qa-republished");
+  });
+
   test("a branch deleted on the remote leaves its commits unsent", async () => {
     const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "deleted", root });
     await writeFile(join(wt.path, "deleted.txt"), "remote branch deleted\n");

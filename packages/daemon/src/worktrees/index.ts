@@ -495,7 +495,7 @@ export interface RemoveWorktreeResult {
  * work counts only when it is not on the remote branch; with no remote branch, every
  * commit ahead of base is unshipped. A scratch checkout is detached from a PR head, so
  * its commits may live on a fork: it is judged on the remote branch when one exists,
- * and otherwise on whether any remote ref holds its commits.
+ * and otherwise on whether any live remote branch holds its commits.
  */
 async function keepReason(
   repoDir: string,
@@ -520,9 +520,15 @@ async function keepReason(
     return (await commitsAhead(path, remoteHead)) > 0 ? "commits not on the remote" : undefined;
   }
   if (scratch) {
-    // No remote branch to judge by: any commit that no remote ref holds is unpushed.
-    const unpushed = await git(path, ["rev-list", "-n", "1", "HEAD", "--not", "--remotes"]);
-    return unpushed.trim() === "" ? undefined : "commits not on the remote";
+    // A tracking ref can outlive a deleted branch. Check the live heads instead.
+    const remotes = (await git(repoDir, ["remote"])).trim().split("\n").filter(Boolean);
+    for (const remote of remotes) {
+      const heads = await git(repoDir, ["ls-remote", "--heads", remote]).catch(() => "");
+      for (const sha of new Set(heads.match(/^[0-9a-f]{40}(?=\t)/gm))) {
+        if (await isAncestor(path, "HEAD", sha)) return undefined;
+      }
+    }
+    return "commits not on the remote";
   }
   for (const ref of [`origin/${base}`, base]) {
     if (await refExists(repoDir, ref)) {
