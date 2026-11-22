@@ -1,5 +1,5 @@
-# D-038 The daemon ships every part run; agents get no git write and no GitHub login
-Status: accepted 2026-11-21. Issue: MET-109 (part 4, MET-116). Amends D-032 and docs/LOOP.md.
+# D-039 The daemon ships every part run; agents get no git write and no GitHub login
+Status: accepted 2026-11-22. Issue: MET-109 (part 4, MET-116). Amends D-032 and docs/LOOP.md.
 
 **The ship step.**
 - After a part run ends `ok`, the daemon commits the worktree, pushes the branch and opens or updates the PR. The agent does not commit, push or open a PR.
@@ -13,12 +13,13 @@ Status: accepted 2026-11-21. Issue: MET-109 (part 4, MET-116). Amends D-032 and 
 **The keep guard.**
 - `removeWorktree` refuses a worktree with unshipped work: uncommitted changes, or commits that are not on `origin/<branch>`.
 - The loop keeps that worktree, lists it under `interrupted`, and posts one Linear comment: "worktree kept at <path>: uncommitted changes" or "…: commits not on the remote". The next run resumes it on the same branch.
+- The guard runs on every removal, so a failed, cancelled or limited run keeps its worktree too when it holds unshipped work. The keep comment is the only comment such a run posts.
 - A QA PR-head checkout is a scratch tree. It holds no branch work, so the guard does not keep it.
 - A run that a pause (D-014) or a self-update (D-033) stopped keeps its worktree.
 
 **The `harness.<id>.worktree_write` check.**
 - Each harness an agent uses gets a `harness.<id>.worktree_write` check. Setup and doctor run it.
-- The check writes a file in a temp worktree from inside that harness's sandbox, then reads it back. It needs no token and no GitHub login.
+- The check writes one file in a scratch folder under the worktrees root from inside that harness's sandbox, then checks with `access()` that the file is there. It needs no token and no GitHub login.
 - A fail names the reason and the fix. So a sandbox that blocks a worktree write fails loudly before a run.
 
 Why:

@@ -64,7 +64,7 @@ When the split is done, the parent moves to In Progress.
   - uses the adapter for its agent's harness;
   - gets a prompt made of the agent's layered instructions plus the sub-issue body;
   - runs within the budget for its size.
-- The prompt tells the agent to edit and test in the worktree only. It does not commit, push or open the PR: the daemon ships the work after the run (D-038). A part that QA sent back gets the failing items and works on its open PR.
+- The prompt tells the agent to edit and test in the worktree only. It does not commit, push or open the PR: the daemon ships the work after the run (D-039). A part that QA sent back gets the failing items and works on its open PR.
 - A QA sub-issue runs the QA round below instead of a single agent run.
 - When the sub-issue starts it moves to In Progress. When the run finishes:
 
@@ -77,7 +77,7 @@ When the split is done, the parent moves to In Progress.
 | limited | The harness hit a usage or rate limit. The sub-issue goes back to Ready. No attempt is counted. |
 | cancelled by a pause | The worktree is kept. See Pause. |
 
-**Ship.** After an `ok` part run, the daemon ships the work before it moves the sub-issue to In Review (D-038).
+**Ship.** After an `ok` part run, the daemon ships the work before it moves the sub-issue to In Review (D-039).
 - It commits the worktree with the run's excludes file, so generated files stay out of the commit. The commit subject is `<key>: <title>` and the body is the agent's last message.
 - It compares the branch with the remote default branch (`origin/main` or `origin/master`). With no new commit and no commit ahead of base, the run fails as `no changes`.
 - It pushes with `git push -u origin <branch>`. It never force-pushes.
@@ -172,7 +172,7 @@ The whole round runs within the QA sub-issue's size budget. Failures are counted
 ## Usage limits
 A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.
 
-- **Part run.** The worktree is removed when it holds no unshipped work (see Dispatch), and the sub-issue goes back to Ready. No attempt is counted and no comment is posted.
+- **Part run.** The worktree is removed when it holds no unshipped work, or kept with its keep comment when it holds some (see Dispatch). The sub-issue goes back to Ready. No attempt is counted and no other comment is posted.
 - **QA run.** See QA: no review and no QA failure.
 - **Grill or plan run.** Nothing is written, nothing escalates and the issue stays in Ready. A limited plan is not replaced by the fallback plan.
 
