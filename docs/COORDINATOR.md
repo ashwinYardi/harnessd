@@ -64,3 +64,11 @@ These run in this order. If one fails, the steps after it are skipped and the ou
 Term notes and drafts are never overwritten. A sink without `term` or `draft` skips them; the comment still lists them.
 
 On `proceed`, the issue's state is left alone; the loop goes on to split and assign the issue (docs/LOOP.md).
+
+## Split (D-040)
+After the grill, the coordinator plans the parts. The plan prompt asks for **one part by default**: one part is one PR. It allows more parts only when the issue's Size is L, or when one part cannot fit the M budget (about 2 hours).
+
+- The reply has an optional `reason`. A plan with more than one part **must** state why the issue cannot ship as one part. A multi-part plan with no reason is invalid and the loop uses the one-part fallback.
+- The split comment on the parent lists the parts and the QA sub-issue, then `Reason for more than one part: …`.
+- Parts of a split issue run one after another (docs/LOOP.md "Dispatch"). Each part blocks the next, so only one PR of the parent is open at a time.
+- `MAX_PLAN_PARTS` still caps a plan, and an L part is refused: the issue goes to Needs input (D-014).

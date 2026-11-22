@@ -18,7 +18,7 @@
     "build": "tsc -p tsconfig.build.json && vite build",
     "dev": "vite",
     "demo": "node scripts/demo.ts",
-    "typecheck": "tsc --noEmit && tsc -p app/tsconfig.json",
+    "typecheck": "tsc --noEmit && tsc -p app/tsconfig.json && tsc -p tsconfig.scripts.json",
     "test": "node --test \"src/**/*.test.ts\" \"app/src/**/*.test.ts\""
   },
   "devDependencies": {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BoardIssue } from "@harnessd/shared";
-import { groupBoard } from "./board.ts";
+import { groupBoard, tokenCount, tokenTooltip } from "./board.ts";
 
 const issue = (key: string, state: string, extra: Partial<BoardIssue> = {}): BoardIssue => ({
   id: key,
@@ -45,4 +45,11 @@ test("groupBoard keeps the order it is given within a column", () => {
     columns.find((c) => c.id === "ready")?.issues.map((i) => i.key),
     ["MET-9", "MET-2"],
   );
+});
+
+test("the card shows one compact token count and a tooltip that splits it", () => {
+  const sum = { input: 1_250_000, cached: 5_990_000, output: 160_000 };
+  assert.equal(tokenCount(sum), "7.4M tok");
+  assert.equal(tokenTooltip(sum), "Input 1.3M · Cached 6.0M · Output 160k");
+  assert.equal(tokenCount({ input: 0, cached: 0, output: 0 }), "0 tok");
 });

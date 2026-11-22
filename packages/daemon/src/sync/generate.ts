@@ -47,6 +47,8 @@ export interface GenerateOptions {
    */
   memoryWorkspace?: string;
   opencodePermission?: OpenCodePermission;
+  /** A worktree run gets only the built-in memory server (D-040). */
+  memoryMcpOnly?: boolean;
 }
 
 function memoryServer(options: GenerateOptions): McpServerConfig {
@@ -60,6 +62,7 @@ export function syncedMcpServers(
   config: MergedConfig,
   options: GenerateOptions = {},
 ): Record<string, McpServerConfig> {
+  if (options.memoryMcpOnly === true) return { [MEMORY_SERVER.name]: memoryServer(options) };
   const all = { [MEMORY_SERVER.name]: memoryServer(options), ...config.mcp };
   return Object.fromEntries(Object.entries(all).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
@@ -121,11 +124,14 @@ export function skillHooks(config: MergedConfig, harness: "claude" | "codex"): H
  * `.claude/settings.json`: pre-approves the project MCP servers from `.mcp.json` and adds
  * the skills' hooks. Sync merges this into the file, so the user's own keys stay.
  */
-export function claudeSettings(config: MergedConfig): NativeSettings {
+export function claudeSettings(
+  config: MergedConfig,
+  options: GenerateOptions = {},
+): NativeSettings {
   return {
     keys: {
       $schema: "https://json.schemastore.org/claude-code-settings.json",
-      enabledMcpjsonServers: Object.keys(syncedMcpServers(config)),
+      enabledMcpjsonServers: Object.keys(syncedMcpServers(config, options)),
     },
     hooks: skillHooks(config, "claude"),
   };
@@ -216,7 +222,7 @@ export function generateSyncFiles(config: MergedConfig, options: GenerateOptions
   const files: SyncFile[] = [
     { path: "AGENTS.md", content: agentsMd(config) },
     { path: "CLAUDE.md", symlinkTarget: "AGENTS.md" },
-    { path: ".claude/settings.json", settings: claudeSettings(config) },
+    { path: ".claude/settings.json", settings: claudeSettings(config, options) },
   ];
   const badName = (name: string) => !SKILL_NAME.test(name) || name === "." || name === "..";
   for (const skill of config.skills) {

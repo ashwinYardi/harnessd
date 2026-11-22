@@ -12,7 +12,7 @@ import {
   type Task,
   type WorkflowStateName,
 } from "@harnessd/shared";
-import type { GitHub, PullRequest, ReviewInput } from "../github/client.ts";
+import type { GitHub, PullRequest, PullRequestStatus, ReviewInput } from "../github/client.ts";
 import type { Worktree } from "../worktrees/index.ts";
 import { formatNotice, type Notifier } from "./notifier.ts";
 import {
@@ -142,6 +142,9 @@ function harness(options: Options = {}) {
     async prFiles() {
       return [{ path: "src/avatars.ts", additions: 40, deletions: 2 }];
     },
+    async prDiff() {
+      return "diff --git a/src/avatars.ts b/src/avatars.ts\n+avatar";
+    },
     createPr: () => Promise.reject(new Error("QA never opens a PR")),
     async postReview(number, review) {
       if (options.refuse?.includes(review.event)) {
@@ -150,7 +153,16 @@ function harness(options: Options = {}) {
       reviews.push({ number, ...review });
       return `https://github.test/o/r/pull/${number}#review-${reviews.length}`;
     },
-    prStatus: () => Promise.reject(new Error("QA never reads the merge status")),
+    prStatus: async (number): Promise<PullRequestStatus> => ({
+      number,
+      url: `https://github.test/o/r/pull/${number}`,
+      state: "OPEN",
+      headRefOid: "sha7",
+      mergeable: "MERGEABLE",
+      checks: [{ name: "CI / test", state: "pass", detail: "SUCCESS" }],
+      files: [],
+      changedFiles: 0,
+    }),
     mergePr: () => Promise.reject(new Error("QA never merges")),
     addLabel: () => Promise.reject(new Error("QA never labels")),
   };
@@ -222,7 +234,7 @@ function settleDeps() {
   return { deps: { linear, notifier, maxFailures: 2 }, comments, moves, pings };
 }
 
-test("every item and the tests pass: approve at the PR head, then QA moves to In Review", async () => {
+test("every item and the tests pass: approve at the PR head, then QA stays Ready", async () => {
   const h = harness({ replies: [verdict([true, true])] });
   const result = await runQa(h.input, h.deps);
   assert.equal(result.outcome, "approved");
@@ -239,7 +251,10 @@ test("every item and the tests pass: approve at the PR head, then QA moves to In
     /## Done when \(MET-50: Title MET-50\)\n1\. Avatars are served\n2\. It has tests/,
   );
   assert.match(prompt, /src\/avatars\.ts \(\+40 -2\)/);
-  assert.match(prompt, /gh pr diff 7/);
+  assert.match(prompt, /## Diff\n```diff\ndiff --git a\/src\/avatars\.ts/);
+  assert.match(prompt, /## CI\n- CI \/ test: success/);
+  assert.match(prompt, /Open a file only to check a line the diff touches/);
+  assert.doesNotMatch(prompt, /Read the diff and the code/);
   assert.match(prompt, /`pnpm test` passed/);
   assert.match(prompt, /exactly 2 item\(s\)/);
 
@@ -248,7 +263,7 @@ test("every item and the tests pass: approve at the PR head, then QA moves to In
   state.qaFailures[parent.id] = 1;
   assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "approved");
   assert.deepEqual(state.qaFailures, {});
-  assert.deepEqual(s.moves, [{ issueId: qa.id, state: "In Review" }]);
+  assert.deepEqual(s.moves, [{ issueId: qa.id, state: "Ready" }]);
   assert.equal(s.comments.length, 1);
   assert.equal(s.comments[0]?.issueId, qa.id);
   assert.match(

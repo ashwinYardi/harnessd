@@ -4,6 +4,7 @@ import {
   type Call,
   ESCALATION_TRIGGER_LABELS,
   type Escalation,
+  emptyTokenUsage,
   type GlossaryTerm,
   type GrillResult,
   type HarnessAdapter,
@@ -12,6 +13,7 @@ import {
   type Precedent,
   type ResolvedAgentConfig,
   type Task,
+  type TokenUsage,
 } from "@harnessd/shared";
 import type { LinearClient } from "../linear/client.ts";
 import type { DecisionSink } from "./decisions.ts";
@@ -231,7 +233,9 @@ export function noteTitle(question: string): string {
 }
 
 /** A run's reply. `limited` is set when the harness hit a usage limit (MET-70). */
-export type RunReply = { ok: true; text: string } | { ok: false; error: string; limited?: true };
+export type RunReply =
+  | { ok: true; text: string; tokens: TokenUsage }
+  | { ok: false; error: string; limited?: true; tokens: TokenUsage };
 
 /** Runs one task to the end and returns the final assistant text, or why there is none. */
 export async function runForReply(
@@ -243,26 +247,33 @@ export async function runForReply(
   let finalText: string | undefined;
   let status: string | undefined;
   let runError: string | undefined;
+  let tokens: TokenUsage = emptyTokenUsage();
   try {
     const run = adapter.start(task, cwd);
     for await (const event of run.events) {
       if (event.type === "text") lastText = event.text;
+      if (event.type === "usage") tokens = event.tokens;
       if (event.type === "end") {
         status = event.result.status;
         finalText = event.result.finalText;
         runError = event.result.error;
+        tokens = event.result.tokens;
       }
     }
   } catch (error) {
-    return { ok: false, error: `harness run failed: ${(error as Error).message}` };
+    return { ok: false, error: `harness run failed: ${(error as Error).message}`, tokens };
   }
   if (status !== "ok") {
     const error = `harness run ${status ?? "ended without a result"}${runError ? `: ${runError}` : ""}`;
-    return status === "limited" ? { ok: false, error, limited: true } : { ok: false, error };
+    return status === "limited"
+      ? { ok: false, error, limited: true, tokens }
+      : { ok: false, error, tokens };
   }
   const text = finalText ?? lastText;
-  if (text === undefined || text.trim() === "") return { ok: false, error: "empty reply" };
-  return { ok: true, text };
+  if (text === undefined || text.trim() === "") {
+    return { ok: false, error: "empty reply", tokens };
+  }
+  return { ok: true, text, tokens };
 }
 
 /**
@@ -298,15 +309,22 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
   };
 
   let parsed: ParsedGrillReply = { ok: false, error: "not run" };
+  let spent: TokenUsage = emptyTokenUsage();
   for (let attempt = 1; attempt <= 2; attempt++) {
     const text =
       attempt === 1
         ? prompt
         : `${prompt}\nYour previous reply was rejected (${parsed.ok ? "" : parsed.error}). Reply again with only the JSON object.\n`;
     const reply = await runForReply(deps.adapter, task(attempt, text), deps.cwd);
+    spent = {
+      input: spent.input + reply.tokens.input,
+      output: spent.output + reply.tokens.output,
+      cacheRead: spent.cacheRead + reply.tokens.cacheRead,
+      cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
+    };
     if (!reply.ok && reply.limited) {
       // A usage limit is no bad reply: no retry, nothing written, the issue stays (MET-70).
-      return { calls: [], escalation: null, outcome: "limited", error: reply.error };
+      return { calls: [], escalation: null, outcome: "limited", error: reply.error, tokens: spent };
     }
     parsed = reply.ok ? parseGrillReply(reply.text) : reply;
     if (parsed.ok) break;
@@ -324,6 +342,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       escalation: null,
       outcome: "error",
       error: parsed.error,
+      tokens: spent,
     };
   }
 
@@ -385,6 +404,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       error: `could not ${step}: ${(error as Error).message}`,
       terms,
       precedents,
+      tokens: spent,
     };
   }
   return {
@@ -393,5 +413,6 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     outcome: escalation ? "needs_input" : "proceed",
     terms,
     precedents,
+    tokens: spent,
   };
 }

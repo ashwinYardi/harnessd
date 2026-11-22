@@ -7,15 +7,23 @@
 // whatever the model says; anything else requests changes. `settleQa` then moves the
 // sub-issues, and the second failed round goes to the human instead of looping.
 import { spawn } from "node:child_process";
-import type {
-  HarnessAdapter,
-  Issue,
-  LinkedIssue,
-  QaConfig,
-  ResolvedAgentConfig,
-  Task,
+import {
+  emptyTokenUsage,
+  type HarnessAdapter,
+  type Issue,
+  type LinkedIssue,
+  type QaConfig,
+  type ResolvedAgentConfig,
+  type Task,
+  type TokenUsage,
 } from "@harnessd/shared";
-import type { GitHub, PullRequest, PullRequestFile, ReviewEvent } from "../github/client.ts";
+import type {
+  GitHub,
+  PullRequest,
+  PullRequestCheck,
+  PullRequestFile,
+  ReviewEvent,
+} from "../github/client.ts";
 import type { LinearClient } from "../linear/client.ts";
 import type { TaskWorktrees } from "../worktrees/index.ts";
 import { agentPromptHeader } from "./dispatch.ts";
@@ -262,8 +270,11 @@ export function qaChecklist(parent: Issue): string[] {
   return parent.doneWhen.map((d) => oneLine(d.text));
 }
 
-/** Files listed in the prompt; the agent reads the full diff with `gh pr diff`. */
+/** Files listed after the cut diff; at most this many (D-040). */
 const MAX_PROMPT_FILES = 200;
+
+/** The diff is cut here; the file list follows the cut (D-040). */
+export const MAX_PROMPT_DIFF = 24_000;
 
 export interface QaPromptInput {
   agent: ResolvedAgentConfig;
@@ -271,6 +282,10 @@ export interface QaPromptInput {
   parent: Issue;
   part: LinkedIssue;
   pr: PullRequest;
+  /** The PR's unified diff, when `gh pr diff` answered. */
+  diff?: string;
+  /** The PR head's CI checks, when `gh pr view` answered. */
+  ci?: PullRequestCheck[];
   /** Undefined when `gh` could not list them. */
   files: PullRequestFile[] | undefined;
   checklist: string[];
@@ -279,9 +294,21 @@ export interface QaPromptInput {
   memory?: AgentMemory;
 }
 
+/** The diff, cut to `MAX_PROMPT_DIFF`, and how much was left out. */
+export function cutDiff(diff: string): { text: string; omitted: number } {
+  if (diff.length <= MAX_PROMPT_DIFF) return { text: diff, omitted: 0 };
+  return { text: diff.slice(0, MAX_PROMPT_DIFF), omitted: diff.length - MAX_PROMPT_DIFF };
+}
+
+function describeCi(checks: PullRequestCheck[] | undefined): string {
+  if (checks === undefined) return "(could not read the checks; run `gh pr checks`)";
+  if (checks.length === 0) return "(no checks yet)";
+  return checks.map((c) => `- ${c.name}: ${c.detail.toLowerCase()}`).join("\n");
+}
+
 /** The QA agent's prompt for one PR. */
 export function buildQaPrompt(input: QaPromptInput): string {
-  const { agent, qa, parent, part, pr, files, checklist, tests, memory } = input;
+  const { agent, qa, parent, part, pr, diff, ci, files, checklist, tests, memory } = input;
   const out = agentPromptHeader(agent, qa);
 
   let fileList: string;
@@ -296,18 +323,32 @@ export function buildQaPrompt(input: QaPromptInput): string {
       fileList += `\n- … ${files.length - MAX_PROMPT_FILES} more`;
     }
   }
+
+  const cut = diff === undefined ? undefined : cutDiff(diff);
+  const diffSection =
+    cut === undefined
+      ? "## Diff\n(could not read it; run `gh pr diff` in this worktree.)"
+      : `## Diff\n\`\`\`diff\n${cut.text || "(empty)"}\n\`\`\`` +
+        (cut.omitted > 0
+          ? `\nThe diff was cut after ${MAX_PROMPT_DIFF} characters; ${cut.omitted} were left out. ` +
+            `Run \`gh pr diff ${pr.number}\` for the rest.`
+          : "");
+
   out.push(
     `## PR to verify\nPart ${part.key}: ${part.title} (${part.url})\n` +
       `PR #${pr.number}: ${pr.title}\n${pr.url}\n` +
-      `Branch \`${pr.headRefName}\` at \`${pr.headRefOid}\`, into \`${pr.baseRefName}\`.\n\n` +
-      `Changed files (${files?.length ?? "?"}); the full diff is \`gh pr diff ${pr.number}\`:\n${fileList}`,
+      `Branch \`${pr.headRefName}\` at \`${pr.headRefOid}\`, into \`${pr.baseRefName}\`.`,
+    diffSection,
+    `## Changed files (${files?.length ?? "?"})\n${fileList}`,
+    `## CI\n${describeCi(ci)}`,
     `## Tests\nharnessd ran the repo's tests in this worktree before you started: ${describeTests(tests)}.\n` +
       `\`\`\`text\n${tail(tests.output, 3000) || "(no output)"}\n\`\`\``,
+    `## Part brief\n${part.description.trim() || "(none)"}`,
     `## Done when (${parent.key}: ${parent.title})\n${checklist.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
     [
       "## How to verify",
-      "- This worktree is a detached checkout of the PR head. Read the diff and the code, and run what you need.",
-      "- Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
+      "- Judge from this diff, the CI result and the tests. Open a file only to check a line the diff touches.",
+      "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
       "- An item passes only with concrete evidence: a file and line, a test name, or command output.",
       "- An item outside this part's brief passes when this PR does not break it and another part covers it; say so in the evidence.",
       "- `testsPassed` is false when any test or check you ran fails.",
@@ -472,6 +513,8 @@ export interface QaRunResult {
    * nothing was posted for that PR and no later part ran. It is no QA failure.
    */
   limited?: boolean;
+  /** Tokens the QA agent runs used (D-040). */
+  tokens?: TokenUsage;
 }
 
 /** Reviews every part's PR. Never throws: a broken step is an `error` review. */
@@ -483,6 +526,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
   const checklist = qaChecklist(parent);
   const cancelled = () => deps.signal?.aborted === true;
   let limited = false;
+  let spent: TokenUsage = emptyTokenUsage();
   const stopped = (part: LinkedIssue, pr?: PullRequest): PrReview => ({
     part,
     ...(pr ? { pr } : {}),
@@ -555,6 +599,14 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         log(`${qa.key}: could not list the files of PR #${pr.number}: ${message(error)}`);
         return undefined;
       });
+      const diff = await deps.github.prDiff(pr.number).catch((error) => {
+        log(`${qa.key}: could not read the diff of PR #${pr.number}: ${message(error)}`);
+        return undefined;
+      });
+      const status = await deps.github.prStatus(pr.number).catch((error) => {
+        log(`${qa.key}: could not read the checks of PR #${pr.number}: ${message(error)}`);
+        return undefined;
+      });
       tests = await runQaTests(
         deps.commands,
         path,
@@ -587,6 +639,8 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
             parent,
             part,
             pr,
+            ...(diff === undefined ? {} : { diff }),
+            ...(status === undefined ? {} : { ci: status.checks }),
             files,
             checklist,
             tests,
@@ -597,6 +651,12 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         if (deps.agent.model !== undefined) task.model = deps.agent.model;
         if (env !== undefined) task.env = env;
         const reply = await runForReply(deps.adapter, task, path);
+        spent = {
+          input: spent.input + reply.tokens.input,
+          output: spent.output + reply.tokens.output,
+          cacheRead: spent.cacheRead + reply.tokens.cacheRead,
+          cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
+        };
         if (!reply.ok && reply.limited) limited = true;
         verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
       }
@@ -671,14 +731,14 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
     }
     reviews.push(await review(part));
   }
-  if (cancelled()) return { outcome: "error", reviews, cancelled: true };
-  if (limited) return { outcome: "error", reviews, limited: true };
+  if (cancelled()) return { outcome: "error", reviews, cancelled: true, tokens: spent };
+  if (limited) return { outcome: "error", reviews, limited: true, tokens: spent };
   const outcome = reviews.some((r) => r.decision === "request_changes")
     ? "changes_requested"
     : reviews.some((r) => r.decision === "error")
       ? "error"
       : "approved";
-  return { outcome, reviews };
+  return { outcome, reviews, tokens: spent };
 }
 
 // --- after a round: Linear and the loop state ----------------------------------
@@ -750,7 +810,9 @@ export async function settleQa(
       ...(lines.length > 0 ? lines : ["- Every part was already Done."]),
     ].join("\n");
     await safely(`comment on ${qa.key}`, () => deps.linear.comment(qa.id, `${body}\n`));
-    await safely(`move ${qa.key} to In Review`, () => deps.linear.moveTo(qa.id, "In Review"));
+    // Per-part QA: the QA sub-issue stays Ready for the next part, and moves to Done after
+    // the last part merges (D-040).
+    await safely(`move ${qa.key} to Ready`, () => deps.linear.moveTo(qa.id, "Ready"));
     return "approved";
   }
 

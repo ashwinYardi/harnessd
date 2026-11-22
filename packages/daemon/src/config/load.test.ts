@@ -44,7 +44,7 @@ test("missing folders load as defaults", async () => {
     workspaceDir: f.workspaceDir,
     home: f.home,
   });
-  assert.equal(merged.limits.max_concurrent, 3);
+  assert.equal(merged.limits.max_concurrent, 1);
   assert.deepEqual(merged.rules, []);
   assert.deepEqual(merged.skills, []);
   assert.equal(resolveAgentConfig(merged, "coordinator").instructions, "");
@@ -118,6 +118,7 @@ test("global and workspace folders load and merge", async () => {
   assert.deepEqual(merged.limits, {
     max_concurrent: 4,
     budget_minutes: { S: 20, M: 60 },
+    token_budget: { S: 5_000_000, M: 12_000_000 },
     qa_max_failures: 2,
   });
   assert.deepEqual(merged.linear, { team_id: "MET" });

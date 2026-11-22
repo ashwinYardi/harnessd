@@ -32,14 +32,21 @@ Every Ready issue without a part marker is first grilled (docs/COORDINATOR.md).
 The coordinator's harness then returns a plan as strict JSON:
 
 ```json
-{ "parts": [{ "role": "backend", "title": "…", "prompt": "…", "size": "S" }] }
+{
+  "parts": [{ "role": "backend", "title": "…", "prompt": "…", "size": "S" }],
+  "reason": "why the issue cannot ship as one part (required with more than one)"
+}
 ```
 
 `role` is `backend` or `frontend`, and `size` is `S` or `M`. Only the parts the plan lists are created.
 
+**One part by default (D-040).** One part is one PR. The plan may have more only when the issue's Size is L, or when one part cannot fit the M budget. A plan with more than one part and no `reason` is invalid: the loop uses the one-part fallback and the split comment says so. A valid split comment also states the reason.
+
 If the reply is unusable, the fallback is one part: frontend when the issue has the `ui` label, otherwise backend, at the issue's size.
 
 harnessd always adds a QA sub-issue, "QA: <parent title>". Every part blocks it (a Linear relation of type `blocks`).
+
+**Serial parts (D-040).** When the split has more than one part, part 1 blocks part 2, part 2 blocks part 3, and so on. A part starts only after the part before it is merged (Done), so no two PRs of one parent are open at the same time. An interrupted split adds the missing relations on the next tick.
 
 Sub-issues are Linear children of the parent, in the same team and project.
 - They start in Ready and carry the parent's area label.
@@ -56,14 +63,15 @@ When the split is done, the parent moves to In Progress.
 - L is never run. If the plan, or the fallback, still contains an L part, the issue goes to Needs input with a comment and one notice. The same happens to an L sub-issue.
 
 ## Dispatch
-- At most `limits.max_concurrent` runs at once (default 3).
-- A part is eligible when it is in Ready and nothing unfinished blocks it.
-- A QA sub-issue is eligible when every part is In Review or Done.
+- `limits.max_concurrent` runs at once (default 1, D-040). Parallel parts of one parent touched the same files, and each merge sent the next PR back for another build and QA round, so the default is serial. A user may still set up to 3 (D-014 cap).
+- A part is eligible when it is in Ready and nothing unfinished blocks it. With serial parts, part 2's blocker is part 1 until part 1 is Done (merged).
+- A QA sub-issue is eligible when a part of its parent is In Review at a head QA has not approved (see QA).
 - Each run:
   - gets its own worktree and branch (D-012);
   - uses the adapter for its agent's harness;
   - gets a prompt made of the agent's layered instructions plus the sub-issue body;
   - runs within the budget for its size.
+- Before a part or QA run starts, and before a rework run, the loop checks the parent's token sum against `limits.token_budget`. At or over it, nothing starts and the parent goes to Needs input (see Token budget).
 - The prompt tells the agent to edit and test in the worktree only. It does not commit, push or open the PR: the daemon ships the work after the run (D-039). A part that QA sent back gets the failing items and works on its open PR.
 - A QA sub-issue runs the QA round below instead of a single agent run.
 - When the sub-issue starts it moves to In Progress. When the run finishes:
@@ -114,7 +122,24 @@ A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch
 - **OpenCode runs.** An agent with `harness = "opencode"` runs `opencode run --format json --standalone --auto`. The CLI approves pending permission requests and keeps the session running (docs/decisions/D-036-opencode-adapter.md). `OPENCODE_CONFIG_DIR` points to an empty temp folder, so the owner's OpenCode config and global `AGENTS.md` do not load. The run reads `AGENTS.md` and the project skill folders.
 - **The OpenCode gap.** OpenCode 2.0.20 still loads skills from `~/.claude/skills` and `~/.agents/skills`. Impeccable hooks do not run, because OpenCode uses JS plugins, not `hooks.json`. Sync adds the `harnessd-memory` server to `opencode.json`.
 - **Memory.** The prompt has a Memory section. It names `search_notes`, `read_note` and `write_note`, and the two vaults: `<repo>/.harnessd/vault/` and `$HARNESSD_HOME/vault/` (docs/MEMORY.md). The worktree's `.mcp.json` runs `harnessd mcp memory --workspace <main repo>`, so notes outlive the worktree.
-- **Hand-vendored skills.** A skill folder that sync did not generate stays as it is (D-020). Sync prints `kept <folder>` and does not write into it.
+- **Hand-vendored skills.** A skill folder that sync did not generate stays as it is (D-020). Sync prints `kept <folder>` and does not write into it. A worktree run still withholds the skill its role leaves out, even when the repo commits that folder (see the role skill set below).
+- **Role skill set (D-040).** A worktree run gets the pack for its role: the `frontend` role gets the full pack, and every other role gets the pack without impeccable. The map is built in, not config: `enabled = false` still turns a skill off for everyone. A worktree cut from `main` already holds the skill folders the repo commits, so the loop removes a withheld folder from that worktree and marks its tracked files `skip-worktree`; git sees no deletion and the agent commits, pushes and opens the PR as usual. The main checkout is not touched. A later frontend run in the same worktree puts the committed folder back. The D-028 hook stays for frontend runs.
+- **MCP servers (D-040).** A worktree run gets only `harnessd-memory`. A `[mcp.<name>]` server in the config does not load into a worktree run, so its tool list is not sent.
+- **Measured size.** The base prompt is measured, not guessed. The numbers below are from `packages/daemon/src/coordinator/prompt-size.test.ts` and this repo's sync output. A character is about a quarter of a token.
+
+  | Item | Before | After |
+  |---|---|---|
+  | Part prompt (fixture issue) | about 0.9k chars | unchanged: it is already only the agent, the task and the memory pointer |
+  | QA prompt (one PR, diff cut at 24k chars) | about 3.3k chars | unchanged: the diff, CI, tests and checklist are the whole job |
+  | Grill prompt (this repo: spec + 39 decision records) | about 70.7k chars | unchanged: the coordinator needs the spec and the decisions |
+  | Plan prompt (this repo) | about 60.2k chars | unchanged: same context as the grill |
+  | `AGENTS.md` (this repo, rules included) | about 4.5k chars | unchanged: agents must read the repo rules |
+  | `SKILL.md` bodies, 14 committed skills | about 62.5k chars | about 49.8k chars for a non-UI run: impeccable (about 12.7k chars) is dropped |
+  | MCP tool lists | every configured server | `harnessd-memory` only |
+
+  The skill row counts the folders a worktree cut from `main` holds, not only the files sync generates. The test is `committed skill pack` in `prompt-size.test.ts`.
+
+  **Owner-level gaps, measured and out of scope:** D-032 says Codex still reads `$CODEX_HOME/AGENTS.md` and user skills, because `CODEX_HOME` must hold `auth.json`. D-036 says OpenCode 2.0.20 still loads `~/.claude/skills` and `~/.agents/skills`. The loop cannot remove those files without breaking the owner's sign-in or setup.
 
 ## Pause
 The global kill switch (D-014). It stops every agent in every workspace within 10 s.
@@ -140,13 +165,18 @@ harnessd resume                    # "Resumed."
 - **Restart.** Paused survives a restart. `harnessd run` while paused starts the API and the loop in the paused state and prints `harnessd run: paused since … Run "harnessd resume" to dispatch again.`
 
 ## QA
-QA checks each part's PR against the parent's "Done when" list before anything merges (D-013). It starts once every part that blocks the QA sub-issue is In Review or Done. Done parts are skipped.
+QA reviews one PR, when that part reaches In Review (D-040). It checks the PR against the parent's "Done when" list before anything merges (D-013). QA does not read the whole repo.
+
+Before a review, the loop reads the PR's `headRefOid` and compares it with the part's **reviewed head** in `loop.json`:
+- the same sha as an approved part: QA does not run again;
+- a new sha: QA runs once;
+- an approved part whose PR head did not change stays approved and goes to the merge gate.
 
 For each part:
 1. **Find the PR.** It is the newest open PR with the part's key in its title (`gh pr list --json`). With no PR, the part is sent back.
 2. **Check it out.** The PR's head commit is checked out in a worktree of its own, detached, and removed afterwards (D-012).
 3. **Run the tests.** harnessd runs `qa.setup_command` and then `qa.test_command` (default `pnpm test`) in that worktree.
-4. **Ask the QA agent.** Its prompt has the "Done when" list, the changed files and the test result. Its last message must be strict JSON, one item per "Done when" item:
+4. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the parent's "Done when"; the part brief; the CI result from `statusCheckRollup`; and the harnessd test result. It judges from the diff, the CI result and the tests, and opens a file only to check a line the diff touches. Its last message must be strict JSON, one item per "Done when" item:
 
    ```json
    { "items": [{ "text": "…", "pass": true, "evidence": "…" }], "testsPassed": true }
@@ -160,14 +190,25 @@ After the round:
 
 | Result | What happens |
 |---|---|
-| every PR approved | QA moves to In Review, with a comment that links each review. The approval, with each PR's head, goes to `loop.json` for the merge gate. |
-| changes requested, first failure | Each failing part goes back to Ready with a comment that links its review. QA goes back to Ready and runs again once the parts are back in review. |
+| approved | The part's PR goes to `merges` in `loop.json` as one entry with one PR, pinned to the reviewed head, and the merge gate takes it. QA stays Ready for the next part. |
+| changes requested, first failure | The part goes back to Ready with a comment that links its review. The reviewed head records `changes_requested`; QA runs again only on a new head. |
 | QA could not judge a PR, first failure | QA goes back to Ready and runs again. |
 | second failure | QA and the parent move to Needs input. One comment goes on the parent and one notice is sent. Nothing is sent back again (D-014). |
+
+The QA sub-issue moves to Done after the last part of the parent merges. The final check on main and the follow-up issue stay in MET-86.
 
 A QA agent run that ends `limited` stops the round. No review is posted, no QA failure is counted and QA goes back to Ready.
 
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
+
+## Token budget and usage
+Each run ends with one log line: `<key>: <agent> used <input> input, <cached> cached, <output> output tokens`, where cached is cache read plus cache write. The loop adds the run's tokens to the parent's **usage sum** in `loop.json` under `usage`, so the sum survives a restart. The board shows the sum as one compact count with a tooltip that splits input, cached and output.
+
+The **token budget** is `limits.token_budget`, keyed by size like `budget_minutes`: S 5M, M 12M. An unknown size counts as M. It sums every token of the parent over its grill, plan, part and QA runs. Before the loop starts a new part run, QA run or rework round, it checks the sum:
+- below the budget: the run starts;
+- at or over it: nothing starts. The parent moves to Needs input, with one comment that states the sum and the budget, and one notice (the D-011 escalation shape). A run in flight finishes normally.
+
+The sum at escalation is recorded as `usageBaseline` in `loop.json`, as the parent's cumulative sum (not the delta), so the next count subtracts it. When a human moves the parent back to Ready, the budget counts from that point, also after a second escalation.
 
 ## Usage limits
 A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.
@@ -204,7 +245,7 @@ The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR m
 - CI is green;
 - it touches no protected path.
 
-**Approval.** GitHub's review state cannot be the record: on a PR opened by the same `gh` login, the verdict is only a comment review. So harnessd records the approval itself. Each approved QA round adds one entry to `merges` in `loop.json`, with each part's PR number and the head sha QA checked out and reviewed.
+**Approval.** GitHub's review state cannot be the record: on a PR opened by the same `gh` login, the verdict is only a comment review. So harnessd records the approval itself. Each approved part adds one entry to `merges` in `loop.json`, with the part's PR number and the head sha QA checked out and reviewed (D-040).
 
 **Each tick**, every PR in `merges` is read again with one call, `gh pr view <n> --json number,url,state,headRefOid,mergeable,statusCheckRollup,files,changedFiles`. Then, in this order:
 
@@ -225,7 +266,7 @@ The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR m
   - The first failure sends each failing part back to Ready. Its next prompt lists the failing checks, like QA feedback, and it pushes to its open PR. QA moves to Ready and runs again once the parts are back in review.
   - The `limits.qa_max_failures`-th failure (default 2) moves QA and the parent to Needs input, with one comment and one notice. Nothing is sent back again.
   - Gate failures are counted per parent under `gateFailures`, apart from QA failures. A new QA approval does not reset them. A parent reaching Done does.
-- **Done.** Once every PR of an approval is merged, QA moves to Done. When every part of the parent is Done, the parent moves to Done too.
+- **Done.** Once every PR of an approval is merged, its entry leaves `merges`. When every part of the parent is Done, the QA sub-issue moves to Done and the parent moves to Done too (D-040).
 - **Pause.** No merge happens while paused. The flag is checked at the start of the tick, before each PR is read, and again right before each `gh pr merge`. A pause that lands mid-tick stops the gate before the next merge. The approval stays in `loop.json` for after resume. A flag that cannot be read counts as paused here.
 - **Protected paths** are globs in `merge.protected_paths` (docs/CONFIG.md). They are matched against each changed file's repo path, ignoring case. `**` spans directories, `*` and `?` stay within one directory, and `{a,b}` matches either. A glob without a `/` matches the file name at any depth. GitHub's file list gives a renamed file's new path only.
 - `merge.method` (default `squash`) picks `--squash`, `--merge` or `--rebase`.
@@ -257,9 +298,9 @@ daemon start and loop ticks ──┴─► check ─► pending ─► safe poi
 `<repo>/.harnessd/state/loop.json` is written atomically (temp file, fsync, rename). The folder has its own `.gitignore`.
 
 ```json
-{ "version": 1, "lastPollAt": "…", "inFlight": [{ "issueId": "…", "issueKey": "MET-41", "role": "backend", "agent": "backend", "worktree": "…", "branch": "…", "startedAt": "…", "pid": 123, "pausedAt": "…", "stopReason": "self-update", "excludesFile": "…" }], "interrupted": [{ "issueId": "…", "issueKey": "MET-42", "role": "frontend", "agent": "frontend", "worktree": "…", "branch": "…", "interruptedAt": "…", "reason": "paused", "excludesFile": "…" }], "attempts": { "<issueId>": 1 }, "qaFailures": { "<parentId>": 1 }, "qaFeedback": { "<partId>": { "prUrl": "…", "reviewUrl": "…", "failing": ["…"] } }, "merges": [{ "qaId": "…", "qaKey": "MET-43", "parentId": "…", "parentKey": "MET-40", "parentUrl": "…", "approvedAt": "…", "prs": [{ "partId": "…", "partKey": "MET-41", "number": 7, "url": "…", "sha": "…", "mergedAt": "…", "needsHuman": "…", "labeled": true, "closedAt": "…" }] }], "gateFailures": { "<parentId>": 1 }, "humanPings": { "<prUrl>": "…" }, "selfUpdateNotices": { "<sha>": "…" }, "selfUpdate": { "from": "<sha>", "to": "<sha>", "at": "…", "state": "pending", "error": "…", "trigger": { "id": "…", "key": "MET-40", "url": "…" } }, "limits": { "claude-code": { "until": "…", "since": "…", "backoffMs": 900000, "endedAt": "…" } } }
+{ "version": 1, "lastPollAt": "…", "inFlight": [{ "issueId": "…", "issueKey": "MET-41", "role": "backend", "agent": "backend", "worktree": "…", "branch": "…", "startedAt": "…", "pid": 123, "pausedAt": "…", "stopReason": "self-update", "excludesFile": "…" }], "interrupted": [{ "issueId": "…", "issueKey": "MET-42", "role": "frontend", "agent": "frontend", "worktree": "…", "branch": "…", "interruptedAt": "…", "reason": "paused", "excludesFile": "…" }], "attempts": { "<issueId>": 1 }, "qaFailures": { "<parentId>": 1 }, "qaFeedback": { "<partId>": { "prUrl": "…", "reviewUrl": "…", "failing": ["…"] } }, "merges": [{ "qaId": "…", "qaKey": "MET-43", "parentId": "…", "parentKey": "MET-40", "parentUrl": "…", "approvedAt": "…", "prs": [{ "partId": "…", "partKey": "MET-41", "number": 7, "url": "…", "sha": "…", "mergedAt": "…", "needsHuman": "…", "labeled": true, "closedAt": "…" }] }], "gateFailures": { "<parentId>": 1 }, "humanPings": { "<prUrl>": "…" }, "selfUpdateNotices": { "<sha>": "…" }, "selfUpdate": { "from": "<sha>", "to": "<sha>", "at": "…", "state": "pending", "error": "…", "trigger": { "id": "…", "key": "MET-40", "url": "…" } }, "limits": { "claude-code": { "until": "…", "since": "…", "backoffMs": 900000, "endedAt": "…" } }, "reviewedHeads": { "<partId>": { "sha": "…", "verdict": "approved" } }, "usage": { "<parentId>": { "input": 0, "cached": 0, "output": 0 } }, "usageBaseline": { "<parentId>": { "input": 0, "cached": 0, "output": 0, "at": "…" } } }
 ```
 
 `pausedAt` is set only on an in-flight run that a pause is cancelling. `stopReason: "self-update"` is set with it when a waiting self-update stops the run. `interrupted[].reason` is `paused`, `self-update`, `uncommitted changes` or `commits not on the remote`; a file from before these reasons loads as `paused`. `excludesFile` is the run's exclude file, so synced files do not count as uncommitted changes; it is optional. `selfUpdate.state` is `pending`, `applying`, `done`, `blocked` or `failed`. `endedAt` is set only on an ended hold kept for its backoff.
 
-Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the QA approvals waiting to merge, the needs-human notices already sent and the usage-limit holds. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.
+Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the QA approvals waiting to merge, the needs-human notices already sent and the usage-limit holds. `reviewedHeads`, `usage` and `usageBaseline` are additive and optional: a file from before D-040 still loads. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.

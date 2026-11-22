@@ -71,12 +71,13 @@ const ISSUES: BoardIssue[] = [
     priority: 2,
     size: "M",
   }),
+  issue(50, "In Progress", "Board shows issues, agents and logs", { size: "M", priority: 2 }),
   issue(52, "In Review", "Merge gate reads code owners from the repo", {
     parentKey: "MET-50",
   }),
   issue(27, "Backlog", "Codex adapter runs tasks headless", { size: "M" }),
   issue(29, "Backlog", "Linux install script sets up a systemd unit"),
-  issue(30, "Backlog", "Team canvas shows personas and avatars", { size: undefined }),
+  issue(30, "Backlog", "Team canvas shows personas and avatars"),
   issue(44, "Ready", "Budget warning at 80 percent posts a comment", { priority: 2 }),
   issue(45, "Ready", "QA: Budget warning at 80 percent", { blockedBy: ["MET-44"] }),
   issue(46, "Ready", "Vault search ranks recent decisions first"),
@@ -144,6 +145,10 @@ const SNAPSHOT: LoopSnapshot = {
     },
   ],
   limits: [],
+  usage: {
+    "demo-50": { input: 1_250_000, cached: 5_990_000, output: 160_000 },
+    "demo-16": { input: 180_000, cached: 340_000, output: 12_000 },
+  },
 };
 
 let paused: PauseState = { paused: false };
@@ -163,7 +168,7 @@ const pause: PauseControl = {
 
 const snapshot = (): LoopSnapshot =>
   empty
-    ? { lastPollAt: ago(0.1), runs: [], blocked: [], limits: [] }
+    ? { lastPollAt: ago(0.1), runs: [], blocked: [], limits: [], usage: {} }
     : {
         ...SNAPSHOT,
         runs: SNAPSHOT.runs.map((r) => ({ ...r, stopping: paused.paused })),
@@ -366,13 +371,16 @@ const setupApi = setupRoutes({
   repoDir,
   globalDir,
   env: {},
-  platform: "darwin",
   checks: async (o) => {
     await sleep(300);
     return o.harnessesOnly ? harnessChecks() : fresh();
   },
   isExecutable: async (p) => p.startsWith("/opt/"),
-  sync: async () => ({ changed: ["AGENTS.md", ".claude/agents/docs.md"], skipped: [] }),
+  sync: async () => ({
+    changed: ["AGENTS.md", ".claude/agents/docs.md"],
+    skipped: [],
+    paths: ["AGENTS.md", ".claude/agents/docs.md"],
+  }),
   // Synthetic output; nothing is installed.
   runner: async (cmd, args, onLine) => {
     const lines =

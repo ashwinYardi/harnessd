@@ -226,3 +226,34 @@ test("parseLoopState drops a malformed self-update record and keeps a valid one"
   );
   assert.deepEqual(parseLoopState(JSON.stringify(base)).selfUpdateNotices, {});
 });
+
+test("reviewed heads and usage load additively, and an old file still loads", () => {
+  const old = parseLoopState(JSON.stringify({ inFlight: [] }));
+  assert.equal(old.reviewedHeads, undefined);
+  assert.equal(old.usage, undefined);
+  assert.equal(old.usageBaseline, undefined);
+
+  const next = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewedHeads: {
+        "part-1": { sha: "sha7", verdict: "approved" },
+        "part-2": { sha: "sha8", verdict: "changes_requested" },
+      },
+      usage: { "parent-1": { input: 100, cached: 35, output: 20 } },
+      usageBaseline: { "parent-1": { input: 50, cached: 0, output: 5, at: "t" } },
+    }),
+  );
+  assert.deepEqual(next.reviewedHeads?.["part-1"], { sha: "sha7", verdict: "approved" });
+  assert.deepEqual(next.reviewedHeads?.["part-2"], {
+    sha: "sha8",
+    verdict: "changes_requested",
+  });
+  assert.deepEqual(next.usage?.["parent-1"], { input: 100, cached: 35, output: 20 });
+  assert.deepEqual(next.usageBaseline?.["parent-1"], {
+    input: 50,
+    cached: 0,
+    output: 5,
+    at: "t",
+  });
+});

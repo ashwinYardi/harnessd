@@ -398,15 +398,16 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
     }
     const merged = new Set(entry.prs.map((p) => p.partId));
     const open = parts.filter((p) => p.state.toLowerCase() !== "done" && !merged.has(p.id));
-    await safely(`move ${entry.qaKey} to Done`, () => deps.linear.moveTo(entry.qaId, "Done"));
     drop(entry);
     if (open.length > 0) {
+      // Per-part QA: the QA sub-issue stays until the last part of the parent is merged.
       log(`${entry.parentKey}: merged, but ${open.map((p) => p.key).join(", ")} not Done yet`);
       await deps.save();
       return;
     }
     delete state.gateFailures[entry.parentId];
     await deps.save();
+    await safely(`move ${entry.qaKey} to Done`, () => deps.linear.moveTo(entry.qaId, "Done"));
     const prs = entry.prs.map((p) => `[PR #${p.number}](${p.url})`).join(", ");
     await safely(`comment on ${entry.parentKey}`, () =>
       deps.linear.comment(

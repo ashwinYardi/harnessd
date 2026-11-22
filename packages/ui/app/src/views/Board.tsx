@@ -8,8 +8,16 @@ import type { Load } from "../api.ts";
 import { Badge } from "../components/ui/badge.tsx";
 import { ScrollArea } from "../components/ui/scroll-area.tsx";
 import { Skeleton } from "../components/ui/skeleton.tsx";
+import { Tooltip, TooltipContent, TooltipTrigger } from "../components/ui/tooltip.tsx";
 import { type RowProps, usePin } from "../hooks/usePin.ts";
-import { type Column, type ColumnId, groupBoard, needsYou } from "../lib/board.ts";
+import {
+  type Column,
+  type ColumnId,
+  groupBoard,
+  needsYou,
+  tokenCount,
+  tokenTooltip,
+} from "../lib/board.ts";
 import { cn } from "../lib/cn.ts";
 import { sinceText } from "../lib/format.ts";
 import type { PinOptions } from "../lib/pin.ts";
@@ -54,7 +62,7 @@ function IssueRow({
         rel="noreferrer"
         target="_blank"
       >
-        <span className="flex items-center gap-1.5 text-muted-foreground text-xs">
+        <span className="flex flex-wrap items-center gap-1.5 text-muted-foreground text-xs">
           <span className="shrink-0 whitespace-nowrap font-mono">{issue.key}</span>
           {PRIORITY[issue.priority] && (
             <Badge
@@ -69,6 +77,17 @@ function IssueRow({
             <Badge size="sm" variant="secondary">
               {issue.size}
             </Badge>
+          )}
+          {issue.tokens && (
+            <Tooltip>
+              <TooltipTrigger
+                render={<span className="shrink-0 tabular-nums" />}
+                aria-label={`Tokens: ${tokenTooltip(issue.tokens)}`}
+              >
+                {tokenCount(issue.tokens)}
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{tokenTooltip(issue.tokens)}</TooltipContent>
+            </Tooltip>
           )}
           <ExternalLinkIcon
             aria-hidden="true"

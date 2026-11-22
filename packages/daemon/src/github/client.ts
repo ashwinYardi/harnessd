@@ -85,6 +85,8 @@ export interface GitHub {
   createPr(input: CreatePrInput): Promise<string>;
   /** Files the PR changes, for the QA prompt's diff summary. */
   prFiles(number: number): Promise<PullRequestFile[]>;
+  /** The PR's unified diff (`gh pr diff`), for the QA prompt. */
+  prDiff(number: number): Promise<string>;
   /** Posts one review and returns its URL. */
   postReview(number: number, review: ReviewInput): Promise<string>;
   /** State, head, mergeability, CI checks and changed files, for the merge gate. */
@@ -385,6 +387,11 @@ export function createGhCli(options: GhCliOptions): GitHub {
     async prFiles(number) {
       const { stdout } = await gh(["pr", "view", String(number), "--json", "files"]);
       return parsePullRequestFiles(stdout);
+    },
+
+    async prDiff(number) {
+      const { stdout } = await gh(["pr", "diff", String(number)]);
+      return stdout;
     },
 
     async postReview(number, review) {

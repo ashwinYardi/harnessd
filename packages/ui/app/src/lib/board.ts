@@ -1,5 +1,6 @@
 // Groups board issues into the columns the UI shows.
-import type { BoardIssue } from "@harnessd/shared";
+import type { BoardIssue, TokenSum } from "@harnessd/shared";
+import { tokens } from "./format.ts";
 
 export type ColumnId = "needs-you" | "backlog" | "ready" | "in-progress" | "in-review" | "done";
 
@@ -20,6 +21,16 @@ const STATE_COLUMNS: ReadonlyArray<[ColumnId, string]> = [
 /** True for issues a human must act on: Needs input, or Blocked at the merge gate. */
 export function needsYou(issue: BoardIssue): boolean {
   return issue.blocked !== undefined || issue.state.toLowerCase() === "needs input";
+}
+
+/** One compact count for a card, such as "7.4M tok". */
+export function tokenCount(sum: TokenSum): string {
+  return `${tokens(sum.input + sum.cached + sum.output)} tok`;
+}
+
+/** The tooltip that splits the count into its three parts. */
+export function tokenTooltip(sum: TokenSum): string {
+  return `Input ${tokens(sum.input)} · Cached ${tokens(sum.cached)} · Output ${tokens(sum.output)}`;
 }
 
 /**

@@ -42,6 +42,12 @@ Terms as harnessd uses them. Use them as written here in issues, tests and docs.
 
 **Budget used**: elapsed wall-clock time of a run over its size budget (S 30 min, M 2 h, D-014).
 
+**Reviewed head**: the PR head sha that QA read for one part, with its verdict (`approved` or `changes_requested`), kept per part in `loop.json`. A part whose PR head is still the approved sha gets no second QA run (D-040). _Avoid_: reviewed commit, last sha.
+
+**Token budget**: the tokens one parent may spend across its grill, plan, part and QA runs, by size: S 5M, M 12M (D-040). At or over it the loop starts nothing new and moves the parent to Needs input. _Avoid_: token limit, quota.
+
+**Usage sum**: the input, cached and output tokens a parent used, added up per run and kept in `loop.json` under `usage`, so it survives a restart. The board shows it as one count, such as "7.4M tok" (D-040). _Avoid_: token count, spend.
+
 **Run**: one agent working one sub-issue in its own worktree (D-012). A QA round is one run.
 
 **Ship step**: the daemon's commit, push and open or update of the PR after an ok part run (D-039). The agent does no git write and needs no GitHub login. _Avoid_: publish, release.

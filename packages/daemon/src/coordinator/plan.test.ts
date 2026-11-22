@@ -76,16 +76,28 @@ const part = (role: string, size = "S") => ({
   size,
 });
 
-test("parsePlanReply accepts strict JSON, also inside a code fence", () => {
-  const reply = JSON.stringify({ parts: [part("backend"), part("frontend", "m")] });
+test("parsePlanReply accepts strict JSON with a reason, also inside a code fence", () => {
+  const reply = JSON.stringify({
+    parts: [part("backend"), part("frontend", "m")],
+    reason: "The UI needs the API first.",
+  });
   assert.deepEqual(parsePlanReply(reply), {
     ok: true,
     parts: [
       { role: "backend", title: "backend work", prompt: "Do it.", size: "S" },
       { role: "frontend", title: "frontend work", prompt: "Do it.", size: "M" },
     ],
+    reason: "The UI needs the API first.",
   });
   assert.equal(parsePlanReply(`Here:\n\`\`\`json\n${reply}\n\`\`\``).ok, true);
+});
+
+test("a plan with more than one part and no reason is invalid (D-040)", () => {
+  const parsed = parsePlanReply(JSON.stringify({ parts: [part("backend"), part("frontend")] }));
+  assert.equal(parsed.ok, false);
+  if (!parsed.ok) assert.match(parsed.error, /reason: a plan with more than one part/);
+  assert.equal(parsePlanReply(JSON.stringify({ parts: [part("backend")] })).ok, true);
+  assert.equal(parsePlanReply(JSON.stringify({ parts: [part("backend")], reason: " " })).ok, false);
 });
 
 test("parsePlanReply parses L so the loop can refuse it", () => {
@@ -136,7 +148,8 @@ test("buildPlanPrompt carries the rules, the issue, the grill calls and the cont
   });
   for (const text of [
     "Reply with strict JSON only",
-    '"role": "backend" | "frontend"',
+    "Plan ONE part by default",
+    '"reason" must say why',
     "L is not allowed",
     "Do not plan QA",
     "## Coordinator instructions\nKeep parts small.",

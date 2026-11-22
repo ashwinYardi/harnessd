@@ -4,6 +4,13 @@ import type { HarnessId } from "./index.ts";
 import type { HarnessLimit } from "./limits.ts";
 import type { Priority, Size } from "./linear.ts";
 
+/** Tokens one parent used: input, cached (read plus write) and output (D-040). */
+export interface TokenSum {
+  input: number;
+  cached: number;
+  output: number;
+}
+
 /** One issue on the board. Linear is the source; the loop adds what it knows. */
 export interface BoardIssue {
   id: string;
@@ -26,6 +33,8 @@ export interface BoardIssue {
   blocked?: string;
   /** The agent running this issue in this daemon, if any. */
   agent?: string;
+  /** Tokens the issue spent across its runs, when it has any (D-040). */
+  tokens?: TokenSum;
 }
 
 export interface BoardSnapshot {
