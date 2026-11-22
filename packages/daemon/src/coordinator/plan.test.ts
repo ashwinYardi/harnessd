@@ -117,6 +117,19 @@ test("a blank reason counts as no reason: one part is valid and keeps its own br
   }
 });
 
+test("a non-string reason counts as no reason: one part is valid, more parts are not (D-040)", () => {
+  for (const reason of [5, null, { why: "x" }]) {
+    const one = parsePlanReply(JSON.stringify({ parts: [part("backend")], reason }));
+    assert.equal(one.ok, true, JSON.stringify(reason));
+    if (one.ok) assert.equal("reason" in one, false);
+    const two = parsePlanReply(
+      JSON.stringify({ parts: [part("backend"), part("frontend")], reason }),
+    );
+    assert.equal(two.ok, false, JSON.stringify(reason));
+    if (!two.ok) assert.match(two.error, /reason: a plan with more than one part/);
+  }
+});
+
 test("a blank reason is still invalid for a plan with more than one part (D-040)", () => {
   for (const reason of ["", "  \t"]) {
     const parsed = parsePlanReply(
@@ -143,9 +156,6 @@ test("parsePlanReply rejects anything off-shape", () => {
     [{ parts: [{ ...part("backend"), title: " " }] }, /parts\[0\]\.title: expected a non-empty/],
     [{ parts: [part("qa")] }, /role: expected backend or frontend, got "qa"/],
     [{ parts: [part("backend", "XL")] }, /size: expected S or M, got "XL"/],
-    [{ parts: [part("backend")], reason: 5 }, /reason: expected a string/],
-    [{ parts: [part("backend")], reason: null }, /reason: expected a string/],
-    [{ parts: [part("backend")], reason: { why: "x" } }, /reason: expected a string/],
   ];
   for (const [value, error] of cases) {
     const parsed = parsePlanReply(JSON.stringify(value));

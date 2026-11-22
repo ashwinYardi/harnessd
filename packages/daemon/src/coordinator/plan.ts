@@ -129,14 +129,12 @@ export function parsePlanReply(text: string, options: ParsePlanOptions = {}): Pa
   if (value.parts.length > MAX_PLAN_PARTS) {
     return { ok: false, error: `parts: expected at most ${MAX_PLAN_PARTS} parts` };
   }
-  let reason: string | undefined;
-  if (value.reason !== undefined) {
-    if (typeof value.reason !== "string") {
-      return { ok: false, error: "reason: expected a string" };
-    }
-    const trimmed = value.reason.trim();
-    if (trimmed !== "") reason = trimmed;
-  }
+  // A one-part plan does not use "reason", so a blank or non-string one counts as none and
+  // never throws the plan away. A plan with more parts still needs a real reason (D-040).
+  const reason =
+    typeof value.reason === "string" && value.reason.trim() !== ""
+      ? value.reason.trim()
+      : undefined;
   if (value.parts.length > 1 && reason === undefined) {
     return {
       ok: false,
