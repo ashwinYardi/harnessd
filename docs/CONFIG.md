@@ -19,7 +19,7 @@ max_concurrent = 1
 budget_minutes = { S = 30, M = 120 }   # L has no budget: split it (D-014)
 token_budget = { S = 3000000, M = 6000000 }   # weighted; an unknown size counts as M (D-043)
 cached_token_weight = 0.1   # a cached token counts this much of a new input token (D-043)
-max_turns = { S = 80, M = 160 }   # builder run turn cap; QA 40 and coordinator 50 are fixed (D-045)
+max_turns = { S = 80, M = 160 }   # builder run turn cap; QA (S 40, M 80) and coordinator 50 are in code (D-045, D-047)
 qa_max_failures = 2
 
 [linear]
@@ -102,7 +102,7 @@ The weighted sum is `input + output + round(cached × limits.cached_token_weight
 ### Turn caps and tool output (D-045)
 `limits.max_turns` is the model turns one **builder** part run may take, keyed by size like `budget_minutes`: `S = 80`, `M = 160`. A value is a positive integer per size, and an unknown size counts as M. It is optional and merges per layer like the other `limits` keys. Zero, a negative number, a non-integer or a size key other than S or M is a config error. The loop reads the part's size before it starts the run.
 
-The other roles have fixed caps in code, not in config: **QA 40**, **coordinator grill and plan 50**. QA judges one PR against a checklist, and grill and plan write one reply.
+The other roles have caps in code, not in config: **QA S 40 and M 80** for the parent's size, and **coordinator grill and plan 50**. QA judges one PR against a checklist, and grill and plan write one reply. A QA cap of 40 for every size stopped the QA of a 17-file M PR twice with no verdict (D-047).
 
 A run at its cap ends `error` with `turn cap (<n> turns)` and no failure reason. It is not shipped; it follows the normal error rule: one attempt is counted, the worktree is kept when it holds unshipped work, and the next attempt resumes the same branch (D-039). A turn-capped QA run counts as a QA failure, as an agent error does. A turn-capped grill or plan run is an error run, and the plan uses the one-part fallback.
 

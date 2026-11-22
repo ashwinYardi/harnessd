@@ -29,16 +29,17 @@ export function agentForRole(config: MergedConfig, role: AgentRole): string | un
     .find((name) => config.agents[name]?.role === role);
 }
 
-/** Fixed turn caps for the roles that do not use the size key (D-045). */
-export const QA_MAX_TURNS = 40;
+/** Turn caps in code for the roles that do not use the config key (D-045, D-047). */
+export const QA_MAX_TURNS = { S: 40, M: 80 } as const;
 export const COORDINATOR_MAX_TURNS = 50;
 
 /**
- * Turn cap of a run by role and size (D-045). Builder part runs use `limits.max_turns` for
- * the part's size; a missing or unknown size counts as M. QA, grill and plan use fixed caps.
+ * Turn cap of a run by role and size (D-045, D-047). Builder part runs use
+ * `limits.max_turns` for the part's size. QA uses its own cap for the parent's size. A
+ * missing or unknown size counts as M. Grill and plan use one fixed cap.
  */
 export function maxTurns(role: AgentRole, size: Size | undefined, limits: LimitsConfig): number {
-  if (role === "qa") return QA_MAX_TURNS;
+  if (role === "qa") return size === "S" ? QA_MAX_TURNS.S : QA_MAX_TURNS.M;
   if (role === "coordinator") return COORDINATOR_MAX_TURNS;
   // L never runs; an unknown or L size counts as M, as for the budgets.
   return size === "S" ? limits.max_turns.S : limits.max_turns.M;
