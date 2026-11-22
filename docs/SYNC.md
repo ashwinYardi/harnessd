@@ -13,7 +13,7 @@
 | `.mcp.json` | Claude Code | `[mcp.<name>]` tables plus `harnessd-memory` |
 | `.codex/config.toml` | Codex | the same servers as `[mcp_servers.<name>]` |
 | `.codex/hooks.json` | Codex | the skills' Codex hooks; only when a skill has some. Merged, not replaced |
-| `opencode.json` | OpenCode | the same servers as local `mcp` entries. Merged, not replaced: sync owns `$schema` and its own `mcp` entries by name |
+| `opencode.json` | OpenCode | the same servers as local `mcp` entries. Merged, not replaced: sync owns `$schema`, `permission`, `websearch` and its own `mcp` entries by name |
 
 Every repo gets the built-in memory server (docs/MEMORY.md) as `harnessd-memory`, run as `harnessd mcp memory`. To run it another way (say `npx -y @harnessd/cli mcp memory` when `harnessd` is not on PATH), define `[mcp.harnessd-memory]` yourself; it replaces the default.
 
@@ -65,7 +65,7 @@ Commit `.harnessd/` (including `vault/`, the repo's shared memory), `AGENTS.md`,
 opencode.json
 ```
 
-**opencode.json.** Sync merges into it. It sets `$schema` and one `mcp` entry for each of its servers, by name. A user's own `mcp` entries and every other key, such as `model` or `provider`, stay. A file that is not a JSON object, or whose `mcp` is not an object, stops sync.
+**opencode.json.** Sync merges into it. It replaces `$schema`, `permission` and `websearch` as whole keys. It sets one `mcp` entry for each of its servers, by name. User-owned `mcp` entries and keys such as `model` and `provider` stay. Owner sync writes the default permission table. OpenCode allows unlisted tools through `--auto`, including MCP tools. Worktree sync applies the run agent's `opencode_permission` overrides. Sync sets the Web Search provider to `random`. A file that is not a JSON object, or whose `mcp` is not an object, stops sync.
 
 Global AGENTS.md and rules end up in the repo's AGENTS.md, so keep anything private out of `~/.harnessd/`.
 

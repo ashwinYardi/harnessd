@@ -100,7 +100,7 @@ function readRecord(path: string): Record_ {
 
 const BASE = ["run", "--format", "json", "--standalone", "--auto"];
 
-test("openCodeArgs runs a standalone, auto-approved JSON run and ends flags with --", () => {
+test("openCodeArgs runs a standalone JSON run with --auto and ends flags with --", () => {
   assert.deepEqual(openCodeArgs(task()), [...BASE, "--", "Say hi"]);
 });
 
@@ -395,4 +395,54 @@ test("a missing binary is an error, not a throw", async () => {
   assert.match(result.error ?? "", /ENOENT/);
   const left = readdirSync(tmpdir()).filter((n) => n.startsWith("harnessd-opencode-config-"));
   assert.deepEqual(left, before);
+});
+
+test("a cancelled Web Search input explains exit 1 after a step", async () => {
+  const { run: r } = run({ fixture: "cancelled-input", exit: 1 });
+  const events = await collect(r);
+  assert.deepEqual(
+    events.filter((event) => event.type === "log"),
+    [{ type: "log", stream: "stdout", line: "Web Search request cancelled; the run goes on" }],
+  );
+  const result = await r.result;
+  assert.equal(result.status, "ok");
+  assert.equal(result.finalText, "Continued after cancellation.");
+});
+
+test("a provider auth error after cancelled input still fails the run", async () => {
+  const { run: r } = run({ fixture: "cancelled-input-auth", exit: 1 });
+  await collect(r);
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.reason, "auth");
+});
+
+test("a cancelled input without a step still fails the run", async () => {
+  const { run: r } = run({ fixture: "cancelled-input-no-step", exit: 1 });
+  await collect(r);
+  assert.equal((await r.result).status, "error");
+});
+
+test("an auth failure on stderr can still explain a nonzero exit after cancelled input", async () => {
+  const { run: r } = run({
+    fixture: "cancelled-input",
+    exit: 1,
+    stderr: "Error: Invalid API key\nWarning: cleanup complete",
+  });
+  await collect(r);
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.reason, "auth");
+});
+
+test("an unclassified CLI error on stderr still fails after cancelled input", async () => {
+  const { run: r } = run({
+    fixture: "cancelled-input",
+    exit: 1,
+    stderr: "\x1b[91m\x1b[1mError: \x1b[0mconnection reset",
+  });
+  await collect(r);
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.match(result.error ?? "", /connection reset/);
 });

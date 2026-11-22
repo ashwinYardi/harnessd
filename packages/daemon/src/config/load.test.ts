@@ -314,3 +314,37 @@ test("secret references load from the global config.toml only (MET-33)", async (
     ),
   );
 });
+
+test("OpenCode permissions merge across layers for one agent", async () => {
+  const f = await fixture({
+    "home/.harnessd/config.toml":
+      '[agents.backend.opencode_permission]\nwebsearch = "allow"\nbash = { "*" = "deny", "git status*" = "allow" }\n',
+    "repo/.harnessd/config.toml":
+      '[agents.backend.opencode_permission]\nwebsearch = "deny"\nbash = { "git diff*" = "allow" }\n',
+  });
+  const merged = await loadConfig(f);
+  assert.deepEqual(resolveAgentConfig(merged, "backend").opencode_permission, {
+    websearch: "deny",
+    bash: { "*": "deny", "git status*": "allow", "git diff*": "allow" },
+  });
+  assert.equal(resolveAgentConfig(merged, "qa").opencode_permission, undefined);
+});
+
+test("OpenCode permission actions must be allow or deny", async () => {
+  for (const [value, path] of [
+    ['"ask"', "bash"],
+    ['{ "*" = "ask" }', "bash.*"],
+    ["true", "bash"],
+    ["[]", "bash"],
+  ]) {
+    const f = await fixture({
+      "repo/.harnessd/config.toml": `[agents.backend.opencode_permission]\nbash = ${value}\n`,
+    });
+    await assert.rejects(loadConfig(f), (error: unknown) => {
+      assert.ok(error instanceof ConfigError);
+      assert.equal(error.key, `agents.backend.opencode_permission.${path}`);
+      assert.match(error.message, /expected one of allow, deny/);
+      return true;
+    });
+  }
+});
