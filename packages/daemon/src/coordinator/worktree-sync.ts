@@ -9,6 +9,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import type { ResolvedAgentConfig } from "@harnessd/shared";
 import { globalStateDir } from "../control/files.ts";
 import { syncRepo } from "../sync/sync.ts";
 
@@ -23,6 +24,8 @@ export interface WorktreeSyncInput {
   worktree: string;
   /** Names the excludes file, e.g. the task id. */
   runId: string;
+  /** The agent assigned to this run. */
+  agent?: Pick<ResolvedAgentConfig, "opencode_permission">;
   /** The daemon's environment. Default process.env. */
   env?: NodeJS.ProcessEnv;
 }
@@ -90,6 +93,9 @@ export async function syncWorktree(input: WorktreeSyncInput): Promise<WorktreeSy
     repoDir: input.worktree,
     workspaceDir: join(input.repoDir, ".harnessd"),
     globalDir: input.globalDir,
+    ...(input.agent?.opencode_permission === undefined
+      ? {}
+      : { opencodePermission: input.agent.opencode_permission }),
   });
 
   const listed =

@@ -4,8 +4,10 @@ import {
   type HookEvents,
   type McpServerConfig,
   type MergedConfig,
+  type OpenCodePermission,
   type Skill,
 } from "@harnessd/shared";
+import { deepMerge } from "../config/merge.ts";
 import { jsonFile, tomlKey, tomlString, tomlStringArray, yamlString } from "./format.ts";
 import type { NativeSettings } from "./settings.ts";
 
@@ -44,6 +46,7 @@ export interface GenerateOptions {
    * vault. Unset for a plain `harnessd sync`: the server finds the repo from its cwd.
    */
   memoryWorkspace?: string;
+  opencodePermission?: OpenCodePermission;
 }
 
 function memoryServer(options: GenerateOptions): McpServerConfig {
@@ -141,10 +144,25 @@ export function agentMd(text: string): string {
   return `${note}${text}`;
 }
 
-/**
- * `opencode.json`: one local `mcp` entry per server. Sync merges this into the file: it
- * owns `$schema` and its own `mcp` entries by name; every other key stays the user's.
- */
+const OPENCODE_PERMISSION: OpenCodePermission = {
+  read: "allow",
+  edit: "allow",
+  glob: "allow",
+  grep: "allow",
+  list: "allow",
+  lsp: "allow",
+  skill: "allow",
+  task: "allow",
+  todowrite: "allow",
+  webfetch: "allow",
+  websearch: "allow",
+  bash: { "*": "allow", "git push *": "deny" },
+  external_directory: "deny",
+  question: "deny",
+  doom_loop: "deny",
+};
+
+/** Sync owns the OpenCode schema, permissions, Web Search provider and generated MCP entries. */
 export function opencodeSettings(
   config: MergedConfig,
   options: GenerateOptions = {},
@@ -158,7 +176,15 @@ export function opencodeSettings(
       enabled: true,
     };
   }
-  return { keys: { $schema: "https://opencode.ai/config.json" }, hooks: {}, entries: { mcp } };
+  return {
+    keys: {
+      $schema: "https://opencode.ai/config.json",
+      permission: deepMerge(OPENCODE_PERMISSION, options.opencodePermission),
+      websearch: { provider: "random" },
+    },
+    hooks: {},
+    entries: { mcp },
+  };
 }
 
 /** `.mcp.json`, the project MCP file Claude Code reads. */

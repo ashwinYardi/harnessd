@@ -122,6 +122,8 @@ interface Failure {
 }
 
 /** Turns `opencode run --format json` lines into adapter events and tracks run totals. */
+const CANCELLED_INPUT = "Cancelled a request for input this run cannot answer:";
+
 class OpenCodeJsonParser implements LineParser {
   #emit: (event: AdapterEvent) => void;
   #sessionId: string | undefined;
@@ -129,6 +131,7 @@ class OpenCodeJsonParser implements LineParser {
   #tokens = emptyTokenUsage();
   #cost: number | undefined;
   #steps = 0;
+  #cancelledInput = false;
   #failure: Failure | undefined;
   #lastStderr: string | undefined;
   /** Tool calls already shown, so a call is shown once. */
@@ -165,14 +168,20 @@ class OpenCodeJsonParser implements LineParser {
     if (failure === undefined && (!ok || exitCode !== 0) && this.#lastStderr !== undefined) {
       failure = { message: this.#lastStderr };
     }
+    const reason =
+      failure === undefined
+        ? undefined
+        : ((failure.type === undefined ? undefined : TYPED_REASON[failure.type]) ??
+          openCodeFailureReason(failure.message));
+    if (ok && this.#cancelledInput && exitCode === 1 && reason === undefined) {
+      out.acceptNonzeroExit = true;
+      return out;
+    }
     if (failure === undefined) {
       if (exitCode !== 0) out.error = `exited with code ${exitCode}`;
       else if (this.#steps === 0) out.error = "no step event";
       return out;
     }
-    const reason =
-      (failure.type === undefined ? undefined : TYPED_REASON[failure.type]) ??
-      openCodeFailureReason(failure.message);
     if (reason === undefined) {
       out.error = failure.message;
       return out;
@@ -261,11 +270,17 @@ class OpenCodeJsonParser implements LineParser {
   }
 
   #error(error: unknown): void {
-    // The first error is the cause; later ones (such as an abort) follow from it.
-    if (this.#failure !== undefined) return;
     const e = isRecord(error) ? error : {};
     const message =
       typeof e.message === "string" && e.message !== "" ? e.message : "harness reported an error";
+    if (message.startsWith(CANCELLED_INPUT)) {
+      this.#cancelledInput = true;
+      const title = message.slice(CANCELLED_INPUT.length).trim();
+      this.#raw(`${oneLine(title)} request cancelled; the run goes on`);
+      return;
+    }
+    // Keep the first failure. Cancelled input is only a log event.
+    if (this.#failure !== undefined) return;
     const failure: Failure = { message };
     if (typeof e.type === "string") failure.type = e.type;
     const retry = e.retryAfterMs ?? (isRecord(e.rateLimit) ? e.rateLimit.retryAfterMs : undefined);
