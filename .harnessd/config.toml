@@ -4,7 +4,8 @@ team_id = "MET"
 project = "harnessd"
 
 [limits]
-max_concurrent = 2
+# Owner 2026-11-22: one ticket at a time (one PR, one QA, merge, next).
+max_concurrent = 1
 
 # Models per agent. Effort per harness is MET-89; until then Codex runs at the model's
 # default effort and Claude at its default.
@@ -15,15 +16,24 @@ model = "claude-opus-5-5"
 
 [agents.backend]
 role = "backend"
-harness = "codex"
-model = "gpt-6.2-sol"
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash#high"
+# Owner 2026-11-22: only the coordinator on Claude; the rest on OpenCode. Codex only as a fallback on a limit.
+fallback_harness = "codex"
+fallback_model = "gpt-6.2-sol"
 
 [agents.frontend]
 role = "frontend"
-harness = "claude-code"
-model = "claude-opus-5-5"
+harness = "opencode"
+model = "opencode-go/glm-5.3-flash"
+# Owner 2026-11-22: only the coordinator on Claude; the rest on OpenCode. Codex only as a fallback on a limit.
+fallback_harness = "codex"
+fallback_model = "gpt-6.2-sol"
 
 [agents.qa]
 role = "qa"
-harness = "codex"
-model = "gpt-6.2-sol"
+harness = "opencode"
+model = "opencode-go/deepseek-v4.1-flash#high"
+# Owner 2026-11-22: only the coordinator on Claude; the rest on OpenCode. Codex only as a fallback on a limit.
+fallback_harness = "codex"
+fallback_model = "gpt-6.2-sol"
