@@ -3,11 +3,15 @@ import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { type Exec, execFile, isExecutableFile, pathDirs } from "../status/detect.ts";
 import { LAUNCHD_LABEL } from "../status/launchd.ts";
+import { blockingLocalChanges } from "./detect.ts";
 
 type Target = { from: string; to: string };
-type Step = "pull" | "install" | "build" | "restart";
+type Step = "pull" | "install" | "build" | "sync" | "restart";
 type Failure = { status: "failed"; step: Step; error: string };
-type ApplyResult = { status: "restarted" } | Failure;
+type ApplyResult = { status: "restarted" } | { status: "blocked"; reason: string } | Failure;
+
+/** The update went back to the old commit because a kept change conflicts with the target. */
+class BlockedError extends Error {}
 
 interface ApplyOptions {
   installRoot: string;
@@ -21,8 +25,12 @@ interface ApplyOptions {
   uid?: number;
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function failed(step: Step, error: unknown): Failure {
-  const text = error instanceof Error ? error.message : String(error);
+  const text = errorMessage(error);
   const output = text.trimEnd().split(/\r?\n/).slice(-20).join("\n");
   return { status: "failed", step, error: `${step}: ${output}` };
 }
@@ -66,15 +74,33 @@ export function createUpdateApplier(options: ApplyOptions) {
     }
 
     const git = (...args: string[]) => run(installRoot, "git", ...args);
-    async function checkCheckout(expectedHead: string): Promise<void> {
-      const changes = await git(
-        "--no-optional-locks",
-        "status",
-        "--porcelain",
-        "--untracked-files=all",
-        "--ignore-submodules=none",
+
+    /** The status lines that block, and whether any tracked path changed (those get stashed). */
+    async function checkoutChanges(): Promise<{ blocked: string[]; tracked: boolean }> {
+      const result = await exec(
+        "git",
+        [
+          "--no-optional-locks",
+          "status",
+          "--porcelain",
+          "--untracked-files=all",
+          "--ignore-submodules=none",
+        ],
+        { cwd: installRoot, env },
       );
-      if (changes) throw new Error(`Local changes in the install clone:\n${changes}`);
+      if (result.code !== 0) throw new Error("Cannot check the install clone for local changes.");
+      const lines = result.stdout.split("\n").filter((line) => line.trim() !== "");
+      return {
+        blocked: blockingLocalChanges(result.stdout),
+        tracked: lines.some((line) => !line.startsWith("??")),
+      };
+    }
+
+    async function checkCheckout(expectedHead: string): Promise<boolean> {
+      const { blocked, tracked } = await checkoutChanges();
+      if (blocked.length > 0) {
+        throw new Error(`Local changes in the install clone:\n${blocked.join("\n")}`);
+      }
       for (const marker of [
         "MERGE_HEAD",
         "rebase-merge",
@@ -100,10 +126,11 @@ export function createUpdateApplier(options: ApplyOptions) {
       if (head !== expectedHead) {
         throw new Error("The install commit changed during the update.");
       }
+      return tracked;
     }
 
-    async function checkInstall(): Promise<void> {
-      await checkCheckout(from);
+    async function checkInstall(): Promise<boolean> {
+      const tracked = await checkCheckout(from);
       const origin = await git(
         "rev-parse",
         "--verify",
@@ -113,6 +140,7 @@ export function createUpdateApplier(options: ApplyOptions) {
         throw new Error("The origin commit changed after the update check.");
       }
       await git("merge-base", "--is-ancestor", from, to);
+      return tracked;
     }
 
     try {
@@ -167,6 +195,9 @@ export function createUpdateApplier(options: ApplyOptions) {
       const backup = await mkdtemp(join(cache, "self-update-"));
       const saved = new Map<string, string | undefined>();
       let advanced = false;
+      let stashed = false;
+      let stashCommit: string | undefined;
+      const stashMessage = `harnessd self-update ${from.slice(0, 7)}`;
       let keepBackup = false;
       try {
         const workspaceDirs = await readdir(join(installRoot, "packages"), {
@@ -181,7 +212,7 @@ export function createUpdateApplier(options: ApplyOptions) {
             .filter((entry) => entry.isDirectory())
             .map((entry) => join(installRoot, "packages", entry.name)),
         ];
-        await checkInstall();
+        const tracked = await checkInstall();
         for (const root of roots) {
           for (const name of ["dist", "node_modules"]) {
             const path = join(root, name);
@@ -195,9 +226,53 @@ export function createUpdateApplier(options: ApplyOptions) {
             }
           }
         }
+        // Keep the changes harnessd writes over the fast-forward, as a manual deploy does
+        // (D-042). Untracked kept paths stay in place; the merge refuses if it adds one.
+        if (tracked) {
+          await git("stash", "push", "-m", stashMessage);
+          stashed = true;
+          // Kept for a rollback: the stash is based on `from`, so it applies cleanly there
+          // even after a pop drops its ref.
+          stashCommit = await git("rev-parse", "--verify", "refs/stash").catch(() => undefined);
+        }
         await git("merge", "--ff-only", "--no-overwrite-ignore", to);
         advanced = true;
+        if (stashed) {
+          try {
+            await git("stash", "pop");
+            stashed = false;
+          } catch (error) {
+            // The change conflicts with the target commit. Go back to the old commit and
+            // put the change there, so nothing is lost (D-033).
+            const conflicts = (await git("diff", "--name-only", "--diff-filter=U").catch(() => ""))
+              .split("\n")
+              .map((line) => line.trim())
+              .filter(Boolean);
+            step = "pull";
+            await git("reset", "--hard", from);
+            advanced = false;
+            try {
+              await git("stash", "pop");
+              stashed = false;
+            } catch {
+              throw new BlockedError(
+                `Local changes conflict with the update: ${conflicts.join(", ") || errorMessage(error)}. The stash ${stashMessage} is kept.`,
+              );
+            }
+            throw new BlockedError(
+              `Local changes conflict with the update: ${conflicts.join(", ") || errorMessage(error)}.`,
+            );
+          }
+        }
         await build(installRoot);
+        step = "sync";
+        await run(
+          installRoot,
+          process.execPath,
+          join(installRoot, "packages", "cli", "dist", "bin.js"),
+          "sync",
+          installRoot,
+        );
         step = "pull";
         await checkCheckout(to);
         step = "restart";
@@ -205,25 +280,47 @@ export function createUpdateApplier(options: ApplyOptions) {
         await run(installRoot, "launchctl", "kickstart", "-k", `gui/${uid}/${LAUNCHD_LABEL}`);
         return { status: "restarted" };
       } catch (error) {
-        const failure = failed(step, error);
+        const blocked = error instanceof BlockedError;
+        let detail = blocked ? error.message : failed(step, error).error;
         if (advanced) {
           try {
             await checkCheckout(to);
-            await git("reset", "--keep", from);
+            if (stashCommit !== undefined) {
+              // The kept changes are applied over `to`. Take them out of the way, go back to
+              // `from`, and put them back there (D-033 never discards a change).
+              await git("reset", "--hard", from);
+              try {
+                await git("stash", "apply", stashCommit);
+              } catch (applyError) {
+                detail += `\nThe kept changes stay in stash commit ${stashCommit}: ${failed("pull", applyError).error}`;
+              }
+            } else {
+              await git("reset", "--keep", from);
+            }
           } catch (rollbackError) {
-            failure.error += `\nRestore the old commit: ${failed("pull", rollbackError).error}`;
+            detail += `\nRestore the old commit: ${failed("pull", rollbackError).error}`;
+          }
+        } else if (stashed && !blocked) {
+          // The install clone did not advance: put the kept change back.
+          try {
+            await git("stash", "pop");
+            stashed = false;
+          } catch (popError) {
+            detail += `\nThe kept changes stay in ${stashMessage}: ${failed("pull", popError).error}`;
           }
         }
         for (const [path, copy] of saved) {
           try {
-            if (advanced) await rm(path, { recursive: true, force: true });
+            await rm(path, { recursive: true, force: true });
             if (copy !== undefined) await rename(copy, path);
           } catch (restoreError) {
             keepBackup = true;
-            failure.error += `\nRestore ${path}${copy ? ` from ${copy}` : ""}: ${failed("build", restoreError).error}`;
+            detail += `\nRestore ${path}${copy ? ` from ${copy}` : ""}: ${failed("build", restoreError).error}`;
           }
         }
-        return failure;
+        return blocked
+          ? { status: "blocked", reason: detail }
+          : { status: "failed", step, error: detail };
       } finally {
         if (!keepBackup) await rm(backup, { recursive: true, force: true }).catch(() => {});
       }
@@ -235,12 +332,19 @@ export function createUpdateApplier(options: ApplyOptions) {
 
 /** Bind the install check and the applier to the coordinator's safe-point interface. */
 export function createSelfUpdater(
-  options: ApplyOptions & { checkForUpdate(): Promise<Target | undefined> },
+  options: ApplyOptions & {
+    checkForUpdate(): Promise<Target | undefined>;
+    /** The commit the running build came from, so a new process can finish an applying record. */
+    runningCommit?: string;
+  },
 ) {
   const applyUpdate = createUpdateApplier(options);
   return {
+    ...(options.runningCommit ? { runningCommit: options.runningCommit } : {}),
     checkForUpdate: () => options.checkForUpdate(),
-    async applyUpdate(target: Target): Promise<{ status: "applied" } | Failure> {
+    async applyUpdate(
+      target: Target,
+    ): Promise<{ status: "applied" } | { status: "blocked"; reason: string } | Failure> {
       const result = await applyUpdate(target);
       return result.status === "restarted" ? { status: "applied" } : result;
     },

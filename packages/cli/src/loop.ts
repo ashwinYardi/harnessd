@@ -2,7 +2,9 @@
 import { join, resolve } from "node:path";
 import {
   agentsView,
+  type Check,
   type CoordinatorLoop,
+  checkForUpdate as checkSelfUpdate,
   createBoardSource,
   createClaudeCodeAdapter,
   createCodexAdapter,
@@ -15,19 +17,25 @@ import {
   createOpenCodeAdapter,
   createPauseController,
   createSecretStore,
+  createSelfUpdater,
   createUiApi,
   createVisibility,
   type Daemon,
   type DaemonInfo,
   DEFAULT_LOOP_INTERVAL_MS,
+  type Detection,
   defaultGlobalDir,
   detectSelfUpdate,
+  failedByTimeout,
+  type GitHub,
   HttpError,
+  headCommit,
   isBlocking,
   LinearClient,
   type ListReadyOptions,
   loadConfig,
   mergeLayers,
+  originHeadBranch,
   type Route,
   removeDaemonInfo,
   runStatus,
@@ -35,8 +43,10 @@ import {
   type SecretStore,
   type SelfUpdateRunner,
   type SelfUpdater,
+  type SelfUpdateTarget,
   type SetupRunner,
   type SlackFetch,
+  type StatusOptions,
   secretRoutes,
   setupRoutes,
   startDaemon,
@@ -114,6 +124,10 @@ export interface LoopIO {
   fetch?: SlackFetch;
   /** Runs the status checks (MET-27). Default: the real machine. */
   checks?: RunChecks;
+  /** The GitHub client. Default: the `gh` CLI in the workspace. */
+  github?: GitHub;
+  /** The Linear client. Default: one that reads the saved key on each request. */
+  linear?: LinearClient;
   /** Runs the fixed setup commands (install, update, sign in). Default: the real machine. */
   setupRunner?: SetupRunner;
   /**
@@ -163,6 +177,9 @@ interface Deps {
   pauseStore: ReturnType<typeof createFilePauseStore>;
   logs: ReturnType<typeof createLogBuffer>;
   secrets: SecretStore;
+  github: GitHub;
+  /** Built once from the start detection, or supplied by a test. */
+  selfUpdater?: SelfUpdater;
   log: (line: string) => void;
 }
 
@@ -250,20 +267,115 @@ export function harnessAdapters(
   };
 }
 
+/** How many times the start checks run when a blocking check timed out. */
+export const START_CHECK_RUNS = 3;
+
+/** The longer limit a retried start check gets (MET-137). */
+export const RETRY_TIMEOUT_MS = 15_000;
+
+/**
+ * Runs the start checks. A blocking check that failed by timeout runs the whole status check
+ * again, up to `START_CHECK_RUNS` runs in total, with a longer limit (MET-137). A check that
+ * passes on a retry lets the loop start with no Start press (D-026).
+ */
+export async function startChecksWithRetry(
+  checks: RunChecks,
+  options: StatusOptions,
+  log: (line: string) => void,
+): Promise<Check[]> {
+  let result = await checks(options);
+  for (let run = 2; run <= START_CHECK_RUNS; run++) {
+    const timedOut = result.filter((check) => isBlocking(check) && failedByTimeout(check.detail));
+    if (timedOut.length === 0) return result;
+    const ids = timedOut.map((check) => check.id).join(", ");
+    log(`${ids} timed out, retry ${run}/${START_CHECK_RUNS} with ${RETRY_TIMEOUT_MS / 1000} s`);
+    result = await checks({ ...options, timeoutMs: RETRY_TIMEOUT_MS, freshWorktreeWrite: false });
+  }
+  return result;
+}
+
+/**
+ * The self-update check the loop calls (MET-137). A blocked check maps to one log line and no
+ * target, so the loop neither pauses nor asks for input before a target exists (D-042). The
+ * same reason logs once; a changed reason or a new target logs again.
+ */
+export function selfUpdateCheck(
+  detection: Detection,
+  defaultBranch: string,
+  log: (line: string) => void,
+  runner?: SelfUpdateRunner,
+): () => Promise<SelfUpdateTarget | undefined> {
+  let lastReason: string | undefined;
+  return async () => {
+    const check = await checkSelfUpdate(detection, defaultBranch, runner);
+    if (check.kind === "blocked") {
+      if (check.reason !== lastReason) log(`self-update: not updating: ${check.reason}`);
+      lastReason = check.reason;
+      return undefined;
+    }
+    if (check.kind === "pending") {
+      // A target appeared: the next block is news again.
+      lastReason = undefined;
+      return { from: check.from, to: check.to };
+    }
+    return undefined;
+  };
+}
+
+/**
+ * The updater `harnessd run` wires when the start detection finds the install clone. The
+ * default branch comes from GitHub; when that lookup fails, from `origin/HEAD`.
+ */
+export async function createSelfUpdate(options: {
+  detection: Detection;
+  github: GitHub;
+  repoDir: string;
+  log: (line: string) => void;
+  runner?: SelfUpdateRunner;
+}): Promise<SelfUpdater | undefined> {
+  const { detection } = options;
+  if (detection.kind === "off") return undefined;
+  const branch =
+    (await options.github.defaultBranch().catch(() => undefined)) ??
+    (await originHeadBranch(detection.installRoot, options.runner)) ??
+    "main";
+  const store = createFileLoopStore(options.repoDir);
+  const runningCommit = await headCommit(detection.installRoot, options.runner);
+  return createSelfUpdater({
+    ...(runningCommit ? { runningCommit } : {}),
+    installRoot: detection.installRoot,
+    defaultBranch: branch,
+    checkForUpdate: selfUpdateCheck(detection, branch, options.log, options.runner),
+    async writePending(record) {
+      // The new process reads this record and finishes it (docs/LOOP.md "Self-update").
+      const state = await store.load();
+      const trigger = state.selfUpdate?.trigger;
+      state.selfUpdate = {
+        ...(trigger ? { trigger } : {}),
+        ...record,
+        state: "applying",
+      };
+      await store.save(state);
+    },
+  });
+}
+
 /** Builds the loop from the config and the Linear key, or says what blocks it. */
 async function buildLoop(deps: Deps): Promise<Built | Blocker> {
-  const { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log } = deps;
+  const { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, github, log } = deps;
   const ready = await findBlocker(deps);
   if (isBlocker(ready)) return ready;
   const { config, teamId, team } = ready;
   // Read on each request, so a key replaced in Settings is used on the next tick.
-  const linear = new LinearClient({
-    apiKey: async () => {
-      const key = await secrets.value("linear.api_key");
-      if (key === undefined) throw new Error("No Linear key. Save one in Settings, Connections.");
-      return key;
-    },
-  });
+  const linear =
+    io.linear ??
+    new LinearClient({
+      apiKey: async () => {
+        const key = await secrets.value("linear.api_key");
+        if (key === undefined) throw new Error("No Linear key. Save one in Settings, Connections.");
+        return key;
+      },
+    });
   let loop: CoordinatorLoop | undefined;
   const visibility = createVisibility({
     webhookUrl: () => secrets.value("slack.webhook_url"),
@@ -279,7 +391,7 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
     linear,
     adapters: harnessAdapters(config, parsed.permissionMode),
     worktrees: createGitWorktrees({ repoDir, root: join(globalDir, "worktrees") }),
-    github: createGhCli({ cwd: repoDir }),
+    github,
     store: createFileLoopStore(repoDir),
     repoDir,
     skillsDir: join(globalDir, "skills"),
@@ -288,10 +400,10 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
     team,
     intervalMs: parsed.intervalMs,
     paused: async () => (await pauseStore.read()).paused,
-    ...(io.selfUpdater && config.daemon.self_update
+    ...(deps.selfUpdater && config.daemon.self_update
       ? {
           selfUpdate: {
-            updater: io.selfUpdater,
+            updater: deps.selfUpdater,
             pause: (reason: string) => pauseStore.pause(reason),
           },
         }
@@ -341,13 +453,8 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     io.out(`${new Date().toISOString()} ${line}`);
     logs.push(line);
   };
-  const deps: Deps = { parsed, io, repoDir, globalDir, pauseStore, logs, secrets, log };
 
-  const built = await buildLoop(deps);
-  if (isBlocker(built) && parsed.once) {
-    io.err(`harnessd run: ${built.message}`);
-    return 1;
-  }
+  const github = io.github ?? createGhCli({ cwd: repoDir });
   // The port is read on its own, so a missing key or team still serves the app.
   let port: number;
   let fallback: MergedConfig;
@@ -365,8 +472,51 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     port = fallback.daemon.port;
   }
 
+  // Find the install clone once, so the loop can update itself from the first tick (MET-137).
+  let selfUpdateLine = "Self-update is off. Cannot read the daemon config.";
+  let selfUpdater = io.selfUpdater;
+  if (selfUpdate !== undefined) {
+    const detection = await detectSelfUpdate(
+      {
+        cliUrl: io.cliUrl ?? import.meta.url,
+        workspace: repoDir,
+        selfUpdate,
+        log: (line) => {
+          selfUpdateLine = line;
+        },
+      },
+      io.selfUpdateRunner,
+    );
+    if (detection.kind === "on") selfUpdateLine = "Self-update detected the install clone.";
+    selfUpdater ??= await createSelfUpdate({
+      detection,
+      github,
+      repoDir,
+      log,
+      ...(io.selfUpdateRunner ? { runner: io.selfUpdateRunner } : {}),
+    });
+  }
+  const deps: Deps = {
+    parsed,
+    io,
+    repoDir,
+    globalDir,
+    pauseStore,
+    logs,
+    secrets,
+    github,
+    ...(selfUpdater ? { selfUpdater } : {}),
+    log,
+  };
+
+  const built = await buildLoop(deps);
+  if (isBlocker(built) && parsed.once) {
+    io.err(`harnessd run: ${built.message}`);
+    return 1;
+  }
+
   // Every harness and connection, before anything is dispatched (MET-27, D-023).
-  const startChecks = await checks(options);
+  const startChecks = await startChecksWithRetry(checks, options, log);
   const startIds = startChecks.filter(isBlocking).map((c) => c.id);
   const blocking = isBlocker(built) ? [...new Set([built.check, ...startIds])] : startIds;
   if (blocking.length > 0 && parsed.once) {
@@ -466,22 +616,6 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       },
     },
   ];
-
-  let selfUpdateLine = "Self-update is off. Cannot read the daemon config.";
-  if (selfUpdate !== undefined) {
-    const update = await detectSelfUpdate(
-      {
-        cliUrl: io.cliUrl ?? import.meta.url,
-        workspace: repoDir,
-        selfUpdate,
-        log: (line) => {
-          selfUpdateLine = line;
-        },
-      },
-      io.selfUpdateRunner,
-    );
-    if (update.kind === "on") selfUpdateLine = "Self-update detected the install clone.";
-  }
 
   let daemon: Daemon;
   let page: Awaited<ReturnType<typeof staticRoutes>>;

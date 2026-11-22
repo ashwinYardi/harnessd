@@ -77,6 +77,8 @@ export interface CreatePrInput {
 
 /** The GitHub calls harnessd makes. `createGhCli` implements it; tests use a fake. */
 export interface GitHub {
+  /** The repo's default branch, such as `main`. Used to check harnessd's own install clone. */
+  defaultBranch(): Promise<string>;
   /** An open PR on this exact head branch, if any. */
   findPrByHead(branch: string): Promise<PullRequest | undefined>;
   /** The newest open PR whose title carries the issue key ("MET-41"), if any. */
@@ -330,6 +332,17 @@ export function createGhCli(options: GhCliOptions): GitHub {
   }
 
   return {
+    async defaultBranch() {
+      const { stdout } = await gh(["repo", "view", "--json", "defaultBranchRef"]);
+      const value = parseJson(stdout, "repo view");
+      const ref = isObj(value) ? value.defaultBranchRef : undefined;
+      const name = isObj(ref) ? ref.name : undefined;
+      if (typeof name !== "string" || name === "") {
+        throw new GitHubError("gh repo view: defaultBranchRef: expected a branch name");
+      }
+      return name;
+    },
+
     async findPrByHead(branch) {
       const { stdout } = await gh([
         "pr",

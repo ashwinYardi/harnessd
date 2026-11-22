@@ -8,6 +8,7 @@ import { createSelfUpdater, createUpdateApplier } from "./apply.ts";
 
 const from = "a".repeat(40);
 const to = "b".repeat(40);
+const STASH = "c".repeat(40);
 const now = new Date("2026-11-21T00:00:00Z");
 
 async function fixture(
@@ -15,6 +16,8 @@ async function fixture(
   options: {
     fail?: string;
     dirty?: "before" | "after staging";
+    changes?: string;
+    popConflict?: boolean;
     corepack?: boolean;
     operationDuringStage?: boolean;
     useLoopAdapter?: boolean;
@@ -30,18 +33,22 @@ async function fixture(
   let head = from;
   let failedOnce = false;
   let staged: string | undefined;
+  let pops = 0;
   const exec: Exec = async (cmd, args, opts) => {
     assert.equal(opts?.env?.PATH?.split(delimiter)[0], nodeDir);
     const cwd = opts?.cwd === installRoot ? "install" : "stage";
     const command = [cmd, ...args].join(" ");
     const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
     if (args.includes("status")) {
+      if (options.changes !== undefined) return ok(options.changes);
       const dirty = options.dirty === "before" || (options.dirty === "after staging" && staged);
       return ok(dirty ? " M README.md\n" : "");
     }
+    if (args[0] === "diff" && args.includes("--diff-filter=U")) return ok("AGENTS.md\n");
     if (args[0] === "merge-base") return ok();
     if (args[0] === "symbolic-ref") return ok("refs/heads/main\n");
     if (args[0] === "rev-parse") {
+      if (args.includes("refs/stash")) return ok(STASH);
       if (args.includes("--git-path")) return ok(join(root, args.at(-1) ?? ""));
       return ok(args.at(-1)?.startsWith("HEAD") ? head : to);
     }
@@ -55,6 +62,14 @@ async function fixture(
       assert.deepEqual(args, ["worktree", "remove", "--force", staged]);
       calls.push("remove stage");
       return ok();
+    }
+    if (args[0] === "stash" && args[1] === "pop" && options.popConflict && pops++ === 0) {
+      calls.push(`${cwd}: ${command}`);
+      return {
+        code: 1,
+        stdout: "",
+        stderr: "CONFLICT (content): Merge conflict in AGENTS.md",
+      };
     }
     const call = `${cwd}: ${command}`;
     calls.push(call);
@@ -91,11 +106,17 @@ async function fixture(
   assert.ok(target);
   const result = await (updater?.applyUpdate ?? createUpdateApplier(applyOptions))(target);
   if (staged !== undefined) await assert.rejects(access(dirname(staged)), { code: "ENOENT" });
-  return { result, calls, head, pnpm };
+  return { result, calls, head, pnpm, installRoot };
+}
+
+/** The new build runs `harnessd sync` through the service's Node before the restart. */
+function syncCall(installRoot: string): string {
+  const bin = join(installRoot, "packages", "cli", "dist", "bin.js");
+  return `install: ${process.execPath} ${bin} sync ${installRoot}`;
 }
 
 test("a staged build must pass before the install changes and the service restarts", async (t) => {
-  const { result, calls, head, pnpm } = await fixture(t);
+  const { result, calls, head, pnpm, installRoot } = await fixture(t);
   assert.deepEqual(result, { status: "restarted" });
   assert.equal(head, to);
   assert.deepEqual(calls, [
@@ -106,6 +127,7 @@ test("a staged build must pass before the install changes and the service restar
     `install: git merge --ff-only --no-overwrite-ignore ${to}`,
     `install: ${pnpm} install --frozen-lockfile`,
     `install: ${pnpm} build`,
+    syncCall(installRoot),
     "write pending",
     "install: launchctl kickstart -k gui/501/dev.harnessd.daemon",
   ]);
@@ -143,13 +165,30 @@ test("a failed in-place build restores the old commit without a restart", async 
   assert.ok(calls.every((call) => !call.includes("kickstart") && call !== "write pending"));
 });
 
+test("a failed in-place build with kept changes rolls back and puts the changes back", async (t) => {
+  const pnpm = join(dirname(process.execPath), "pnpm");
+  const { result, calls, head } = await fixture(t, {
+    changes: " M AGENTS.md\n",
+    fail: `install: ${pnpm} build`,
+  });
+  assert.equal(result.status, "failed");
+  assert.equal(result.status === "failed" && result.step, "build");
+  assert.equal(head, from, "the install clone is back on the old commit");
+  assert.ok(calls.includes(`install: git reset --hard ${from}`));
+  assert.ok(
+    calls.includes(`install: git stash apply ${STASH}`),
+    "the kept change is applied again",
+  );
+  assert.ok(calls.every((call) => !call.includes("kickstart") && call !== "write pending"));
+});
+
 for (const dirty of ["before", "after staging"] as const) {
   test(`local changes found ${dirty} block any change to the install clone`, async (t) => {
     const { result, calls, head } = await fixture(t, { dirty });
     assert.deepEqual(result, {
       status: "failed",
       step: "pull",
-      error: "pull: Local changes in the install clone:\nM README.md",
+      error: "pull: Local changes in the install clone:\nREADME.md",
     });
     assert.equal(head, from);
     assert.ok(calls.every((call) => !call.startsWith("install:") && call !== "write pending"));
@@ -157,6 +196,46 @@ for (const dirty of ["before", "after staging"] as const) {
     else assert.equal(calls.at(-1), "remove stage");
   });
 }
+
+test("keeps harnessd-written changes with a named stash, then syncs before the restart", async (t) => {
+  const { result, calls, head, installRoot } = await fixture(t, {
+    changes: " M AGENTS.md\n M .harnessd/config.toml\n?? .harnessd/vault/notes.md\n",
+  });
+  assert.deepEqual(result, { status: "restarted" });
+  assert.equal(head, to);
+  const stash = calls.findIndex((call) =>
+    call.endsWith("git stash push -m harnessd self-update aaaaaaa"),
+  );
+  const merge = calls.findIndex((call) => call.includes("git merge --ff-only"));
+  const pop = calls.findIndex((call) => call.endsWith("git stash pop"));
+  const sync = calls.indexOf(syncCall(installRoot));
+  const kick = calls.findIndex((call) => call.includes("kickstart"));
+  assert.ok(stash >= 0, "the tracked kept changes are stashed");
+  assert.ok(stash < merge, "stashed before the fast-forward");
+  assert.ok(merge < pop, "popped after the fast-forward");
+  assert.ok(pop < sync && sync < kick, "sync runs after the build and before the restart");
+  assert.ok(!calls.some((call) => call.includes("stash drop")), "the stash is never dropped");
+});
+
+test("a stash pop conflict rolls back, keeps the stash and ends blocked", async (t) => {
+  const { result, calls, head } = await fixture(t, {
+    changes: " M AGENTS.md\n",
+    popConflict: true,
+  });
+  assert.deepEqual(result, {
+    status: "blocked",
+    reason: "Local changes conflict with the update: AGENTS.md.",
+  });
+  assert.equal(head, from);
+  assert.equal(
+    calls.filter((call) => call.endsWith("git stash pop")).length,
+    2,
+    "the change is popped again on the old commit",
+  );
+  assert.ok(calls.includes(`install: git reset --hard ${from}`));
+  assert.ok(calls.every((call) => !call.includes("kickstart") && call !== "write pending"));
+  assert.ok(!calls.some((call) => call.includes("stash drop")), "the stash is never dropped");
+});
 
 test("Corepack runs pnpm when PATH has no pnpm executable", async (t) => {
   const { result, calls } = await fixture(t, { corepack: true });

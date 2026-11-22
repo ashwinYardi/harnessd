@@ -50,6 +50,13 @@ async function client(mode = "ok") {
   return { gh, calls };
 }
 
+test("defaultBranch reads the repo's default branch with one gh call", async () => {
+  const { gh, calls } = await client();
+  assert.equal(await gh.defaultBranch(), "main");
+  const [call] = await calls();
+  assert.deepEqual(call?.argv, ["repo", "view", "--json", "defaultBranchRef"]);
+});
+
 test("findPrForIssue lists open PRs with --json and picks the newest whose title has the key", async () => {
   const { gh, calls } = await client();
   const pr = await gh.findPrForIssue("MET-41");

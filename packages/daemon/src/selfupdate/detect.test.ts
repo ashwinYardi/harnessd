@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { LAUNCHD_LABEL } from "../status/launchd.ts";
-import { checkForUpdate, detectSelfUpdate, type SelfUpdateRunner } from "./detect.ts";
+import {
+  checkForUpdate,
+  detectSelfUpdate,
+  headCommit,
+  originHeadBranch,
+  type SelfUpdateRunner,
+} from "./detect.ts";
 
 const root = "/install";
 const workspace = "/workspace";
@@ -152,6 +158,40 @@ test("names local changes and performs no git write", async () => {
   assert.deepEqual(f.calls, [status]);
 });
 
+test("keeps the changes harnessd writes and still finds the pending update", async () => {
+  const f = fake();
+  const detection = await f.detect();
+  f.answers.set(
+    status,
+    [
+      " M AGENTS.md",
+      " M CLAUDE.md",
+      " M .claude/settings.json",
+      "?? .claude/agents/reviewer.md",
+      "?? .agents/skills/tdd/SKILL.md",
+      " M .harnessd/config.toml",
+      "?? .harnessd/vault/notes.md",
+      "?? opencode.json",
+      "",
+    ].join("\n"),
+  );
+  assert.deepEqual(await checkForUpdate(detection, "trunk", f.runner), {
+    kind: "pending",
+    from,
+    to,
+  });
+});
+
+test("still blocks on a change beside the kept ones and names only that file", async () => {
+  const f = fake();
+  const detection = await f.detect();
+  f.answers.set(status, " M AGENTS.md\n M src/tracked.ts\n?? notes.txt\n");
+  assert.deepEqual(await checkForUpdate(detection, "trunk", f.runner), {
+    kind: "blocked",
+    reason: "Local changes in the install clone: src/tracked.ts, notes.txt",
+  });
+});
+
 for (const marker of ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD"]) {
   test(`blocks when ${marker} is present in the resolved git directory`, async () => {
     const f = fake();
@@ -202,4 +242,20 @@ test("returns both commits when the fetched commit is ahead", async () => {
     from,
     to,
   });
+});
+
+test("reads the branch origin/HEAD names and the install commit", async () => {
+  const f = fake();
+  f.answers.set(
+    "git /install symbolic-ref --quiet --short refs/remotes/origin/HEAD",
+    "origin/trunk\n",
+  );
+  assert.equal(await originHeadBranch(root, f.runner), "trunk");
+  assert.equal(await headCommit(root, f.runner), from);
+});
+
+test("returns undefined when origin/HEAD is not set", async () => {
+  const f = fake();
+  f.answers.set("git /install symbolic-ref --quiet --short refs/remotes/origin/HEAD", "");
+  assert.equal(await originHeadBranch(root, f.runner), undefined);
 });

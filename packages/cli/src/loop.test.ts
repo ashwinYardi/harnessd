@@ -9,14 +9,22 @@ import {
   agentForRole,
   type Check,
   createFilePauseStore,
+  type GitHub,
   harnessForRun,
+  type LinearClient,
   loadConfig,
   readDaemonInfo,
   resolveAgentConfig,
   startDaemon,
 } from "@harnessd/daemon";
 import { run } from "./index.ts";
-import { harnessAdapters, parseRunArgs, runLoop } from "./loop.ts";
+import {
+  createSelfUpdate,
+  harnessAdapters,
+  parseRunArgs,
+  runLoop,
+  selfUpdateCheck,
+} from "./loop.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -41,6 +49,81 @@ async function setup(env: NodeJS.ProcessEnv, config?: string) {
     checks: async () => [] as Check[],
   };
   return { root, repo, home, out, err, io };
+}
+
+/** A GitHub client that only names the default branch; the loop in a test uses no other call. */
+function stubGitHub(defaultBranch = "main"): GitHub {
+  const unused = async (): Promise<never> => assert.fail("GitHub is not used in this test");
+  return {
+    defaultBranch: async () => defaultBranch,
+    findPrByHead: unused,
+    findPrForIssue: unused,
+    createPr: unused,
+    prFiles: unused,
+    prDiff: unused,
+    postReview: unused,
+    prStatus: unused,
+    mergePr: unused,
+    addLabel: unused,
+  };
+}
+
+/** A Linear client with nothing to dispatch, so a started tick finishes without a network call. */
+function stubLinear(): LinearClient {
+  const unused = async (): Promise<never> => assert.fail("Linear is not used in this test");
+  return {
+    listReady: async () => [],
+    listReadyContaining: async () => [],
+    listBoard: async () => [],
+    listChildren: unused,
+    getIssue: unused,
+    comment: unused,
+    moveTo: unused,
+  } as unknown as LinearClient;
+}
+
+const INSTALL = "/install";
+const UPDATE_FROM = "a".repeat(40);
+const UPDATE_TO = "b".repeat(40);
+const UPDATE_STATUS =
+  "git /install --no-optional-locks status --porcelain --untracked-files=all --ignore-submodules=none";
+
+/** A fake install clone for the self-update check, with a mutable status answer. */
+function fakeUpdateRunner(status = "") {
+  const calls: string[] = [];
+  const answers = new Map<string, string>([
+    [UPDATE_STATUS, status],
+    ["git /install symbolic-ref --quiet HEAD", "refs/heads/main"],
+    [
+      "git /install fetch --no-tags --no-recurse-submodules --refmap= origin +refs/heads/main:refs/remotes/origin/main",
+      "",
+    ],
+    ["git /install rev-parse --verify HEAD^{commit}", UPDATE_FROM],
+    ["git /install rev-parse --verify refs/remotes/origin/main^{commit}", UPDATE_TO],
+    [`git /install merge-base --is-ancestor ${UPDATE_FROM} ${UPDATE_TO}`, ""],
+  ]);
+  for (const marker of ["MERGE_HEAD", "rebase-merge", "rebase-apply", "CHERRY_PICK_HEAD"]) {
+    answers.set(
+      `git /install rev-parse --path-format=absolute --git-path ${marker}`,
+      `/git-dir/${marker}`,
+    );
+  }
+  return {
+    calls,
+    answers,
+    runner: {
+      async exec(command: string, args: readonly string[], options?: { cwd?: string }) {
+        const key = [command, options?.cwd, ...args].filter(Boolean).join(" ");
+        calls.push(key);
+        const answer = answers.get(key);
+        assert.notEqual(answer, undefined, key);
+        return { code: 0, stdout: answer ?? "", stderr: "" };
+      },
+      async pathKind() {
+        return undefined;
+      },
+    },
+  };
 }
 
 test("run fails clearly without LINEAR_API_KEY and never prints a key", async () => {
@@ -98,35 +181,46 @@ const PAUSED_CONFIG = '[linear]\nteam_id = "MET"\n\n[daemon]\nport = 0\n';
 
 test("run detects its install once at daemon startup", async () => {
   const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
-  await createFilePauseStore(s.home).pause();
   const cliUrl = new URL("install/packages/cli/dist/bin.js", `file://${s.root}/`).href;
+  const cliDir = dirname(fileURLToPath(cliUrl));
+  const sha = "a".repeat(40);
   let rootChecks = 0;
+  let updateChecks = 0;
   const io = {
     ...s.io,
     cliUrl,
+    github: stubGitHub("trunk"),
+    linear: stubLinear(),
     selfUpdateRunner: {
       async exec(command: string, args: readonly string[], options?: { cwd?: string }) {
+        const cwd = options?.cwd;
         if (command === "launchctl") return { code: 0, stdout: `pid = ${process.pid}`, stderr: "" };
-        if (args[0] === "rev-parse") {
-          assert.equal(options?.cwd, dirname(fileURLToPath(cliUrl)));
+        if (args[0] === "rev-parse" && cwd === cliDir) {
           rootChecks++;
-        } else {
-          assert.equal(args[0], "remote");
-          assert.ok(options?.cwd === s.root || options?.cwd === s.repo);
+          return { code: 0, stdout: s.root, stderr: "" };
         }
-        return {
-          code: 0,
-          stdout: args[0] === "rev-parse" ? s.root : "https://github.com/acme/harnessd.git",
-          stderr: "",
-        };
+        if (args[0] === "remote") {
+          return { code: 0, stdout: "https://github.com/acme/harnessd.git", stderr: "" };
+        }
+        if (args.includes("status")) {
+          updateChecks++;
+          return { code: 0, stdout: "", stderr: "" };
+        }
+        if (args[0] === "symbolic-ref") {
+          return { code: 0, stdout: "refs/heads/trunk", stderr: "" };
+        }
+        if (args[0] === "rev-parse") return { code: 0, stdout: sha, stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
       },
-      async pathKind() {
-        return "directory" as const;
+      async pathKind(path: string) {
+        return path === join(s.repo, "packages", "daemon") ? ("directory" as const) : undefined;
       },
     },
   };
-  assert.equal(await run(["run", "--once"], io), 0);
+  const code = await run(["run", "--once"], io);
+  assert.equal(code, 0);
   assert.equal(rootChecks, 1);
+  assert.equal(updateChecks, 1, "the wired updater checked the install clone");
   assert.equal(
     s.out.filter((line) => line.endsWith("Self-update detected the install clone.")).length,
     1,
@@ -352,6 +446,90 @@ test("run on a blocking check serves the app in setup and dispatches nothing", a
   assert.match(s.out.join("\n"), /Finish setup at http:\/\/127\.0\.0\.1:\d+\/#\/settings/);
 });
 
+test("a startup check that times out once and then passes leaves the loop running with no Start", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  await createFilePauseStore(s.home).pause();
+  const calls: Array<{ timeoutMs?: number | undefined; freshWorktreeWrite?: boolean | undefined }> =
+    [];
+  let loop: unknown;
+  const code = await runLoop([], {
+    ...s.io,
+    checks: async (o) => {
+      calls.push({ timeoutMs: o.timeoutMs, freshWorktreeWrite: o.freshWorktreeWrite });
+      if (calls.length === 1) {
+        return [
+          {
+            id: "harness.opencode.auth",
+            state: "fail",
+            detail: "sign-in check timed out after 5 s",
+            fix: "Sign in again",
+          },
+        ];
+      }
+      return [];
+    },
+    stopSignal: async () => {
+      const info = await readDaemonInfo(s.home);
+      loop = await (await fetch(`${info?.url}/api/loop`)).json();
+      return "SIGTERM";
+    },
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(calls, [
+    { timeoutMs: undefined, freshWorktreeWrite: true },
+    { timeoutMs: 15_000, freshWorktreeWrite: false },
+  ]);
+  assert.match(s.out.join("\n"), /harness\.opencode\.auth timed out, retry 2\/3 with 15 s/);
+  assert.deepEqual(loop, { state: "running", blocking: [], limits: [] });
+});
+
+test("a startup check that keeps timing out runs 3 times and waits in setup", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  let runs = 0;
+  const code = await runLoop([], {
+    ...s.io,
+    checks: async () => {
+      runs++;
+      return [
+        {
+          id: "harness.opencode.auth",
+          state: "fail",
+          detail: "sign-in check timed out after 5 s",
+          fix: "Sign in again",
+        },
+      ];
+    },
+    stopSignal: async () => "SIGTERM",
+  });
+  assert.equal(code, 0);
+  assert.equal(runs, 3);
+  assert.match(s.out.join("\n"), /retry 2\/3 with 15 s/);
+  assert.match(s.out.join("\n"), /retry 3\/3 with 15 s/);
+  assert.match(s.out.join("\n"), /Finish setup/);
+});
+
+test("--once retries a timed-out check and still exits 1 when it keeps timing out", async () => {
+  const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
+  let runs = 0;
+  const code = await runLoop(["--once"], {
+    ...s.io,
+    checks: async () => {
+      runs++;
+      return [
+        {
+          id: "harness.opencode.auth",
+          state: "fail",
+          detail: "sign-in check timed out after 5 s",
+          fix: "Sign in again",
+        },
+      ];
+    },
+  });
+  assert.equal(code, 1);
+  assert.equal(runs, 3);
+  assert.match(s.err.join("\n"), /harness\.opencode\.auth/);
+});
+
 test("POST /api/start refuses while a check blocks, then starts the loop once all pass", async () => {
   const s = await setup({ LINEAR_API_KEY: "k" }, PAUSED_CONFIG);
   await createFilePauseStore(s.home).pause();
@@ -573,6 +751,63 @@ test('[agents.backend] harness = "codex" dispatches to the codex adapter with th
   assert.equal(first.argv[0], fake);
   assert.ok(!first.argv.includes("--permission-mode"), "--permission-mode is Claude-only");
   assert.equal((await started?.result)?.status, "ok");
+});
+
+test("the self-update updater is wired when detection finds the install clone", async () => {
+  const f = fakeUpdateRunner("");
+  const updater = await createSelfUpdate({
+    detection: { kind: "on", installRoot: INSTALL },
+    github: stubGitHub("main"),
+    repoDir: "/repo",
+    log: () => assert.fail("a clean check logs nothing"),
+    runner: f.runner,
+  });
+  assert.ok(updater);
+  assert.equal(updater.runningCommit, UPDATE_FROM);
+  assert.deepEqual(await updater.checkForUpdate(), { from: UPDATE_FROM, to: UPDATE_TO });
+  assert.ok(f.calls.includes(UPDATE_STATUS));
+});
+
+test("no updater is built when detection is off", async () => {
+  const updater = await createSelfUpdate({
+    detection: { kind: "off" },
+    github: stubGitHub("main"),
+    repoDir: "/repo",
+    log: () => assert.fail("an off detection logs nothing here"),
+  });
+  assert.equal(updater, undefined);
+});
+
+test("a blocked self-update check logs its reason once and returns no target", async () => {
+  const log: string[] = [];
+  const f = fakeUpdateRunner(" M src/x.ts\n");
+  const check = selfUpdateCheck(
+    { kind: "on", installRoot: INSTALL },
+    "main",
+    (line) => log.push(line),
+    f.runner,
+  );
+  assert.equal(await check(), undefined);
+  assert.equal(await check(), undefined);
+  assert.deepEqual(log, [
+    "self-update: not updating: Local changes in the install clone: src/x.ts",
+  ]);
+
+  // A changed reason is news again.
+  f.answers.set(UPDATE_STATUS, " M src/y.ts\n");
+  assert.equal(await check(), undefined);
+  assert.deepEqual(
+    log.at(-1),
+    "self-update: not updating: Local changes in the install clone: src/y.ts",
+  );
+  assert.equal(log.length, 2);
+
+  // A target appears; a later block with the first reason logs again.
+  f.answers.set(UPDATE_STATUS, "");
+  assert.deepEqual(await check(), { from: UPDATE_FROM, to: UPDATE_TO });
+  f.answers.set(UPDATE_STATUS, " M src/x.ts\n");
+  assert.equal(await check(), undefined);
+  assert.equal(log.length, 3);
 });
 
 for (const updated of [true, false]) {

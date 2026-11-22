@@ -24,6 +24,9 @@ function remoteGit(remote: string, ...args: string[]): string {
 function fakeGithub(open?: PullRequest) {
   const created: CreatePrInput[] = [];
   const github: GitHub = {
+    async defaultBranch() {
+      return "main";
+    },
     async findPrByHead(branch) {
       return open?.headRefName === branch ? open : undefined;
     },

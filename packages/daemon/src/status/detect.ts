@@ -60,6 +60,14 @@ export function timedOut(ms: number): string {
   return `timed out after ${ms / 1000} s`;
 }
 
+/**
+ * True when a check's detail says a command hit its deadline: the line `timedOut()` writes,
+ * with or without a prefix such as "sign-in check". `harnessd run` retries such a check (MET-137).
+ */
+export function failedByTimeout(detail: string): boolean {
+  return /timed out after \d+(?:\.\d+)? s/.test(detail);
+}
+
 /** The first non-empty line of a command's output, trimmed; "" when there is none. */
 export function firstLine(text: string): string {
   return (

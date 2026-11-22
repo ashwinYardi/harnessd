@@ -135,6 +135,9 @@ function harness(options: Options = {}) {
   const logs: string[] = [];
   const prs = options.prs ?? { [backend.key]: pr(7, backend.key) };
   const github: GitHub = {
+    async defaultBranch() {
+      return "main";
+    },
     async findPrByHead(branch) {
       return Object.values(prs).find((pr) => pr.headRefName === branch);
     },
