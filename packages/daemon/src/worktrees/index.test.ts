@@ -209,6 +209,64 @@ describe("worktrees", () => {
     assert.equal(await entry(wt.path), undefined);
   });
 
+  test("status ignores status.showUntrackedFiles=no: an untracked draft is kept", async () => {
+    git(repoDir, "config", "status.showUntrackedFiles", "no");
+    try {
+      const wt = await createWorktree({
+        repoDir,
+        issueKey: nextKey(),
+        title: "hidden draft",
+        root,
+      });
+      await writeFile(join(wt.path, "draft.txt"), "not shipped\n");
+
+      const result = await removeWorktree({ repoDir, path: wt.path, root, scratch: true });
+
+      assert.deepEqual(result, { removed: false, kept: "uncommitted changes" });
+      assert.ok(existsSync(join(wt.path, "draft.txt")));
+    } finally {
+      git(repoDir, "config", "--unset", "status.showUntrackedFiles");
+    }
+  });
+
+  test("a QA retry keeps a detached checkout whose commit only a stale origin/main holds", async () => {
+    const source = await createWorktree({
+      repoDir,
+      issueKey: nextKey(),
+      title: "QA stale src",
+      root,
+    });
+    git(source.path, "commit", "-q", "--allow-empty", "-m", "PR head");
+    const sha = git(source.path, "rev-parse", "HEAD");
+    git(source.path, "push", "-q", "origin", source.branch);
+    const input = {
+      repoDir,
+      issueKey: "MET-900",
+      title: "QA stale",
+      branch: source.branch,
+      sha,
+      root,
+    };
+    const wt = await checkoutWorktree(input);
+    await writeFile(join(wt.path, "local-only.txt"), "never pushed\n");
+    git(wt.path, "add", ".");
+    git(wt.path, "commit", "-q", "-m", "local only");
+    const local = git(wt.path, "rev-parse", "HEAD");
+    git(repoDir, "update-ref", "refs/remotes/origin/main", local);
+    git(origin, "branch", "-D", source.branch);
+
+    try {
+      await assert.rejects(
+        checkoutWorktree(input),
+        /worktree kept at .*: commits not on the remote/,
+      );
+      assert.equal(git(wt.path, "rev-parse", "HEAD"), local);
+      assert.ok(existsSync(join(wt.path, "local-only.txt")));
+    } finally {
+      git(repoDir, "update-ref", "refs/remotes/origin/main", git(origin, "rev-parse", "main"));
+    }
+  });
+
   test("a clean scratch checkout is removed", async () => {
     const wt = await createWorktree({ repoDir, issueKey: nextKey(), title: "scratch", root });
 

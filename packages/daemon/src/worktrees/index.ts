@@ -435,7 +435,12 @@ export async function checkoutWorktree(options: CheckoutWorktreeOptions): Promis
     if (registered.has(registeredPath)) {
       const previous = manifest.entries.find((entry) => entry.path === path);
       const branch = registered.get(registeredPath) ?? previous?.branch;
-      const kept = await keepReason(repoDir, path, branch, "main", undefined, false);
+      // A detached checkout is a scratch checkout: judge it the way removeWorktree does.
+      const detached = await git(path, ["symbolic-ref", "-q", "HEAD"]).then(
+        () => false,
+        () => true,
+      );
+      const kept = await keepReason(repoDir, path, branch, "main", undefined, detached);
       if (kept !== undefined) throw new Error(`worktree kept at ${path}: ${kept}`);
       await teardown(root, repoDir, path);
     } else if (await exists(path)) {
@@ -507,7 +512,7 @@ async function keepReason(
 ): Promise<WorktreeKeepReason | undefined> {
   const status = await git(
     path,
-    ["status", "--porcelain"],
+    ["status", "--porcelain", "--untracked-files=all"],
     excludesFile ? excludesEnv(excludesFile) : undefined,
   );
   if (status.trim() !== "") return "uncommitted changes";
