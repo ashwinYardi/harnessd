@@ -3399,3 +3399,61 @@ test("at or over the token budget nothing starts and the parent goes to Needs in
   await t.loop.tick();
   assert.equal(t.pings.length, 1);
 });
+
+test("a second budget escalation counts from its own point after the human moves it back", async () => {
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { token_budget: { S: 100, M: 100 } } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const part = linear.add({
+    title: "API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const store = memoryStore({
+    ...emptyLoopState(),
+    usage: { [parent.id]: { input: 100, cached: 0, output: 0 } },
+  });
+  const t = setup({ config, linear, store });
+
+  await t.loop.tick();
+  assert.equal(parent.state, "Needs input");
+  assert.deepEqual(
+    { ...store.state.usageBaseline?.[parent.id], at: "t" },
+    { input: 100, cached: 0, output: 0, at: "t" },
+  );
+
+  // A human moves it back, more rounds spend past the budget, and the daemon restarts.
+  parent.state = "Ready";
+  store.state.usage = { [parent.id]: { input: 210, cached: 0, output: 0 } };
+  const t2 = setup({ config, linear, store });
+  await t2.loop.tick();
+  assert.equal(parent.state, "Needs input");
+  assert.equal(t2.pings.length, 1);
+  assert.match(
+    t2.linear.comments.findLast((c) => c.key === parent.key)?.body ?? "",
+    /used 110 of its 100 tokens/,
+  );
+  // The baseline is the cumulative sum, so the count restarts from here.
+  assert.deepEqual(
+    { ...store.state.usageBaseline?.[parent.id], at: "t" },
+    { input: 210, cached: 0, output: 0, at: "t" },
+  );
+
+  // A new Ready move starts a fresh count: the part runs instead of escalating again.
+  parent.state = "Ready";
+  const report = await t2.loop.tick();
+  assert.deepEqual(report.dispatched, [part.key]);
+  assert.equal(parent.state, "In Progress");
+  assert.equal(t2.pings.length, 1);
+});

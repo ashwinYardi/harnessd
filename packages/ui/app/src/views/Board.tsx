@@ -62,7 +62,7 @@ function IssueRow({
         rel="noreferrer"
         target="_blank"
       >
-        <span className="flex items-center gap-1.5 text-muted-foreground text-xs">
+        <span className="flex flex-wrap items-center gap-1.5 text-muted-foreground text-xs">
           <span className="shrink-0 whitespace-nowrap font-mono">{issue.key}</span>
           {PRIORITY[issue.priority] && (
             <Badge

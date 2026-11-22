@@ -206,7 +206,7 @@ The **token budget** is `limits.token_budget`, keyed by size like `budget_minute
 - below the budget: the run starts;
 - at or over it: nothing starts. The parent moves to Needs input, with one comment that states the sum and the budget, and one notice (the D-011 escalation shape). A run in flight finishes normally.
 
-The sum at escalation is recorded as `usageBaseline` in `loop.json`. When a human moves the parent back to Ready, the budget counts from that point.
+The sum at escalation is recorded as `usageBaseline` in `loop.json`, as the parent's cumulative sum (not the delta), so the next count subtracts it. When a human moves the parent back to Ready, the budget counts from that point, also after a second escalation.
 
 ## Usage limits
 A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.

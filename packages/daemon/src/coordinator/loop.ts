@@ -625,8 +625,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       `**harnessd token budget**: ${parent.key} used ${total} of its ${budget} tokens, so the loop starts no new run. ` +
         "Move it back to Ready to continue with a fresh count (D-040).",
     );
+    // usageSince subtracts this from the parent's cumulative sum, so store the sum, not the
+    // delta since the last escalation. A second escalation must count from its own point too.
     s.usageBaseline ??= {};
-    s.usageBaseline[parent.id] = { ...used, at: clock.now().toISOString() };
+    const cumulative = s.usage?.[parent.id] ?? { input: 0, cached: 0, output: 0 };
+    s.usageBaseline[parent.id] = { ...cumulative, at: clock.now().toISOString() };
     await save();
     return true;
   }
