@@ -328,4 +328,32 @@ test("worktree sync applies the run agent's OpenCode permissions", async () => {
     "git push *": "deny",
     "npm publish *": "deny",
   });
+  // D-045: a builder worktree run gets compaction and the tool-output cap.
+  assert.deepEqual(config.compaction, { auto: true, keep: { tokens: 20_000 }, buffer: "50%" });
+  assert.deepEqual(config.tool_output, { max_lines: 2_000, max_bytes: 20_000 });
+});
+
+test("QA and coordinator worktree syncs leave compaction and tool_output alone", async () => {
+  const f = await fixture();
+  await syncWorktree({
+    repoDir: f.repo,
+    globalDir: f.globalDir,
+    worktree: f.worktree,
+    runId: "MET-1-qa",
+    agent: { role: "qa" },
+  });
+  const qa = JSON.parse(await readFile(join(f.worktree, "opencode.json"), "utf8"));
+  assert.equal(qa.compaction, undefined);
+  assert.equal(qa.tool_output, undefined);
+
+  await syncWorktree({
+    repoDir: f.repo,
+    globalDir: f.globalDir,
+    worktree: f.worktree,
+    runId: "MET-1-coordinator",
+    agent: { role: "coordinator" },
+  });
+  const coordinator = JSON.parse(await readFile(join(f.worktree, "opencode.json"), "utf8"));
+  assert.equal(coordinator.compaction, undefined);
+  assert.equal(coordinator.tool_output, undefined);
 });

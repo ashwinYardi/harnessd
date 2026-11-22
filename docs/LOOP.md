@@ -82,7 +82,8 @@ When the split is done, the parent moves to In Progress.
   - gets its own worktree and branch (D-012);
   - uses the adapter for its agent's harness;
   - gets a prompt made of the agent's layered instructions plus the sub-issue body;
-  - runs within the budget for its size.
+  - runs within the budget for its size;
+  - stops at its turn cap (D-045): a builder part's `limits.max_turns` for its size, QA 40, or coordinator grill and plan 50.
 - Before a part or QA run starts, and before a rework run, the loop checks the parent's weighted token sum against `limits.token_budget`. At or over it, nothing starts and the parent goes to Needs input (see Token budget).
 - The prompt tells the agent to edit and test in the worktree only. It does not commit, push or open the PR: the daemon ships the work after the run (D-039). A part that QA sent back gets the failing items and works on its open PR.
 - A QA sub-issue runs the QA round below instead of a single agent run.
@@ -91,8 +92,8 @@ When the split is done, the parent moves to In Progress.
 | Result | What happens |
 |---|---|
 | ok | The daemon ships the run (see Ship). The sub-issue then moves to In Review. |
-| error or timeout, first time | A comment is posted and the sub-issue goes back to Ready for one retry. |
-| error or timeout, second time | A comment is posted, the sub-issue moves to Needs input and one notice is sent. |
+| error, timeout or turn cap, first time | A comment is posted and the sub-issue goes back to Ready for one retry. |
+| error, timeout or turn cap, second time | A comment is posted, the sub-issue moves to Needs input and one notice is sent. |
 | cancelled | The sub-issue goes back to Ready. No attempt is counted. |
 | limited | The harness hit a usage or rate limit. The sub-issue goes back to Ready. No attempt is counted. |
 | cancelled by a pause | The worktree is kept. See Pause. |
@@ -183,9 +184,10 @@ A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch
 
   **What grows the turn.** The MET-128 build averaged about **190k tokens per turn**: 12,257,280 cached tokens over about 65 turns, plus the new input. The base prompt is about 9k to 12k of that. The rest is the conversation and the tool output it carries, which every later turn sends again.
 
-  - OpenCode caps one tool result at `tool_output.max_lines` 2,000 and `max_bytes` 51,200 (about 50 KiB) by default.
-  - Automatic compaction is on by default: near the context limit OpenCode replaces older conversation with a summary, keeps about `compaction.keep.tokens` 15,000 recent tokens, and shortens long tool output in that tail. It can only reclaim conversation, not fixed instructions and tool schemas.
+  - OpenCode caps one tool result at `tool_output.max_lines` 2,000 and `max_bytes` 51,200 (about 50 KiB) by default. A builder worktree run sets `max_bytes` to 20,000 (about 20 KiB) and leaves `max_lines` at 2,000 (D-045).
+  - Automatic compaction is on by default: near the context limit OpenCode replaces older conversation with a summary, keeps about `compaction.keep.tokens` 15,000 recent tokens, and shortens long tool output in that tail. A builder worktree run sets `keep.tokens` to 20,000 and `buffer` to `"50%"`, so compaction starts near 100k tokens of a 200k window (D-045). It can only reclaim conversation, not fixed instructions and tool schemas.
   - So a full test run or a large file read stays in context as one capped tool result, then in the summary and the recent tail after compaction. Focused tests and file ranges keep those results small.
+  - Claude Code and Codex cap one tool result near 5k tokens: `BASH_MAX_OUTPUT_LENGTH=20000` and `-c tool_output_token_limit=5000` (D-045).
 
   **Owner-level gaps, measured and out of scope:** D-032 says Codex still reads `$CODEX_HOME/AGENTS.md` and user skills, because `CODEX_HOME` must hold `auth.json`. D-036 says OpenCode still loads `~/.claude/skills` and `~/.agents/skills`. On 2026-11-22 the SKILL.md bodies in those two folders total 73,829 chars; a run that used one of those skills would load that body too. The loop cannot remove them without breaking the owner's sign-in or setup (MET-112).
 
@@ -247,16 +249,26 @@ The QA sub-issue moves to Done after the last part of the parent merges. The fin
 
 A QA agent run that ends `limited` stops the round. No review is posted, no QA failure is counted and QA goes back to Ready.
 
+A QA agent run that ends at its turn cap (40 by default) is a failed QA run: it counts one QA failure, as an agent error does.
+
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
 
 ## Token budget and usage
-Each run ends with one log line: `<key>: <agent> used <input> input, <cached> cached, <output> output tokens in <n> turns`, where cached is cache read plus cache write. `n` is the harness's own count: OpenCode's `step_start` steps, Codex's `turn.completed` turns, or Claude Code's `num_turns`. A run with no count keeps the line without `in <n> turns`. The loop adds the run's raw tokens to the parent's **usage sum** in `loop.json` under `usage`, so the sum survives a restart. The board shows the sum as one compact count with a tooltip that splits input, cached and output.
+Each run ends with one log line: `<key>: <agent> used <input> input, <cached> cached, <output> output tokens in <n> turns`, where cached is cache read plus cache write. `n` is the harness's own count: OpenCode's `step_start` steps, Codex's completed tool items (a command run, a file change, an MCP tool call or a web search), or Claude Code's `num_turns`. A run with no count keeps the line without `in <n> turns`. The loop adds the run's raw tokens to the parent's **usage sum** in `loop.json` under `usage`, so the sum survives a restart. The board shows the sum as one compact count with a tooltip that splits input, cached and output.
 
 The **token budget** is weighted (D-043): `limits.token_budget`, keyed by size like `budget_minutes`: S 3M, M 6M. An unknown size counts as M. The weighted sum is `input + output + round(cached × limits.cached_token_weight)`, with `limits.cached_token_weight` from 0 to 1 and default 0.1; at 1 it is the old raw count. `cached` is cache read plus cache write. It sums every run of the parent over its grill, plan, part and QA runs. Before the loop starts a new part run, QA run or rework round, it compares the weighted sum with the budget:
 - below the budget: the run starts;
 - at or over it: nothing starts. The parent moves to Needs input, with one comment that states the weighted total, the budget, and the raw input, cached and output parts with the weight, and one notice (the D-011 escalation shape). A run in flight finishes normally.
 
 The raw sum at escalation is recorded as `usageBaseline` in `loop.json`, as the parent's cumulative sum (not the delta), so the next count subtracts it. When a human moves the parent back to Ready, the budget counts from that point, also after a second escalation. `usage` and `usageBaseline` stay raw, so an old `loop.json` loads and the board count is unchanged.
+
+### Turn cap
+Every run has a turn cap (D-045). A builder part run uses `limits.max_turns` for its size (S 80, M 160; an unknown size counts as M). QA uses 40, and coordinator grill and plan use 50. The caps come from the MET-131 measurements: 80 turns is about 1.8M weighted tokens, under the S budget of 3M, and 160 turns is about 3.6M, under the M budget of 6M.
+
+- **Claude Code** gets `--max-turns <n>`. A result with subtype `error_max_turns` ends the run `error` with `turn cap (<n> turns)` and no failure reason.
+- **Codex and OpenCode** count turns in the adapter: OpenCode at `step_start`, Codex at each completed tool item. At the cap the adapter kills the process group the way a cancel does and reports `error` with `turn cap (<n> turns)`, not `cancelled`.
+
+A turn-capped run follows the normal error rule: it counts one attempt, it is not shipped, and the keep guard keeps unshipped work for the next attempt. A turn-capped QA run counts as a QA failure. A turn-capped grill or plan run is an error run, and the plan uses the one-part fallback. The wall-clock budget and the token budget stay; the first limit that a run hits stops it, and a time-budget stop stays `timeout`.
 
 ## Usage limits
 A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.

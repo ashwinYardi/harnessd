@@ -39,6 +39,9 @@ export interface ClaudeCodeOptions {
  */
 export const NO_MCP_SERVERS = '{"mcpServers":{}}';
 
+/** D-045: about 5k tokens of one Bash result, for every Claude Code run. */
+export const BASH_MAX_OUTPUT_LENGTH = "20000";
+
 function isolationArgs(cwd: string | undefined): string[] {
   const mcp =
     cwd === undefined || existsSync(join(cwd, ".mcp.json")) ? ".mcp.json" : NO_MCP_SERVERS;
@@ -62,6 +65,7 @@ export function claudeArgs(task: Task, options: ClaudeCodeOptions = {}, cwd?: st
   if (model) args.push("--model", model);
   if (options.permissionMode) args.push("--permission-mode", options.permissionMode);
   if (options.skipPermissions) args.push("--dangerously-skip-permissions");
+  if (task.maxTurns !== undefined) args.push("--max-turns", String(task.maxTurns));
   return args;
 }
 
@@ -74,9 +78,10 @@ export function createClaudeCodeAdapter(options: ClaudeCodeOptions = {}): Harnes
         worktree,
         bin: options.bin ?? process.env.HARNESSD_CLAUDE_BIN ?? "claude",
         argv: claudeArgs(task, options, worktree),
-        parser: (emit) => new StreamJsonParser(emit),
+        parser: (emit) => new StreamJsonParser(emit, task.maxTurns),
         ...(options.killGraceMs !== undefined ? { killGraceMs: options.killGraceMs } : {}),
-        ...(options.env !== undefined ? { env: options.env } : {}),
+        // D-045: about 5k tokens of one Bash result. The default is 30,000 characters.
+        env: { ...options.env, BASH_MAX_OUTPUT_LENGTH: BASH_MAX_OUTPUT_LENGTH },
       }),
   };
 }
@@ -91,6 +96,7 @@ class StreamJsonParser implements LineParser {
   /** undefined until a `result` event arrives. */
   isError: boolean | undefined;
   errorSubtype: string | undefined;
+  #maxTurns: number | undefined;
   #lastStderr: string | undefined;
   #emit: (event: AdapterEvent) => void;
   /** Usage per assistant message id: Claude repeats a message's usage on each content block. */
@@ -98,8 +104,9 @@ class StreamJsonParser implements LineParser {
   #resultUsage: TokenUsage | undefined;
   #anonymous = 0;
 
-  constructor(emit: (event: AdapterEvent) => void) {
+  constructor(emit: (event: AdapterEvent) => void, maxTurns?: number) {
     this.#emit = emit;
+    this.#maxTurns = maxTurns;
   }
 
   line(raw: string): void {
@@ -142,6 +149,12 @@ class StreamJsonParser implements LineParser {
     if (this.turns !== undefined) out.turns = this.turns;
     if (this.sessionId !== undefined) out.sessionId = this.sessionId;
     if (this.finalText !== undefined) out.finalText = this.finalText;
+    // D-045: --max-turns ended the run. It is an error with no failure reason.
+    if (this.errorSubtype === "error_max_turns") {
+      out.ok = false;
+      out.error = this.#maxTurns === undefined ? "turn cap" : `turn cap (${this.#maxTurns} turns)`;
+      return out;
+    }
     if (exitCode === 0 && out.ok) return out;
     const limit = this.#limitText();
     if (limit !== undefined) {

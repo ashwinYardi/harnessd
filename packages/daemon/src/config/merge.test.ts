@@ -24,6 +24,7 @@ test("no layers gives the defaults", () => {
     budget_minutes: { S: 30, M: 120 },
     token_budget: { S: 3_000_000, M: 6_000_000 },
     cached_token_weight: 0.1,
+    max_turns: { S: 80, M: 160 },
     qa_max_failures: 2,
   });
   assert.equal(merged.slack.channel, "#harnessd");
@@ -52,6 +53,7 @@ test("scalars override and tables deep-merge, later layer winning", () => {
     budget_minutes: { S: 10, M: 60 },
     token_budget: { S: 3_000_000, M: 6_000_000 },
     cached_token_weight: 0.1,
+    max_turns: { S: 80, M: 160 },
     qa_max_failures: 2,
   });
   assert.deepEqual(merged.linear, { team_id: "MET", project: "harnessd" });
@@ -60,15 +62,24 @@ test("scalars override and tables deep-merge, later layer winning", () => {
 test("limits merge per key, the cached weight included", () => {
   const merged = mergeLayers([
     layer("global", {
-      settings: { limits: { token_budget: { S: 1_000 }, cached_token_weight: 0.25 } },
+      settings: {
+        limits: {
+          token_budget: { S: 1_000 },
+          cached_token_weight: 0.25,
+          max_turns: { S: 40 },
+        },
+      },
     }),
-    layer("workspace", { settings: { limits: { cached_token_weight: 0.05 } } }),
+    layer("workspace", {
+      settings: { limits: { cached_token_weight: 0.05, max_turns: { M: 90 } } },
+    }),
   ]);
   assert.deepEqual(merged.limits, {
     max_concurrent: 1,
     budget_minutes: { S: 30, M: 120 },
     token_budget: { S: 1_000, M: 6_000_000 },
     cached_token_weight: 0.05,
+    max_turns: { S: 40, M: 90 },
     qa_max_failures: 2,
   });
 });

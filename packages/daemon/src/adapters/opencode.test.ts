@@ -369,6 +369,17 @@ test("HARNESSD_OPENCODE_BIN picks the binary when no bin option is given", async
   }
 });
 
+test("a run over the turn cap is killed and reports turn cap", async () => {
+  const started = Date.now();
+  const { run: r } = run({ fixture: "success", hang: true }, task({ maxTurns: 1 }));
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "turn cap (1 turns)");
+  assert.equal(result.reason, undefined);
+  // The run ended at the cap, not at its 10 s budget.
+  assert.ok(Date.now() - started < 5_000);
+});
+
 test("the budget timeout kills the run and reports timeout", async () => {
   const { run: r } = run({ fixture: "success", hang: true }, task({ budgetMs: 500 }), {
     killGraceMs: 500,

@@ -34,6 +34,8 @@ export interface SyncOptions {
   omitSkills?: readonly string[];
   /** Limit MCP servers to the built-in memory server, for a worktree run (D-040). */
   memoryMcpOnly?: boolean;
+  /** Write OpenCode compaction and the tool-output cap, for a builder worktree run (D-045). */
+  builderLimits?: boolean;
 }
 
 export interface SyncResult {
@@ -156,6 +158,7 @@ export async function syncRepo(options: SyncOptions): Promise<SyncResult> {
       ? {}
       : { opencodePermission: options.opencodePermission }),
     ...(options.memoryMcpOnly === true ? { memoryMcpOnly: true } : {}),
+    ...(options.builderLimits === true ? { builderLimits: true } : {}),
   });
   const { files, skipped } = await dropForeign(options.repoDir, generated);
   // Read every settings file before writing any, so a bad one stops sync with nothing written.

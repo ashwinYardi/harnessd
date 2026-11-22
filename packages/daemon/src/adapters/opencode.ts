@@ -59,6 +59,7 @@ export function createOpenCodeAdapter(options: OpenCodeOptions = {}): HarnessAda
         argv: openCodeArgs(task, options),
         parser: (emit) => new OpenCodeJsonParser(emit),
         ...(options.killGraceMs !== undefined ? { killGraceMs: options.killGraceMs } : {}),
+        ...(task.maxTurns === undefined ? {} : { maxTurns: task.maxTurns }),
         env: {
           ...options.env,
           OPENCODE_CONFIG_DIR: configDir,
@@ -160,6 +161,10 @@ class OpenCodeJsonParser implements LineParser {
     const message = stripVTControlCharacters(line).trim();
     if (message !== "") this.#lastStderr = message;
     if (message.startsWith("Error: ")) this.#stderrError ??= message;
+  }
+
+  turnCount(): number {
+    return this.#steps;
   }
 
   outcome(exitCode: number | null): ParsedOutcome {

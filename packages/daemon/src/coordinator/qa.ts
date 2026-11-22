@@ -476,6 +476,8 @@ export interface QaRunInput {
   parts: LinkedIssue[];
   /** D-014 budget of the whole round: checkouts, tests and agent runs. */
   budgetMs: number;
+  /** Turn cap of each QA agent run (D-045). */
+  maxTurns?: number;
   /** 1 for the first round; shown in the review. */
   round: number;
   /** `limits.qa_max_failures`. */
@@ -663,6 +665,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
           }),
           budgetMs: left,
         };
+        if (input.maxTurns !== undefined) task.maxTurns = input.maxTurns;
         if (deps.agent.model !== undefined) task.model = deps.agent.model;
         if (env !== undefined) task.env = env;
         inSetup = false;

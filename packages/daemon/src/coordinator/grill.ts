@@ -17,6 +17,7 @@ import {
 } from "@harnessd/shared";
 import type { LinearClient } from "../linear/client.ts";
 import type { DecisionSink } from "./decisions.ts";
+import { COORDINATOR_MAX_TURNS } from "./dispatch.ts";
 import type { Notice, Notifier } from "./notifier.ts";
 import { buildGrillPrompt, type GrillContext } from "./prompt.ts";
 
@@ -36,6 +37,8 @@ export interface GrillDeps {
   decisions: DecisionSink;
   /** Wall-clock budget per attempt. Default 10 minutes. */
   budgetMs?: number;
+  /** Turn cap of each attempt. Default `COORDINATOR_MAX_TURNS` (D-045). */
+  maxTurns?: number;
 }
 
 export const DEFAULT_GRILL_BUDGET_MS = 10 * 60_000;
@@ -305,6 +308,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       title: `Grill ${issue.key}: ${issue.title}`,
       prompt: text,
       budgetMs: deps.budgetMs ?? DEFAULT_GRILL_BUDGET_MS,
+      maxTurns: deps.maxTurns ?? COORDINATOR_MAX_TURNS,
     };
     if (deps.agent.model !== undefined) t.model = deps.agent.model;
     return t;

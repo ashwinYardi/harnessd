@@ -120,6 +120,7 @@ test("global and workspace folders load and merge", async () => {
     budget_minutes: { S: 20, M: 60 },
     token_budget: { S: 3_000_000, M: 6_000_000 },
     cached_token_weight: 0.1,
+    max_turns: { S: 80, M: 160 },
     qa_max_failures: 2,
   });
   assert.deepEqual(merged.linear, { team_id: "MET" });

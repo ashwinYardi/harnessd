@@ -8,6 +8,11 @@ export interface Task {
   prompt: string;
   /** Wall-clock budget (D-014). The run is killed and reported as `timeout` when it runs over. */
   budgetMs: number;
+  /**
+   * Model turns the run may take (D-045). Claude Code gets `--max-turns`; the Codex and
+   * OpenCode adapters count turns and stop the run at the cap with `error` and "turn cap".
+   */
+  maxTurns?: number;
   /** Harness model name or alias. Omitted means the harness default. */
   model?: string;
   /** Extra environment for this run, over the adapter's own (e.g. git config for the worktree). */

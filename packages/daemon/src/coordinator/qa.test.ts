@@ -304,6 +304,12 @@ test("every item and the tests pass: approve at the PR head, then QA stays Ready
   assert.deepEqual(s.pings, []);
 });
 
+test("the QA agent run gets the role turn cap", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  await runQa({ ...h.input, maxTurns: 40 }, h.deps);
+  assert.equal(h.tasks[0]?.maxTurns, 40);
+});
+
 test("the worktree is checked out at the PR head, used as the agent's cwd and force-removed", async () => {
   const h = harness({ replies: [verdict([true, true])] });
   await runQa(h.input, h.deps);

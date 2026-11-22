@@ -45,6 +45,8 @@ export interface LineParser {
   stderr?(line: string): void;
   /** Called once, after the process exited on its own. */
   outcome(exitCode: number | null): ParsedOutcome;
+  /** Turns counted so far, for the cap (D-045). */
+  turnCount?(): number;
 }
 
 export interface ProcessRunOptions {
@@ -58,6 +60,8 @@ export interface ProcessRunOptions {
   killGraceMs?: number;
   /** Extra environment for the child, merged over process.env and under the task's env. */
   env?: Record<string, string>;
+  /** Stop the run when the parser has counted this many turns (D-045). */
+  maxTurns?: number;
 }
 
 /** Append-only event log; every iterator replays from the first event and ends after close(). */
@@ -106,7 +110,8 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
   const startedAt = performance.now();
 
   const parser = options.parser((event) => events.push(event));
-  let stopReason: "timeout" | "cancelled" | undefined;
+  let stopReason: "timeout" | "cancelled" | "turn-cap" | undefined;
+  let hitTurnCap = false;
   let spawnError: string | undefined;
   let killTimers: NodeJS.Timeout[] = [];
   let budgetTimer: NodeJS.Timeout | undefined;
@@ -141,7 +146,12 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
       cwd: worktree,
     });
   }
-  if (child.stdout) readLines(child.stdout, (line) => parser.line(line));
+  if (child.stdout) {
+    readLines(child.stdout, (line) => {
+      parser.line(line);
+      checkTurnCap();
+    });
+  }
   if (child.stderr) {
     readLines(child.stderr, (line) => {
       events.push({ type: "log", stream: "stderr", line });
@@ -185,6 +195,15 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     for (const timer of killTimers) timer.unref();
   }
 
+  /** The parser counted the cap: kill the run the way a cancel does, and report `error` (D-045). */
+  function checkTurnCap(): void {
+    if (hitTurnCap || settled || options.maxTurns === undefined) return;
+    if ((parser.turnCount?.() ?? 0) < options.maxTurns) return;
+    hitTurnCap = true;
+    stopReason ??= "turn-cap";
+    terminate();
+  }
+
   function signalGroup(signal: NodeJS.Signals): void {
     if (child.pid === undefined) return;
     try {
@@ -215,6 +234,7 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     const error = errorOf(status, exitCode, parsed);
     if (error !== undefined) run.error = error;
     if (
+      !hitTurnCap &&
       (status === "error" || status === "limited") &&
       spawnError === undefined &&
       parsed.reason !== undefined
@@ -227,9 +247,10 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     resolveResult(run);
   }
 
-  /** Order: timeout and cancel, then a spawn failure, then success, then a limit, then error. */
+  /** Order: timeout and cancel, then the turn cap, then a spawn failure, then success, then a limit. */
   function statusOf(exitCode: number | null, parsed: ParsedOutcome): RunStatus {
-    if (stopReason) return stopReason;
+    if (stopReason === "timeout" || stopReason === "cancelled") return stopReason;
+    if (hitTurnCap) return "error";
     if (spawnError !== undefined) return "error";
     if (parsed.ok && (exitCode === 0 || parsed.exitExplained)) return "ok";
     return parsed.limited || parsed.reason === "usage_limit" ? "limited" : "error";
@@ -243,6 +264,9 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     if (status === "ok") return undefined;
     if (status === "timeout") return `budget of ${task.budgetMs}ms exceeded`;
     if (status === "cancelled") return "cancelled";
+    if (hitTurnCap && options.maxTurns !== undefined) {
+      return `turn cap (${options.maxTurns} turns)`;
+    }
     if (spawnError !== undefined) return spawnError;
     if (parsed.error !== undefined) return parsed.error;
     if (exitCode !== 0) return `exited with code ${exitCode}`;

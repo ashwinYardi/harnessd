@@ -2,7 +2,7 @@
 // Stand-in for `claude -p ... --output-format stream-json --verbose` in adapter tests.
 // FAKE_CLAUDE_MODE: ok (default) | error | malformed | hang | hang-stubborn | limit-result |
 // limit-stderr | limit-hang | rate-limit-ok | error-success | error-stderr |
-// rate-limit-then-error
+// rate-limit-then-error | max-turns
 // FAKE_CLAUDE_RECORD: file to write {argv, cwd, grandchildPid?, probe?, inspect?} into.
 // FAKE_CLAUDE_PROBE: copied into the record as `probe`, to see the child's environment.
 // FAKE_CLAUDE_INSPECT=1: also records what the run sees in its cwd: the skill folders in
@@ -15,6 +15,9 @@ const mode = process.env.FAKE_CLAUDE_MODE ?? "ok";
 const recordPath = process.env.FAKE_CLAUDE_RECORD;
 const record = { argv: process.argv.slice(2), cwd: process.cwd() };
 if (process.env.FAKE_CLAUDE_PROBE !== undefined) record.probe = process.env.FAKE_CLAUDE_PROBE;
+if (process.env.BASH_MAX_OUTPUT_LENGTH !== undefined) {
+  record.bashMaxOutput = process.env.BASH_MAX_OUTPUT_LENGTH;
+}
 if (process.env.FAKE_CLAUDE_INSPECT === "1") {
   const cwd = process.cwd();
   const skills = join(cwd, ".claude", "skills");
@@ -104,6 +107,18 @@ if (mode === "ok" || mode === "malformed") {
   result({
     subtype: "error_during_execution",
     is_error: true,
+    total_cost_usd: 0.001,
+    usage: usage(4, 2, 0, 0),
+  });
+  process.exitCode = 1;
+} else if (mode === "max-turns") {
+  // The shape Claude Code 2.1.329 prints when --max-turns stops the run.
+  init();
+  assistant("msg_1", [{ type: "text", text: "Still working." }], usage(4, 2, 0, 0));
+  result({
+    subtype: "error_max_turns",
+    is_error: true,
+    num_turns: 2,
     total_cost_usd: 0.001,
     usage: usage(4, 2, 0, 0),
   });

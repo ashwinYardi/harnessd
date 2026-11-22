@@ -84,6 +84,8 @@ const BASE = [
   "danger-full-access",
   "-c",
   'approval_policy="never"',
+  "-c",
+  "tool_output_token_limit=5000",
 ];
 
 test("codexArgs runs exec --json with full access and no approvals", () => {
@@ -162,7 +164,8 @@ test("a success run streams text and usage, and keeps the thread id", async () =
   assert.equal(result.exitCode, 0);
   assert.equal(result.sessionId, "thread-fake-1");
   assert.equal(result.finalText, "Done.");
-  assert.equal(result.turns, 1);
+  // D-045: turns count completed tool items, so a text-only run reports none.
+  assert.equal(result.turns, undefined);
   assert.equal(result.costUsd, undefined);
   assert.equal(result.error, undefined);
   assert.equal(result.reason, undefined);
@@ -194,6 +197,19 @@ test("tool calls, file edits and usage totals map to tool and usage events", asy
   assert.equal(result.status, "ok");
   assert.deepEqual(result.tokens, { input: 500, output: 30, cacheRead: 300, cacheWrite: 0 });
   assert.equal(result.finalText, "Tests pass.");
+  // Four completed tool items: command, file change, MCP call and web search. A todo is not one.
+  assert.equal(result.turns, 4);
+});
+
+test("a run over the turn cap is killed and reports turn cap", async () => {
+  const started = Date.now();
+  const { run: r } = run({ fixture: "tools", hang: true }, task({ maxTurns: 2 }));
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "turn cap (2 turns)");
+  assert.equal(result.reason, undefined);
+  // The run ended at the cap, not at its 10 s budget.
+  assert.ok(Date.now() - started < 5_000);
 });
 
 test("tool summaries stay on one line of at most 120 characters", async () => {

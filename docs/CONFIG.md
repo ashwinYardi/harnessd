@@ -19,6 +19,7 @@ max_concurrent = 1
 budget_minutes = { S = 30, M = 120 }   # L has no budget: split it (D-014)
 token_budget = { S = 3000000, M = 6000000 }   # weighted; an unknown size counts as M (D-043)
 cached_token_weight = 0.1   # a cached token counts this much of a new input token (D-043)
+max_turns = { S = 80, M = 160 }   # builder run turn cap; QA 40 and coordinator 50 are fixed (D-045)
 qa_max_failures = 2
 
 [linear]
@@ -97,6 +98,32 @@ The weighted sum is `input + output + round(cached × limits.cached_token_weight
 **Why weighted tokens, not cost per harness (D-043).** Codex reports no cost (D-032), and OpenCode reports cost only for some providers (D-036). A price table would go stale, and a missing cost would make the budget unlimited. A weight applies to every harness and needs no pricing data. Cached input is billed far below new input, so counting it in full made one 13-minute MET-128 build look like 12.5M tokens and trip the old M default before QA. At `0.1` that build is 1,470,055 weighted tokens. The weight treats cache writes as cheap too; that error is small where it matters because Codex reports `cacheWrite` 0, and OpenCode's providers mostly report 0 or a write at or below input. Claude Code reports the most cache writes.
 
 **The defaults fit one M ticket (D-043).** Two MET-128-sized builds (2 × 1,470,055), one QA round (335,000 weighted) and 540,000 raw grill and plan tokens total 3,815,110 of 6,000,000. S is half of M.
+
+### Turn caps and tool output (D-045)
+`limits.max_turns` is the model turns one **builder** part run may take, keyed by size like `budget_minutes`: `S = 80`, `M = 160`. A value is a positive integer per size, and an unknown size counts as M. It is optional and merges per layer like the other `limits` keys. Zero, a negative number, a non-integer or a size key other than S or M is a config error. The loop reads the part's size before it starts the run.
+
+The other roles have fixed caps in code, not in config: **QA 40**, **coordinator grill and plan 50**. QA judges one PR against a checklist, and grill and plan write one reply.
+
+A run at its cap ends `error` with `turn cap (<n> turns)` and no failure reason. It is not shipped; it follows the normal error rule: one attempt is counted, the worktree is kept when it holds unshipped work, and the next attempt resumes the same branch (D-039). A turn-capped QA run counts as a QA failure, as an agent error does. A turn-capped grill or plan run is an error run, and the plan uses the one-part fallback.
+
+**The numbers come from MET-131 and D-043.**
+- A MET-128 build averaged about **22.6k weighted tokens per turn** (1,470,055 weighted tokens over about 65 turns). 80 turns is about **1.8M** weighted tokens, under the S budget of 3M. 160 turns is about **3.6M**, under the M budget of 6M.
+- A 65-turn MET-128 build fits S with room to spare. The 190-turn builds measured on 2026-11-22 are the runaway case that the cap stops.
+- The wall-clock budget and the token budget still apply. The first limit that a run hits stops it. A time-budget stop stays `timeout`; a turn-cap stop is `error`.
+
+**The tool-output cap per harness.** Each cap keeps one tool result near 5k tokens (20,000 bytes is about 5k tokens). One 50 KiB result is about 12.8k tokens, and every later turn sends it again. These values were checked on the versions named here:
+- **Claude Code 2.1.329:** `BASH_MAX_OUTPUT_LENGTH=20000` in the child's environment, about 5k tokens of one Bash result. The default is 30,000 characters.
+- **Codex 0.171.0 or later:** `-c tool_output_token_limit=5000` in the argv, with the other `-c` options and before `--`.
+- **OpenCode 2.3.2:** the documented `tool_output` key. Builder worktree sync writes `tool_output.max_bytes = 20000`, about 20 KiB, and `max_lines = 2000`, the documented default. Owner sync, QA sync and coordinator sync leave `tool_output` alone. The schema documents `tool_output.max_lines` (default 2,000) and `max_bytes` (default 51,200, about 50 KiB).
+
+**OpenCode compaction for builder runs (D-045).** Builder worktree sync writes `compaction` into `opencode.json` on OpenCode 2.3.2:
+- `auto = true`;
+- `keep.tokens = 20000`, above the documented default of 15,000, so the recent tail keeps more exact detail;
+- `buffer = "50%"`. The docs define `buffer` as the share of the model's context window kept free, so on a 200k window compaction starts at about 100k tokens.
+
+The 190k average turn is close to a 200k window, so the 100k target leaves room for a summary plus the 20k tail. Owner sync, QA sync and coordinator sync do not write `compaction`. Sync replaces `compaction` and `tool_output` as whole keys, as it does for `permission` (D-038).
+
+A Codex `exec` prompt sends one `turn.completed`. The Codex adapter therefore counts each completed tool item as one turn (a command run, a file change, an MCP tool call or a web search), and uses that count in both the cap and the run log line. A `todo_list` item is not a turn.
 
 ### Which model for QA, and which for builders
 - **QA:** a fast, low-cost model at medium effort. QA reads one PR diff against a checklist, and harnessd runs the tests itself, so it needs little reasoning. Example: an OpenCode flash model.

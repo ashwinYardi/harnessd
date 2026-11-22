@@ -39,7 +39,7 @@ import {
 } from "../selfupdate/index.ts";
 import type { TaskWorktrees, WorktreeKeepReason } from "../worktrees/index.ts";
 import { createFileDecisionSink, type DecisionSink, workspaceVaultDir } from "./decisions.ts";
-import { agentForRole, budgetMs, buildPartPrompt } from "./dispatch.ts";
+import { agentForRole, budgetMs, buildPartPrompt, maxTurns as maxTurnsFor } from "./dispatch.ts";
 import { grillIssue } from "./grill.ts";
 import {
   activeLimits,
@@ -1043,6 +1043,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         title: `${issue.key}: ${issue.title}`,
         prompt,
         budgetMs: budget,
+        maxTurns: maxTurnsFor(role, issue.size, config.limits),
       };
       if (agent.model !== undefined) task.model = agent.model;
       if (env !== undefined) task.env = env;
@@ -1153,6 +1154,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             parent: qa.parent,
             parts: qa.parts,
             budgetMs: budget,
+            maxTurns: maxTurnsFor("qa", qa.parent.size, config.limits),
             round: (s.qaFailures[qa.parent.id] ?? 0) + 1,
             maxRounds,
           },
@@ -1329,6 +1331,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         linear,
         notifier,
         decisions,
+        maxTurns: maxTurnsFor("coordinator", issue.size, config.limits),
       });
       grillCalls = grill.calls;
       if (state !== undefined) {
@@ -1365,6 +1368,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         cwd: repoDir,
         calls: grill.calls,
         log,
+        maxTurns: maxTurnsFor("coordinator", issue.size, config.limits),
       });
       if (state !== undefined) {
         recordUsage(

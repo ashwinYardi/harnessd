@@ -189,6 +189,11 @@ async function restoreSkill(
   );
 }
 
+/** Builder roles get the OpenCode compaction and tool-output cap (D-045). */
+export function isBuilderRole(role: ResolvedAgentConfig["role"] | undefined): boolean {
+  return role === "backend" || role === "frontend";
+}
+
 /**
  * Syncs the merged native files into `worktree` and hides them from git for this run.
  * Throws when sync fails; the caller fails the run before the agent starts.
@@ -209,6 +214,7 @@ export async function syncWorktree(input: WorktreeSyncInput): Promise<WorktreeSy
     globalDir: input.globalDir,
     omitSkills: withheld,
     memoryMcpOnly: true,
+    ...(isBuilderRole(input.agent?.role) ? { builderLimits: true } : {}),
     ...(input.agent?.opencode_permission === undefined
       ? {}
       : { opencodePermission: input.agent.opencode_permission }),
