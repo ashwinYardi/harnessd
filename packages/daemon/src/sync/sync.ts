@@ -1,5 +1,6 @@
 import { readFile, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import type { OpenCodePermission } from "@harnessd/shared";
 import { loadConfig } from "../config/load.ts";
 import {
   CLAUDE_AGENTS_DIR,
@@ -24,6 +25,8 @@ export interface SyncOptions {
   globalDir: string;
   /** Only used to print paths as `~/...` in errors. */
   home?: string;
+  /** The run agent’s OpenCode permission overrides, when syncing a worktree. */
+  opencodePermission?: OpenCodePermission;
 }
 
 export interface SyncResult {
@@ -135,10 +138,12 @@ export async function syncRepo(options: SyncOptions): Promise<SyncResult> {
   });
   // Another repo's layer: point the memory server at that repo's vault.
   const elsewhere = resolve(workspaceDir) !== resolve(ownLayer);
-  const generated = generateSyncFiles(
-    config,
-    elsewhere ? { memoryWorkspace: dirname(resolve(workspaceDir)) } : {},
-  );
+  const generated = generateSyncFiles(config, {
+    ...(elsewhere ? { memoryWorkspace: dirname(resolve(workspaceDir)) } : {}),
+    ...(options.opencodePermission === undefined
+      ? {}
+      : { opencodePermission: options.opencodePermission }),
+  });
   const { files, skipped } = await dropForeign(options.repoDir, generated);
   // Read every settings file before writing any, so a bad one stops sync with nothing written.
   const writable: WritableFile[] = [];
