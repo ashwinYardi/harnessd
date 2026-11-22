@@ -312,6 +312,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
 
   let parsed: ParsedGrillReply = { ok: false, error: "not run" };
   let spent: TokenUsage = emptyTokenUsage();
+  let turns: number | undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
     const text =
       attempt === 1
@@ -324,9 +325,10 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       cacheRead: spent.cacheRead + reply.tokens.cacheRead,
       cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
     };
+    if (reply.turns !== undefined) turns = (turns ?? 0) + reply.turns;
     if (!reply.ok && reply.limited) {
       // A usage limit is no bad reply: no retry, nothing written, the issue stays (MET-70).
-      return { calls: [], escalation: null, outcome: "limited", error: reply.error, tokens: spent };
+      return { calls: [], escalation: null, outcome: "limited", error: reply.error, tokens: spent, ...(turns === undefined ? {} : { turns }) };
     }
     parsed = reply.ok ? parseGrillReply(reply.text) : reply;
     if (parsed.ok) break;
@@ -344,7 +346,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       escalation: null,
       outcome: "error",
       error: parsed.error,
-      tokens: spent,
+      tokens: spent, ...(turns === undefined ? {} : { turns }),
     };
   }
 
@@ -406,7 +408,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       error: `could not ${step}: ${(error as Error).message}`,
       terms,
       precedents,
-      tokens: spent,
+      tokens: spent, ...(turns === undefined ? {} : { turns }),
     };
   }
   return {
@@ -415,6 +417,6 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     outcome: escalation ? "needs_input" : "proceed",
     terms,
     precedents,
-    tokens: spent,
+    tokens: spent, ...(turns === undefined ? {} : { turns }),
   };
 }

@@ -142,7 +142,7 @@ A worktree is cut from `origin/main`, or from `origin/<branch>` when that branch
   | Part prompt (fixture issue) | about 1.1k chars | unchanged: it is already only the agent, the task and the memory pointer |
   | QA prompt (one PR, diff cut at 24k chars) | about 3.3k chars | unchanged: the diff, CI, tests and checklist are the whole job |
   | `AGENTS.md` (this repo, rules included) | 4.5k chars | unchanged: agents must read the repo rules |
-  | `SKILL.md` bodies, committed pack | 40,781 chars (9 of 14 skills) | 53,443 chars (13 of 14; keeps `impeccable`) |
+  | `SKILL.md` bodies, committed pack | 40,781 chars (9 of 14 skills) | 53,443 chars (10 of 14; keeps `impeccable`) |
   | `opencode.json` MCP and permission tables | 687 chars | unchanged |
   | `harnessd-memory` tool list | 1,878 chars | unchanged |
   | **Static total from the sync** | **about 47.8k chars, about 12.0k tokens** | **about 60.5k chars, about 15.1k tokens** |

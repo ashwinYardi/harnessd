@@ -47,6 +47,8 @@ export interface SplitPlan {
   error?: string;
   /** Tokens the plan run used (D-040). */
   tokens?: TokenUsage;
+  /** Turns the plan run took, when the harness reports them. */
+  turns?: number;
 }
 
 export type ParsedPlanReply =
@@ -241,11 +243,11 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
           tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         } as const);
   if (!reply.ok && reply.limited) {
-    return { parts: [], source: "limited", error: reply.error, tokens: reply.tokens };
+    return { parts: [], source: "limited", error: reply.error, tokens: reply.tokens, ...turnsOf(reply) };
   }
   const parsed: ParsedPlanReply = reply.ok ? parsePlanReply(reply.text) : reply;
   if (parsed.ok) {
-    const plan: SplitPlan = { parts: parsed.parts, source: "model", tokens: reply.tokens };
+    const plan: SplitPlan = { parts: parsed.parts, source: "model", tokens: reply.tokens, ...turnsOf(reply) };
     if (parsed.reason !== undefined) plan.reason = parsed.reason;
     return plan;
   }
@@ -254,5 +256,10 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
     source: "fallback",
     error: parsed.error,
     tokens: reply.tokens,
+    ...turnsOf(reply),
   };
+}
+
+function turnsOf(reply: RunReply): { turns?: number } {
+  return reply.turns === undefined ? {} : { turns: reply.turns };
 }

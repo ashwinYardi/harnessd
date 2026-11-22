@@ -73,6 +73,8 @@ export interface GrillResult {
   error?: string;
   /** Tokens the grill run used, when it ran (D-040). */
   tokens?: TokenUsage;
+  /** Turns the grill runs took, when the harness reports them. */
+  turns?: number;
 }
 
 /** A decision note as written to the vault (same shape as the memory vault's notes). */
