@@ -24,6 +24,7 @@ import { createClaudeCodeAdapter } from "../adapters/claude-code.ts";
 import { mergeLayers } from "../config/merge.ts";
 import { createFilePauseStore, createPauseController } from "../control/pause.ts";
 import type {
+  CreatePrInput,
   GitHub,
   MergeInput,
   PullRequest,
@@ -44,6 +45,7 @@ import {
   systemClock,
 } from "./loop.ts";
 import { formatNotice } from "./notifier.ts";
+import { type ShipInput, type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import { partMarker, readPartMarker } from "./split.ts";
 import { createFileLoopStore, emptyLoopState, type LoopState, type LoopStore } from "./state.ts";
 
@@ -318,9 +320,30 @@ function fakeGitHub() {
   const merges: Array<{ number: number } & MergeInput> = [];
   const labels: Array<{ number: number; label: string }> = [];
   const views: number[] = [];
+  const createdPrs: CreatePrInput[] = [];
+  let nextPr = 100;
   const github: GitHub = {
+    async findPrByHead(branch) {
+      return Object.values(prs).find((pr) => pr.headRefName === branch);
+    },
     async findPrForIssue(key) {
       return prs[key];
+    },
+    async createPr(input) {
+      createdPrs.push(input);
+      const n = nextPr++;
+      const url = `https://github.test/o/r/pull/${n}`;
+      const key = input.title.split(":")[0] ?? input.head;
+      prs[key] = {
+        number: n,
+        title: input.title,
+        url,
+        headRefName: input.head,
+        headRefOid: `sha${n}`,
+        baseRefName: input.base,
+        isDraft: false,
+      };
+      return url;
     },
     async prFiles() {
       return [{ path: "src/x.ts", additions: 3, deletions: 1 }];
@@ -352,12 +375,12 @@ function fakeGitHub() {
       labels.push({ number, label });
     },
   };
-  const open = (key: string, number: number): PullRequest => {
+  const open = (key: string, number: number, branch = key.toLowerCase()): PullRequest => {
     const pr: PullRequest = {
       number,
       title: `${key}: work`,
       url: `https://github.test/o/r/pull/${number}`,
-      headRefName: key.toLowerCase(),
+      headRefName: branch,
       headRefOid: `sha${number}`,
       baseRefName: "main",
       isDraft: false,
@@ -365,7 +388,7 @@ function fakeGitHub() {
     prs[key] = pr;
     return pr;
   };
-  return { github, prs, reviews, statuses, merges, labels, views, open };
+  return { github, prs, reviews, statuses, merges, labels, views, open, createdPrs };
 }
 
 function memoryStore(initial: LoopState = emptyLoopState()): LoopStore & { state: LoopState } {
@@ -413,7 +436,7 @@ function setup(
   const loop = createCoordinatorLoop({
     config: options.config ?? mergeLayers([]),
     linear,
-    adapters: { "claude-code": adapter.adapter },
+    adapters: { [adapter.adapter.id]: adapter.adapter },
     worktrees: options.worktrees ?? wt.worktrees,
     github: gh.github,
     runCommand: async (command, cwd) => {
@@ -437,6 +460,16 @@ function setup(
     },
     log: (line) => logs.push(line),
     pid: 4242,
+    // Existing loop tests use fake worktree paths: the real ship step needs a real repo.
+    // The ship tests below pass `shipPart` and a temp git repo with a bare remote.
+    ship:
+      options.extra?.ship ??
+      (async () => ({
+        ok: true as const,
+        committed: false,
+        prUrl: "https://github.test/o/r/pull/1",
+        created: false,
+      })),
     ...options.extra,
   });
   return { loop, linear, adapter, wt, gh, commands, memory, notes, pings, logs };
@@ -502,7 +535,7 @@ test("a Ready issue splits into backend and frontend parts plus a QA part they b
     ],
   );
   assert.match(runs[0]?.prompt ?? "", /You are backend, the harnessd backend agent\./);
-  assert.match(runs[0]?.prompt ?? "", new RegExp(`gh pr create --title "${backend.key}: `));
+  assert.match(runs[0]?.prompt ?? "", /Do not run `git commit`, `git push` or `gh pr create`/);
   assert.equal(t.adapter.pending[0]?.cwd, `/wt/${backend.key}`);
   assert.equal(backend.state, "In Progress");
   assert.equal(qa.state, "Ready");
@@ -1306,7 +1339,7 @@ test("a failed QA sends the part back with the review; the second failure escala
   assert.match(fix?.prompt ?? "", /## QA requested changes/);
   assert.match(
     fix?.prompt ?? "",
-    /Your PR is already open \(https:\/\/github\.test\/o\/r\/pull\/7\)/,
+    /harnessd pushes your work to the open PR \(https:\/\/github\.test\/o\/r\/pull\/7\) and updates it/,
   );
   t.adapter.pending.at(-1)?.finish("ok");
   await t.loop.idle();
@@ -1436,7 +1469,7 @@ test("failed CI sends the part back once with the failing checks; the second fai
   const fix = t.adapter.runs().at(-1);
   assert.match(fix?.prompt ?? "", /## QA requested changes/);
   assert.match(fix?.prompt ?? "", /CI: `CI \/ test` failure/);
-  assert.match(fix?.prompt ?? "", /Your PR is already open/);
+  assert.match(fix?.prompt ?? "", /harnessd pushes your work to the open PR/);
   t.adapter.pending.at(-1)?.finish("ok");
   await t.loop.idle();
 
@@ -2844,4 +2877,273 @@ test("a merge in a pass the pause flag stops is checked after resume, with its t
   await t.loop.tick();
   assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }]);
   assert.equal(fx.parent.state, "Needs input");
+});
+
+// --- the ship step (MET-109) -------------------------------------------------
+
+function remoteGit(remote: string, ...args: string[]): string {
+  return execFileSync("git", ["--git-dir", remote, ...args], { encoding: "utf8" }).trim();
+}
+
+/** A repo with a bare origin, its identity set, and a `.harnessd/` for the sync. */
+async function shipRepo() {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-loop-ship-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  const remote = join(root, "remote.git");
+  execFileSync("git", ["init", "-q", "--bare", remote]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  git(repo, "config", "user.name", "Test Owner");
+  git(repo, "config", "user.email", "owner@example.test");
+  await writeFile(join(repo, "README.md"), "hi\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+  await mkdir(join(repo, ".harnessd"), { recursive: true });
+  git(repo, "remote", "add", "origin", remote);
+  git(repo, "push", "-q", "-u", "origin", "main");
+  const globalDir = join(root, "global");
+  await mkdir(globalDir, { recursive: true });
+  return {
+    root,
+    repo,
+    remote,
+    globalDir,
+    worktrees: createGitWorktrees({ repoDir: repo, root: join(root, "worktrees") }),
+  };
+}
+
+function codexConfig() {
+  const config = mergeLayers([]);
+  const backend = config.agents.backend;
+  assert.ok(backend);
+  backend.harness = "codex";
+  return config;
+}
+
+function onePart(linear: FakeLinear) {
+  const parent = linear.add({ title: "P", state: "In Progress" });
+  return linear.add({
+    title: "Ship the run",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+}
+
+test("a Codex part run gets a commit, a push and a PR, then goes to In Review", async () => {
+  const r = await shipRepo();
+  const linear = new FakeLinear();
+  const part = onePart(linear);
+  const adapter = fakeAdapter({ id: "codex" });
+  const t = setup({
+    linear,
+    adapter,
+    config: codexConfig(),
+    worktrees: r.worktrees,
+    extra: { repoDir: r.repo, globalDir: r.globalDir, ship: shipPart },
+  });
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+  const worktree = t.adapter.pending[0]?.cwd ?? "";
+  await writeFile(join(worktree, "ship.ts"), "export const shipped = true;\n");
+  const localHead = git(worktree, "rev-parse", "HEAD");
+  t.adapter.pending[0]?.finish("ok", undefined, "Add the ship step.\n\nChecked with pnpm test.");
+  await t.loop.idle();
+
+  assert.equal(part.state, "In Review");
+  assert.equal(t.gh.createdPrs.length, 1);
+  const created = t.gh.createdPrs[0];
+  assert.ok(created);
+  assert.equal(created.title, `${part.key}: Ship the run`);
+  assert.equal(created.base, "main");
+  assert.match(created.body, /Add the ship step\./);
+  assert.match(created.body, new RegExp(`Issue: https://linear.test/${part.key}`));
+  assert.equal(
+    remoteGit(r.remote, "log", "-1", "--format=%s", created.head),
+    `${part.key}: Ship the run`,
+  );
+  assert.notEqual(
+    remoteGit(r.remote, "rev-parse", created.head),
+    localHead,
+    "the daemon committed",
+  );
+});
+
+test("a run with no changes fails as no changes and does not go to In Review", async () => {
+  const r = await shipRepo();
+  const linear = new FakeLinear();
+  const part = onePart(linear);
+  const adapter = fakeAdapter({ id: "codex" });
+  const t = setup({
+    linear,
+    adapter,
+    config: codexConfig(),
+    worktrees: r.worktrees,
+    extra: { repoDir: r.repo, globalDir: r.globalDir, ship: shipPart },
+  });
+
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish("ok", undefined, "Nothing changed.");
+  await t.loop.idle();
+
+  assert.equal(part.state, "Ready");
+  assert.ok(!t.linear.moves.some((m) => m.key === part.key && m.state === "In Review"));
+  assert.equal(t.gh.createdPrs.length, 0);
+  assert.match(t.linear.comments.at(-1)?.body ?? "", /no changes/);
+});
+
+test("a rejected push fails as push failed and does not go to In Review", async () => {
+  const r = await shipRepo();
+  const hook = join(r.remote, "hooks", "pre-receive");
+  await mkdir(join(r.remote, "hooks"), { recursive: true });
+  await writeFile(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const linear = new FakeLinear();
+  const part = onePart(linear);
+  const adapter = fakeAdapter({ id: "codex" });
+  const t = setup({
+    linear,
+    adapter,
+    config: codexConfig(),
+    worktrees: r.worktrees,
+    extra: { repoDir: r.repo, globalDir: r.globalDir, ship: shipPart },
+  });
+
+  await t.loop.tick();
+  const worktree = t.adapter.pending[0]?.cwd ?? "";
+  await writeFile(join(worktree, "ship.ts"), "export const shipped = true;\n");
+  t.adapter.pending[0]?.finish("ok", undefined, "Add it.");
+  await t.loop.idle();
+
+  assert.equal(part.state, "Ready");
+  assert.equal(t.gh.createdPrs.length, 0);
+  assert.match(t.linear.comments.at(-1)?.body ?? "", /push failed: /);
+});
+
+test("an open PR is pushed to and not created twice", async () => {
+  const r = await shipRepo();
+  const linear = new FakeLinear();
+  const part = onePart(linear);
+  const adapter = fakeAdapter({ id: "codex" });
+  const t = setup({
+    linear,
+    adapter,
+    config: codexConfig(),
+    worktrees: r.worktrees,
+    extra: { repoDir: r.repo, globalDir: r.globalDir, ship: shipPart },
+  });
+  const branch = `${part.key.toLowerCase()}-ship-the-run`;
+  t.gh.open(part.key, 7, branch);
+
+  await t.loop.tick();
+  const worktree = t.adapter.pending[0]?.cwd ?? "";
+  await writeFile(join(worktree, "ship.ts"), "export const shipped = true;\n");
+  const localHead = git(worktree, "rev-parse", "HEAD");
+  t.adapter.pending[0]?.finish("ok", undefined, "Add it.");
+  await t.loop.idle();
+
+  assert.equal(part.state, "In Review");
+  assert.equal(t.gh.createdPrs.length, 0);
+  assert.notEqual(remoteGit(r.remote, "rev-parse", branch), localHead);
+});
+
+test("a self-update waits for the ship step to finish", async () => {
+  const f = fakeUpdater();
+  let release: (result: ShipResult) => void = () => {};
+  const held = new Promise<ShipResult>((resolve) => {
+    release = resolve;
+  });
+  let enterShip: () => void = () => {};
+  const started = new Promise<void>((resolve) => {
+    enterShip = resolve;
+  });
+  const ship: ShipRun = async () => {
+    enterShip();
+    return held;
+  };
+  const t = setup({ extra: { ...f.extra, ship } });
+  await approved(t);
+
+  const part = t.linear.add({
+    title: "Ship the run",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  // Keep the approved PR from merging in the dispatch tick.
+  t.gh.statuses[7] = { checks: [{ name: "CI / test", state: "pending", detail: "IN_PROGRESS" }] };
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+
+  // A merge to the default branch now asks for an update while the part runs.
+  f.u.target = { from: FROM, to: TO };
+  t.gh.statuses[7] = { state: "MERGED" };
+  await t.loop.tick();
+  assert.equal(t.memory.state.selfUpdate?.state, "pending");
+  assert.deepEqual(f.u.applied, [], "the part is in flight");
+
+  t.adapter.pending.at(-1)?.finish("ok", undefined, "Add it.");
+  await started; // the ship step is waiting on the push and the PR
+
+  // A tick during the ship must not restart the daemon.
+  await t.loop.tick();
+  assert.deepEqual(f.u.applied, [], "the run is still shipping");
+  assert.deepEqual(
+    t.memory.state.inFlight.map((e) => e.issueKey),
+    [part.key],
+    "the run stays in flight until its work is recorded",
+  );
+
+  // The ship returns: the run is recorded, then the next tick is the safe point.
+  release({ ok: true, committed: true, prUrl: "https://github.test/pr", created: true });
+  await t.loop.idle();
+  assert.equal(part.state, "In Review");
+  assert.deepEqual(t.memory.state.inFlight, []);
+  await t.loop.tick();
+  assert.deepEqual(f.u.applied, [{ from: FROM, to: TO }]);
+});
+
+test("a synced file stays out of the daemon's commit", async () => {
+  const r = await shipRepo();
+  const linear = new FakeLinear();
+  onePart(linear);
+  const adapter = fakeAdapter({ id: "codex" });
+  const t = setup({
+    linear,
+    adapter,
+    config: codexConfig(),
+    worktrees: r.worktrees,
+    extra: { repoDir: r.repo, globalDir: r.globalDir, ship: shipPart },
+  });
+
+  await t.loop.tick();
+  const worktree = t.adapter.pending[0]?.cwd ?? "";
+  assert.ok(existsSync(join(worktree, "AGENTS.md")), "the sync wrote the generated file");
+  await writeFile(join(worktree, "ship.ts"), "export const shipped = true;\n");
+  t.adapter.pending[0]?.finish("ok", undefined, "Add it.");
+  await t.loop.idle();
+
+  const created = t.gh.createdPrs[0];
+  assert.ok(created);
+  const tree = remoteGit(r.remote, "ls-tree", "-r", "--name-only", created.head);
+  assert.match(tree, /ship\.ts/);
+  assert.doesNotMatch(tree, /AGENTS\.md/);
+});
+
+test("QA, grill and plan runs never ship", async () => {
+  const shipped: ShipInput[] = [];
+  const spy: ShipRun = async (input) => {
+    shipped.push(input);
+    return { ok: true, committed: false, prUrl: "https://github.test/pr", created: false };
+  };
+
+  const splitAdapter = fakeAdapter({ plans: { "MET-100": plan(["backend", "S", "API"]) } });
+  const split = setup({ adapter: splitAdapter, extra: { ship: spy } });
+  split.linear.add({ title: "Feature", labels: ["ui"], description: BODY("M") });
+  await split.loop.tick();
+  assert.deepEqual(shipped, [], "grill and plan runs do not ship");
+
+  const qa = setup({ extra: { ship: spy } });
+  const { backend, qa: qaIssue } = qaFixture(qa);
+  qa.gh.open(backend.key, 7);
+  assert.deepEqual((await qa.loop.tick()).dispatched, [qaIssue.key]);
+  await settle();
+  qa.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
+  await qa.loop.idle();
+  assert.deepEqual(shipped, [], "a QA run does not ship");
 });

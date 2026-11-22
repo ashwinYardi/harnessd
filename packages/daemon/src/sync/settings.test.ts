@@ -58,10 +58,12 @@ test("a file that is not a JSON object is refused, not overwritten", () => {
   }
 });
 
-test("opencode.json: sync replaces only its own mcp entries by name and keeps every user key", () => {
+test("opencode.json: sync replaces owned keys and named MCP entries while keeping user settings", () => {
   const existing = {
     model: "deepseek/deepseek-chat",
     $schema: "https://example.com/old.json",
+    permission: { read: "ask", extra: "ask" },
+    websearch: { provider: "other" },
     mcp: {
       mine: { type: "remote", url: "https://mcp.example.com" },
       "harnessd-memory": { type: "local", command: ["old"], enabled: false },
@@ -69,18 +71,33 @@ test("opencode.json: sync replaces only its own mcp entries by name and keeps ev
     provider: { deepseek: { options: { timeout: 1 } } },
   };
   const memory = { type: "local", command: ["harnessd", "mcp", "memory"], enabled: true };
+  const keys = {
+    $schema: "https://opencode.ai/config.json",
+    permission: { read: "allow" },
+    websearch: { provider: "random" },
+  };
   const text = mergeSettings(
     JSON.stringify(existing),
     {
-      keys: { $schema: "https://opencode.ai/config.json" },
+      keys,
       hooks: {},
       entries: { mcp: { "harnessd-memory": memory } },
     },
     "opencode.json",
   );
   const out = JSON.parse(text);
-  assert.deepEqual(Object.keys(out), ["model", "$schema", "mcp", "provider"]);
+  assert.deepEqual(Object.keys(out), [
+    "model",
+    "$schema",
+    "permission",
+    "websearch",
+    "mcp",
+    "provider",
+  ]);
   assert.equal(out.$schema, "https://opencode.ai/config.json");
+  assert.deepEqual(out.permission, { read: "allow" });
+  assert.deepEqual(out.websearch, { provider: "random" });
+  assert.equal(out.model, existing.model);
   assert.deepEqual(out.mcp, { mine: existing.mcp.mine, "harnessd-memory": memory });
   assert.deepEqual(out.provider, existing.provider);
   assert.equal(out.hooks, undefined);
@@ -89,7 +106,7 @@ test("opencode.json: sync replaces only its own mcp entries by name and keeps ev
     mergeSettings(
       text,
       {
-        keys: { $schema: "https://opencode.ai/config.json" },
+        keys,
         hooks: {},
         entries: { mcp: { "harnessd-memory": memory } },
       },

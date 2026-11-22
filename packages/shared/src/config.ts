@@ -85,6 +85,12 @@ export interface MergeConfig {
   method: MergeMethod;
 }
 
+type OpenCodePermissionAction = "allow" | "deny";
+export type OpenCodePermission = Record<
+  string,
+  OpenCodePermissionAction | Record<string, OpenCodePermissionAction>
+>;
+
 /** One `[agents.<name>]` table in config.toml. */
 export interface AgentSettings {
   role?: AgentRole;
@@ -94,6 +100,7 @@ export interface AgentSettings {
   fallback_harness?: HarnessId;
   /** The model passed to the fallback harness. */
   fallback_model?: string;
+  opencode_permission?: OpenCodePermission;
   /** Image path (relative to the `.harnessd/` folder) or URL shown for the agent. */
   avatar?: string;
   instructions?: string;
@@ -237,6 +244,7 @@ export interface AgentLayerEntry {
   model?: string;
   fallback_harness?: HarnessId;
   fallback_model?: string;
+  opencode_permission?: OpenCodePermission;
   avatar?: string;
   instructions?: InstructionBlock;
   /** File that defined the agent, as shown in errors, and the key prefix used in it. */
@@ -271,6 +279,7 @@ export interface Agent {
   /** The harness the agent runs on while a usage limit holds `harness`. */
   fallback_harness?: HarnessId;
   fallback_model?: string;
+  opencode_permission?: OpenCodePermission;
   /** Image path or URL; the UI shows the name's initial when unset. */
   avatar?: string;
   /** Agent-specific instructions, global first. */
@@ -298,6 +307,7 @@ export interface ResolvedAgentConfig {
   model?: string;
   fallback_harness?: HarnessId;
   fallback_model?: string;
+  opencode_permission?: OpenCodePermission;
   avatar?: string;
   /** Global AGENTS.md, workspace AGENTS.md, then the agent's own instructions. */
   instructions: string;
@@ -518,8 +528,33 @@ export const AGENT_FIELDS = [
   "model",
   "fallback_harness",
   "fallback_model",
+  "opencode_permission",
   "avatar",
 ] as const;
+
+function parseOpenCodePermission(value: unknown, path: string, c: Checker): OpenCodePermission {
+  const action = (value: unknown, path: string) =>
+    c.oneOf(
+      value,
+      path,
+      ["allow", "deny"],
+      (v): v is OpenCodePermissionAction => v === "allow" || v === "deny",
+    );
+  return Object.fromEntries(
+    Object.entries(c.table(value, path)).map(([key, rule]) => {
+      const rulePath = keyPath(path, key);
+      const parsed = isTable(rule)
+        ? Object.fromEntries(
+            Object.entries(rule).map(([pattern, value]) => [
+              pattern,
+              action(value, keyPath(rulePath, pattern)),
+            ]),
+          )
+        : action(rule, rulePath);
+      return [key, parsed];
+    }),
+  );
+}
 
 /**
  * Validates one agent definition. `path` is the key prefix in the file
@@ -551,6 +586,13 @@ export function parseAgentSettings(
   }
   if (t.fallback_model !== undefined) {
     out.fallback_model = c.string(t.fallback_model, keyPath(path, "fallback_model"));
+  }
+  if (t.opencode_permission !== undefined) {
+    out.opencode_permission = parseOpenCodePermission(
+      t.opencode_permission,
+      keyPath(path, "opencode_permission"),
+      c,
+    );
   }
   if (t.avatar !== undefined) out.avatar = c.string(t.avatar, keyPath(path, "avatar"));
   if (t.instructions !== undefined) {

@@ -69,6 +69,12 @@ export function mergeLayers(layers: readonly ConfigLayer[]): MergedConfig {
       if (entry.model !== undefined) draft.model = entry.model;
       if (entry.fallback_harness !== undefined) draft.fallback_harness = entry.fallback_harness;
       if (entry.fallback_model !== undefined) draft.fallback_model = entry.fallback_model;
+      if (entry.opencode_permission !== undefined) {
+        draft.opencode_permission = deepMerge(
+          draft.opencode_permission ?? {},
+          entry.opencode_permission,
+        );
+      }
       if (entry.avatar !== undefined) draft.avatar = entry.avatar;
       if (entry.instructions !== undefined) draft.instructions.push(entry.instructions);
       draft.label ??= entry.label;
@@ -145,6 +151,8 @@ export function resolveAgentConfig(merged: MergedConfig, agentName: string): Res
   if (agent.model !== undefined) resolved.model = agent.model;
   if (agent.fallback_harness !== undefined) resolved.fallback_harness = agent.fallback_harness;
   if (agent.fallback_model !== undefined) resolved.fallback_model = agent.fallback_model;
+  if (agent.opencode_permission !== undefined)
+    resolved.opencode_permission = agent.opencode_permission;
   if (agent.avatar !== undefined) resolved.avatar = agent.avatar;
   return resolved;
 }

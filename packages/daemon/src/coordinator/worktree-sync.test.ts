@@ -54,6 +54,8 @@ test("sync writes the pack into the worktree and git status stays clean", async 
     globalDir: f.globalDir,
     worktree: f.worktree,
     runId: "MET-1-1",
+    // Use the fixture repo's excludes even when a builder run sets its own.
+    env: { ...process.env, GIT_CONFIG_COUNT: "0" },
   });
   assert.ok(changed.includes(".claude/skills/tdd/SKILL.md"));
   assert.ok(changed.includes("AGENTS.md"));
@@ -166,4 +168,25 @@ test("an OpenCode run in a repo with no harness files gets AGENTS.md, the skills
     enabled: true,
   });
   assert.equal(git(worktree, ["status", "--porcelain", "--untracked-files=all"], env), "");
+});
+
+test("worktree sync applies the run agent's OpenCode permissions", async () => {
+  const f = await fixture();
+  await syncWorktree({
+    repoDir: f.repo,
+    globalDir: f.globalDir,
+    worktree: f.worktree,
+    runId: "MET-1-1",
+    agent: {
+      opencode_permission: { websearch: "deny", bash: { "npm publish *": "deny" } },
+    },
+  });
+  const config = JSON.parse(await readFile(join(f.worktree, "opencode.json"), "utf8"));
+  assert.equal(config.permission.websearch, "deny");
+  assert.equal(config.permission.edit, "allow");
+  assert.deepEqual(config.permission.bash, {
+    "*": "allow",
+    "git push *": "deny",
+    "npm publish *": "deny",
+  });
 });

@@ -316,6 +316,12 @@ export interface CreateWorktreeOptions {
   pid?: number;
 }
 
+/** Resolves the Git top level and the folder name used under the worktrees root. */
+export async function resolveWorktreeRepo(cwd: string): Promise<{ repoDir: string; name: string }> {
+  const repoDir = (await git(cwd, ["rev-parse", "--show-toplevel"])).trim();
+  return { repoDir, name: basename(repoDir) };
+}
+
 /**
  * Creates `<root>/<repo-name>/<branch>` on a new branch from `base`. If the branch
  * already exists (a resumed task) it is checked out as is; if the worktree itself
@@ -323,9 +329,9 @@ export interface CreateWorktreeOptions {
  */
 export async function createWorktree(options: CreateWorktreeOptions): Promise<Worktree> {
   const root = resolve(options.root ?? defaultWorktreesRoot());
-  const repoDir = (await git(options.repoDir, ["rev-parse", "--show-toplevel"])).trim();
+  const { repoDir, name } = await resolveWorktreeRepo(options.repoDir);
   const branch = branchName(options.issueKey, options.title);
-  const path = join(root, basename(repoDir), branch);
+  const path = join(root, name, branch);
   const pid = options.pid ?? process.pid;
 
   return updateManifest(root, async (manifest) => {
@@ -412,8 +418,8 @@ export interface CheckoutWorktreeOptions {
  */
 export async function checkoutWorktree(options: CheckoutWorktreeOptions): Promise<Worktree> {
   const root = resolve(options.root ?? defaultWorktreesRoot());
-  const repoDir = (await git(options.repoDir, ["rev-parse", "--show-toplevel"])).trim();
-  const path = join(root, basename(repoDir), branchName(options.issueKey, options.title));
+  const { repoDir, name } = await resolveWorktreeRepo(options.repoDir);
+  const path = join(root, name, branchName(options.issueKey, options.title));
   const remote = options.remote ?? "origin";
 
   let fetchError: unknown;

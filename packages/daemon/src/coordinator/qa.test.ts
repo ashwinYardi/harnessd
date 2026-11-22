@@ -133,12 +133,16 @@ function harness(options: Options = {}) {
   const logs: string[] = [];
   const prs = options.prs ?? { [backend.key]: pr(7, backend.key) };
   const github: GitHub = {
+    async findPrByHead(branch) {
+      return Object.values(prs).find((pr) => pr.headRefName === branch);
+    },
     async findPrForIssue(key) {
       return prs[key];
     },
     async prFiles() {
       return [{ path: "src/avatars.ts", additions: 40, deletions: 2 }];
     },
+    createPr: () => Promise.reject(new Error("QA never opens a PR")),
     async postReview(number, review) {
       if (options.refuse?.includes(review.event)) {
         throw new Error("HTTP 422: Can not approve your own pull request");

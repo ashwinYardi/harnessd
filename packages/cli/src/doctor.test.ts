@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -32,6 +33,7 @@ async function machine(opts: { claudeSignedIn?: boolean } = {}) {
   const home = join(root, "global");
   await mkdir(bin);
   await mkdir(join(repo, ".harnessd"), { recursive: true });
+  execFileSync("git", ["init", "--quiet", repo]);
   await mkdir(home);
   await writeFile(join(repo, ".harnessd", "config.toml"), '[linear]\nteam_id = "MET"\n');
   const signedIn = opts.claudeSignedIn ?? true;
@@ -157,4 +159,26 @@ test("formatChecks pads columns and counts each state", () => {
       "  github.auth (fail): not signed in. Fix: Run: gh auth login",
     ],
   );
+});
+
+test("doctor checks the worktree write afresh, so a root that became unwritable fails", async () => {
+  const m = await machine();
+  const home = String(m.io.env.HARNESSD_HOME);
+  const root = join(home, "worktrees");
+  assert.equal(await run(["doctor"], m.io), 0, m.out.join("\n"));
+  assert.match(m.out.join("\n"), /^ok {6}harness\.claude-code\.worktree_write /m);
+
+  // The check leaves the repo's worktrees folder. Remove it so the root must make it.
+  await rm(join(root, "repo"), { recursive: true, force: true });
+  await chmod(root, 0o555);
+  try {
+    assert.equal(await run(["doctor"], m.io), 1);
+    assert.match(
+      m.out.join("\n"),
+      /^fail {4}harness\.claude-code\.worktree_write .*permission denied/m,
+    );
+    assert.match(m.out.join("\n"), new RegExp(`Make ${root} writable`));
+  } finally {
+    await chmod(root, 0o755);
+  }
 });
