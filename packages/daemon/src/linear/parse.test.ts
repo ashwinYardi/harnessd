@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compareByPriority, parseDoneWhen, parseIssue, parseSize, type RawIssue } from "./parse.ts";
+import {
+  compareByPriority,
+  compareQueueOrder,
+  parseDoneWhen,
+  parseIssue,
+  parseSize,
+  type RawIssue,
+} from "./parse.ts";
 
 test("parseSize reads the Size line in its common spellings", () => {
   assert.equal(parseSize("**Why**\nx\n\n**Size**: S"), "S");
@@ -43,6 +50,7 @@ test("parseIssue maps a raw node and tolerates nulls", () => {
     title: "T",
     description: null,
     priority: 7,
+    sortOrder: 7.5,
     url: "https://linear.app/x/issue/met-1",
     createdAt: "2026-11-01T00:00:00.000Z",
     state: { name: "Ready" },
@@ -62,7 +70,19 @@ test("parseIssue maps a raw node and tolerates nulls", () => {
   assert.deepEqual(issue.labels, []);
   assert.equal(issue.size, undefined);
   assert.deepEqual(issue.blockedBy, ["MET-2"]);
+  assert.equal(issue.sortOrder, 7.5);
   assert.equal("milestone" in issue, false);
+});
+
+test("parseIssue leaves sortOrder undefined when Linear sends none", () => {
+  const issue = parseIssue({
+    id: "u2",
+    identifier: "MET-2",
+    title: "T",
+    url: "https://linear.app/x/issue/met-2",
+    createdAt: "2026-11-01T00:00:00.000Z",
+  });
+  assert.equal(issue.sortOrder, undefined);
 });
 
 test("compareByPriority puts urgent first, none last, then oldest", () => {
@@ -76,5 +96,66 @@ test("compareByPriority puts urgent first, none last, then oldest", () => {
   assert.deepEqual(
     items.sort(compareByPriority).map((i) => i.k),
     ["urgent", "high-old", "high-new", "low", "none"],
+  );
+});
+
+test("compareQueueOrder follows sortOrder, then priority, oldest, key number", () => {
+  const items = [
+    { k: "no-order", priority: 1 as const, createdAt: "2026-01-01T00:00:00Z", key: "MET-90" },
+    {
+      k: "later",
+      priority: 4 as const,
+      createdAt: "2026-01-01T00:00:00Z",
+      key: "MET-91",
+      sortOrder: 2,
+    },
+    {
+      k: "first-newer",
+      priority: 4 as const,
+      createdAt: "2026-05-01T00:00:00Z",
+      key: "MET-92",
+      sortOrder: 1,
+    },
+    {
+      k: "tie-none",
+      priority: 0 as const,
+      createdAt: "2026-01-01T00:00:00Z",
+      key: "MET-93",
+      sortOrder: 3,
+    },
+    {
+      k: "tie-high-old",
+      priority: 2 as const,
+      createdAt: "2026-02-01T00:00:00Z",
+      key: "MET-94",
+      sortOrder: 3,
+    },
+    {
+      k: "tie-high-new",
+      priority: 2 as const,
+      createdAt: "2026-04-01T00:00:00Z",
+      key: "MET-95",
+      sortOrder: 3,
+    },
+    {
+      k: "tie-high-key-2",
+      priority: 2 as const,
+      createdAt: "2026-04-01T00:00:00Z",
+      key: "MET-2",
+      sortOrder: 3,
+    },
+  ];
+  assert.deepEqual(
+    items.sort(compareQueueOrder).map((i) => i.k),
+    [
+      "first-newer",
+      "later",
+      "tie-high-old",
+      "tie-high-key-2",
+      "tie-high-new",
+      "tie-none",
+      "no-order",
+    ],
+    "no sortOrder sorts last; priority breaks a sortOrder tie before age",
   );
 });

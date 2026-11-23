@@ -74,7 +74,7 @@ function client(replies: Reply[], extra: { sleep?: (ms: number) => Promise<void>
   return { linear, source, ...fake };
 }
 
-test("listReady pages through Ready issues, drops blocked ones and sorts by priority", async () => {
+test("listReady pages through Ready issues, drops blocked ones and follows Linear's order", async () => {
   const { linear, sent, source } = client([
     { fixture: "ready-page-1" },
     { fixture: "ready-page-2" },
@@ -83,7 +83,8 @@ test("listReady pages through Ready issues, drops blocked ones and sorts by prio
 
   assert.deepEqual(
     issues.map((i) => i.key),
-    ["MET-17", "MET-16", "MET-12", "MET-18", "MET-14"],
+    ["MET-14", "MET-17", "MET-16", "MET-12", "MET-18"],
+    "sortOrder wins over creation order and priority",
   );
   assert.equal(
     issues.some((i) => i.key === "MET-15"),
@@ -99,6 +100,7 @@ test("listReady pages through Ready issues, drops blocked ones and sorts by prio
     assert.equal(req.headers["Content-Type"], "application/json");
     assert.match(req.query, /query ReadyIssues\(/);
     assert.match(req.query, /inverseRelations \{ nodes \{ type issue \{ identifier state \{ type/);
+    assert.match(req.query, /sortOrder/, "the queue order needs sortOrder");
     assert.match(req.query, /pageInfo \{ hasNextPage endCursor \}/);
     assert.deepEqual(req.variables.filter, {
       team: { id: { eq: TEAM_ID } },
@@ -117,6 +119,40 @@ test("listReady omits the project filter when no project is given", async () => 
   assert.deepEqual(Object.keys(sent[0]?.variables.filter ?? {}), ["team", "state"]);
 });
 
+test("listReady takes a newer low sortOrder first and breaks a tie by priority", async () => {
+  const node = (n: number, extra: Record<string, unknown>) => ({
+    id: `queue-${n}`,
+    identifier: `MET-${n}`,
+    title: `Queue ${n}`,
+    description: null,
+    priority: 2,
+    url: `https://linear.app/meta-harness/issue/met-${n}`,
+    createdAt: "2026-11-01T00:00:00.000Z",
+    state: { name: "Ready" },
+    team: { id: TEAM_ID, key: "MET" },
+    labels: { nodes: [] },
+    inverseRelations: { nodes: [] },
+    ...extra,
+  });
+  const { linear } = client([
+    {
+      body: page([
+        node(60, { sortOrder: 3, priority: 1, createdAt: "2026-11-05T00:00:00.000Z" }),
+        node(61, { sortOrder: 1, priority: 4, createdAt: "2026-10-01T00:00:00.000Z" }),
+        node(62, { sortOrder: 2, priority: 4, createdAt: "2026-09-01T00:00:00.000Z" }),
+        node(63, { sortOrder: 2, priority: 2, createdAt: "2026-11-04T00:00:00.000Z" }),
+        node(64, { priority: 1, createdAt: "2026-08-01T00:00:00.000Z" }),
+      ]),
+    },
+  ]);
+  const issues = await linear.listReady({ teamId: TEAM_ID });
+  assert.deepEqual(
+    issues.map((i) => i.key),
+    ["MET-61", "MET-63", "MET-62", "MET-60", "MET-64"],
+    "no sortOrder sorts last even when urgent and old",
+  );
+});
+
 test("listReady parses size, Done when, labels, milestone and finished blockers", async () => {
   const { linear } = client([{ fixture: "ready-page-1" }, { fixture: "ready-page-2" }]);
   const issues = await linear.listReady({ teamId: TEAM_ID });
@@ -127,6 +163,7 @@ test("listReady parses size, Done when, labels, milestone and finished blockers"
     title: "Coordinator picks the highest-priority Ready issue",
     description: met12?.description,
     priority: 2,
+    sortOrder: 4,
     state: "Ready",
     labels: ["coordinator"],
     size: "M",

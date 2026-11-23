@@ -6,6 +6,7 @@
       "title": "Coordinator picks the highest-priority Ready issue",
       "description": "**Why**\nThe loop needs a single next issue to work on.\n\n**Done when**\n- [ ] Picks the urgent Ready issue first\n- [x] Skips blocked issues\n- [ ] Records the pick as a comment\n\n**Spec links**\n- docs/SPEC.md#linear-filing-rules\n\n**Size**: M",
       "priority": 2,
+      "sortOrder": 4,
       "url": "https://linear.app/meta-harness/issue/met-12",
       "createdAt": "2026-11-02T09:15:00.000Z",
       "state": {
