@@ -254,10 +254,15 @@ function fakeAdapter(
   options: {
     grillReply?: string;
     plans?: Record<string, string>;
+    /** Replies per plan key, in order; the last one repeats. Overrides `plans`. */
+    planReplies?: Record<string, string[]>;
     id?: HarnessId;
     /** Grill and plan runs end with this status instead of `ok`. */
     grillStatus?: RunResult["status"];
     planStatus?: RunResult["status"];
+    /** The error and reason of a failed plan run, e.g. a turn cap (D-045). */
+    planError?: string;
+    planReason?: RunResult["reason"];
     /** True when the fake adapter honors `Task.resumeSessionId` (MET-156). */
     canResume?: boolean;
   } = {},
@@ -303,9 +308,25 @@ function fakeAdapter(
           ),
         );
       } else if (task.id.startsWith("plan-")) {
-        const key = task.id.slice("plan-".length);
+        const key = task.id.slice("plan-".length).replace(/-retry$/, "");
+        const queue = options.planReplies?.[key];
+        const text =
+          queue === undefined
+            ? (options.plans?.[key] ?? "not json")
+            : queue.length > 1
+              ? (queue.shift() as string)
+              : queue[0];
         promise = Promise.resolve(
-          result(options.planStatus ?? "ok", options.plans?.[key] ?? "not json"),
+          result(
+            options.planStatus ?? "ok",
+            text,
+            options.planError,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            options.planReason,
+          ),
         );
       } else {
         promise = new Promise((r) => {
@@ -454,17 +475,34 @@ function memoryStore(initial: LoopState = emptyLoopState()): LoopStore & { state
   return store;
 }
 
+/** One part in the fixed brief shape the plan check accepts (MET-160). */
+function briefPart(role: string, size: string, title: string, doneWhen: number[]) {
+  return {
+    role,
+    size,
+    title,
+    goal: `${title}.`,
+    doneWhen,
+    files: [`src/${role}.ts`],
+    steps: [`Do ${title}.`],
+    verify: [{ run: "pnpm test", expect: "passes" }],
+    outOfScope: "The other parts.",
+  };
+}
+
 function plan(...parts: Array<[string, string, string]>): string {
   return JSON.stringify({
-    parts: parts.map(([role, size, title]) => ({ role, size, title, prompt: `Do ${title}.` })),
-    ...(parts.length > 1 ? { reason: "The work does not fit one M part." } : {}),
+    parts: parts.map(([role, size, title], i) =>
+      briefPart(role, size, title, parts.length === 1 ? [1, 2] : [i === 0 ? 1 : 2]),
+    ),
+    reason: "The work does not fit one M part.",
   });
 }
 
-/** A multi-part plan with no reason: invalid, so the loop must use the one-part fallback. */
+/** A plan with no reason: invalid, so the loop must retry once and then ask a human. */
 function planWithoutReason(...parts: Array<[string, string, string]>): string {
   return JSON.stringify({
-    parts: parts.map(([role, size, title]) => ({ role, size, title, prompt: `Do ${title}.` })),
+    parts: parts.map(([role, size, title], i) => briefPart(role, size, title, [i + 1])),
   });
 }
 
@@ -578,8 +616,10 @@ test("a Ready issue splits into backend and frontend parts plus a QA part they b
   for (const child of children) {
     assert.deepEqual(child.labels, ["coordinator"], "only the area label is copied");
     assert.match(child.description, /\*\*Why\*\*\n/);
-    assert.match(child.description, /- \[ \] Works/);
+    assert.match(child.description, /\*\*Done when\*\*\n- \[ \] /);
   }
+  assert.match(backend.description, /- \[ \] Works/);
+  assert.match(frontend.description, /- \[ \] Has tests/);
   assert.match(backend.description, /\*\*Why\*\*\nThe loop needs it\./);
   assert.match(qa.description, /- \[ \] Works \(verified\)/);
   assert.match(backend.description, /\*\*Size\*\*: S/);
@@ -632,23 +672,75 @@ test("a backend-only issue gets no frontend part", async () => {
   assert.match(t.linear.byKey("MET-102").description, /\*\*Size\*\*: S/, "QA of an S issue is S");
 });
 
-test("an unusable plan falls back to one part: frontend for ui, at the issue size", async () => {
+test("an unusable plan runs once more, then moves the issue to Needs input", async () => {
   const t = setup();
   const ui = t.linear.add({ title: "Board shows agents", labels: ["ui"], description: BODY("S") });
   const api = t.linear.add({ title: "Board API", labels: ["infra"], description: BODY("M") });
 
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.escalated.sort(), [ui.key, api.key].sort());
+  for (const issue of [ui, api]) {
+    assert.equal(issue.state, "Needs input");
+    assert.deepEqual(t.linear.children(issue), [], "no fallback part and no QA part");
+    const comment = t.linear.comments.find((c) => c.key === issue.key && c.body.includes("split"));
+    assert.match(comment?.body ?? "", /rejected twice/);
+    assert.match(comment?.body ?? "", /- not JSON/);
+  }
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.startsWith("plan-")).length,
+    4,
+    "one retry per issue",
+  );
+  assert.ok(
+    t.adapter.tasks.some((task) => /## Errors in your previous plan/.test(task.prompt)),
+    "the retry prompt lists the errors",
+  );
+  assert.equal(t.pings.length, 2, "one notice per issue");
+});
+
+test("a bad plan retries once with the errors, then splits", async () => {
+  const adapter = fakeAdapter({
+    planReplies: {
+      "MET-100": ['{"parts":[]}', plan(["backend", "S", "API"], ["frontend", "S", "UI"])],
+    },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Feature", labels: ["ui"], description: BODY("M") });
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.split, [parent.key]);
+  assert.deepEqual(t.linear.children(parent).map(roleOf), ["backend", "frontend", "qa"]);
+  const plans = t.adapter.tasks.filter((task) => task.id.startsWith("plan-"));
+  assert.equal(plans.length, 2, "the plan ran twice");
+  assert.doesNotMatch(plans[0]?.prompt ?? "", /Errors in your previous plan/);
+  assert.match(plans[1]?.prompt ?? "", /## Errors in your previous plan/);
+  assert.match(plans[1]?.prompt ?? "", /- parts: expected at least one part/);
+  assert.equal(t.pings.length, 0, "no human needed");
+});
+
+test("a turn-capped plan run counts as a bad plan and stays on the same harness", async () => {
+  const adapter = fakeAdapter({
+    planStatus: "error",
+    planError: "turn cap (50 turns)",
+    planReason: "turn_cap",
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Feature", labels: ["ui"], description: BODY("M") });
+
   await t.loop.tick();
 
-  assert.deepEqual(t.linear.children(ui).map(roleOf), ["frontend", "qa"]);
-  assert.deepEqual(t.linear.children(api).map(roleOf), ["backend", "qa"]);
-  const [uiPart] = t.linear.children(ui) as [FakeIssue];
-  assert.equal(uiPart.title, ui.title);
-  assert.match(uiPart.description, /\*\*Size\*\*: S/);
+  const plans = t.adapter.tasks.filter((task) => task.id.startsWith("plan-"));
+  assert.equal(plans.length, 2, "one retry");
+  assert.match(plans[1]?.prompt ?? "", /- turn cap \(50 turns\)/);
+  assert.equal(parent.state, "Needs input");
   assert.match(
-    t.linear.comments.find((c) => c.key === ui.key && c.body.includes("split"))?.body ?? "",
-    /one-part fallback/,
+    t.linear.comments.find((c) => c.key === parent.key && /split/.test(c.body))?.body ?? "",
+    /- turn cap \(50 turns\)/,
   );
-  assert.ok(t.logs.some((l) => l.includes("plan fallback: not JSON")));
+  assert.equal(t.pings.length, 1);
+  assert.equal(t.memory.state.harnessSwitch?.[parent.id], undefined, "no switch on a turn cap");
 });
 
 test("a re-tick creates nothing new, and an interrupted split is finished without a re-grill", async () => {
@@ -880,7 +972,7 @@ test("max_concurrent and budget_minutes come from the config", async () => {
   assert.equal(t.adapter.runs()[1]?.budgetMs, 5 * 60_000);
 });
 
-test("an L issue is never run: L parts or an L fallback go to Needs input", async () => {
+test("an L issue is never run: L parts or a rejected plan go to Needs input", async () => {
   const adapter = fakeAdapter({
     plans: {
       "MET-100": plan(["backend", "L", "Everything"]),
@@ -905,7 +997,7 @@ test("an L issue is never run: L parts or an L fallback go to Needs input", asyn
     comment(stillL.key),
     /must be split into S or M parts .*D-014.* L parts: Everything/,
   );
-  assert.match(comment(invalid.key), /plan reply was unusable/);
+  assert.match(comment(invalid.key), /plan for MET-101 was rejected twice/);
   assert.equal(t.pings.length, 2);
   assert.match(t.pings[0] ?? "", /^MET-100 needs input \(split\): /);
 
@@ -1641,7 +1733,7 @@ test("a ship failure keeps the harness of the switched run (D-048)", async () =>
 
 test("a grill timeout switches the coordinator harness (D-048)", async () => {
   const claude = fakeAdapter({ grillStatus: "timeout" });
-  const codex = fakeAdapter({ id: "codex" });
+  const codex = fakeAdapter({ id: "codex", plans: { "MET-100": plan(["backend", "S", "API"]) } });
   const t = setup({
     adapter: claude,
     extra: { adapters: { "claude-code": claude.adapter, codex: codex.adapter } },
@@ -2798,7 +2890,7 @@ test("a pause cancels grill runs and skips the split", async () => {
   const report = await tick;
   assert.equal(report.paused, true);
   assert.deepEqual(report.split, []);
-  assert.equal(t.linear.children(issue).length, 0, "no fallback split from a cancelled run");
+  assert.equal(t.linear.children(issue).length, 0, "no split from a cancelled run");
   assert.equal(issue.state, "Ready");
 });
 
@@ -3943,19 +4035,26 @@ test("the default max_concurrent is 1", async () => {
   assert.equal(t.loop.running().length, 1);
 });
 
-test("a plan with two parts and no reason falls back to one part", async () => {
+test("a plan with no reason is rejected twice and goes to Needs input", async () => {
   const adapter = fakeAdapter({
     plans: { "MET-100": planWithoutReason(["backend", "S", "API"], ["frontend", "S", "UI"]) },
   });
   const t = setup({ adapter });
   const parent = t.linear.add({ title: "Big", labels: ["ui"], description: BODY("M") });
 
-  await t.loop.tick();
+  const report = await t.loop.tick();
 
-  assert.deepEqual(t.linear.children(parent).map(roleOf), ["frontend", "qa"]);
+  assert.deepEqual(report.escalated, [parent.key]);
+  assert.deepEqual(t.linear.children(parent), [], "no sub-issue");
+  assert.equal(parent.state, "Needs input");
   const comment = t.linear.comments.find((c) => c.key === parent.key && /split/.test(c.body));
-  assert.match(comment?.body ?? "", /one-part fallback/);
-  assert.match(t.logs.join("\n"), /plan fallback: reason: a plan with more than one part/);
+  assert.match(comment?.body ?? "", /- reason: expected a non-empty string/);
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.startsWith("plan-")).length,
+    2,
+    "the plan ran twice",
+  );
+  assert.equal(t.pings.length, 1);
 });
 
 test("part 2 waits while part 1 is In Review, and starts after part 1 is merged", async () => {

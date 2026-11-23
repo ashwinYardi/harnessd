@@ -1659,13 +1659,24 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         log(`${issue.key}: plan failed, retrying next tick: ${plan.error ?? "unknown"}`);
         return;
       }
-      if (plan.source === "fallback") log(`${issue.key}: plan fallback: ${plan.error ?? ""}`);
+      if (plan.source === "bad") {
+        // Two unusable plans: one comment, one notice, no sub-issue, Needs input (MET-160).
+        const errors = plan.errors ?? [plan.error ?? "unknown"];
+        await escalate(
+          issue,
+          "split",
+          "the plan was rejected twice",
+          `**Coordinator split**: needs input. The plan for ${issue.key} was rejected twice, ` +
+            `so no sub-issues were created. The errors:\n` +
+            errors.map((error) => `- ${oneLine(error)}`).join("\n") +
+            `\n\nSplit it by hand, or move it back to Ready to plan again.`,
+        );
+        report.escalated.push(issue.key);
+        return;
+      }
       const tooBig = plan.parts.filter((p) => p.size === "L");
       if (tooBig.length > 0) {
-        const why =
-          plan.source === "fallback"
-            ? `the plan reply was unusable (${oneLine(plan.error ?? "unknown")}), and the fallback is one part at the issue's size`
-            : `the plan still has L parts: ${tooBig.map((p) => p.title).join("; ")}`;
+        const why = `the plan still has L parts: ${tooBig.map((p) => p.title).join("; ")}`;
         await escalate(
           issue,
           "split",
@@ -1696,10 +1707,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       await save();
     }
     if (result.created.length > 0) {
-      await linear.comment(
-        issue.id,
-        formatSplitComment(result, plan.source === "fallback" ? "fallback" : "model", plan.reason),
-      );
+      await linear.comment(issue.id, formatSplitComment(result, plan.reason));
     }
     await linear.moveTo(issue.id, "In Progress");
     // The coordinator's run is done: the next Ready issue starts on the main harness (D-048).
