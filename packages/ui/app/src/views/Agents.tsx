@@ -148,7 +148,7 @@ function AgentRows({
                   className="shrink-0 font-sans"
                 />
                 {run.switchReason !== undefined && run.harness !== agent.harness && (
-                  <span className="min-w-0 truncate">· {run.switchReason}</span>
+                  <span className="hidden shrink-0 sm:inline">· {run.switchReason}</span>
                 )}
                 <span className="truncate">
                   {ended

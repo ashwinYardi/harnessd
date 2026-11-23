@@ -16,7 +16,7 @@ A run that hangs also kept its children alive. The kill reached only the run's o
 | backend, frontend | opencode, codex, claude-code |
 | qa | codex, claude-code |
 
-`harnessForRun` returns the list for one run: the configured harness, then `fallback_harness` when it differs, then the role order. It removes duplicates. It drops each harness with a hold (D-034), and each harness whose latest status-engine result for `harness.<id>.installed` or `harness.<id>.auth` is fail or missing. It adds no new check per tick. An `auth` run result counts as not signed in for that issue's next try.
+`harnessForRun` returns the list for one run: the configured harness, then `fallback_harness` when it differs, then the role order. It removes duplicates. It drops each harness with a hold (D-034), and each harness whose latest `harness.<id>.cli` or `harness.<id>.auth` check is in state fail or missing. A harness with no check result yet counts as usable. It adds no new check per tick. An `auth` run result counts as not signed in for that issue's next try.
 
 **Model.** `fallback_model` applies only on the `fallback_harness`. Any other harness gets no `--model`. The main model and effort are dropped on every other harness.
 

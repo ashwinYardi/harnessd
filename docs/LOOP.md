@@ -301,7 +301,7 @@ The limit also starts a **hold** on that harness, kept in `loop.json` under `lim
 | a reset time | at the reset time |
 | no reset time | after a backoff: 15 minutes, doubled after each hold that ended, at most 2 hours |
 
-While a hold lasts, no part, QA, grill or plan run starts on that harness. The run moves to the next usable harness in the fixed role order (D-048, replaces the D-035 fallback rule). A harness is usable when it has an adapter, no hold, and no failed or missing `harness.<id>.installed` or `harness.<id>.auth` result. When none is usable, the issue waits in Ready and the loop logs `<key>: no harness left (<harness> <why>, ...)` once per set of reasons. Agents on other harnesses dispatch as usual. Runs in flight are not cancelled. More limited runs during a hold do not double it. An ok run that ends after the hold clears the backoff. An ok run that ends during the hold leaves the hold as it is.
+While a hold lasts, no part, QA, grill or plan run starts on that harness. The run moves to the next usable harness in the fixed role order (D-048, replaces the D-035 fallback rule). A harness is usable when it has an adapter, no hold, and no `harness.<id>.cli` or `harness.<id>.auth` check in state fail or missing. A harness with no check result yet counts as usable. When none is usable, the issue waits in Ready and the loop logs `<key>: no harness left (<harness> <why>, ...)` once per set of reasons. Agents on other harnesses dispatch as usual. Runs in flight are not cancelled. More limited runs during a hold do not double it. An ok run that ends after the hold clears the backoff. An ok run that ends during the hold leaves the hold as it is.
 
 The log gets one line when a hold starts and one when it ends, in the daemon's local time:
 
