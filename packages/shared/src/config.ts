@@ -56,12 +56,48 @@ export interface SlackConfig {
   time_zone: string;
 }
 
-/** How harnessd itself checks a PR before QA approves it (D-013). */
+/** How QA runs the product (MET-177). `cli` runs a command, not a server. */
+export const QA_KINDS = ["web", "api", "cli"] as const;
+export type QaKind = (typeof QA_KINDS)[number];
+
+export function isQaKind(value: string): value is QaKind {
+  return (QA_KINDS as readonly string[]).includes(value);
+}
+
+/** An environment variable name `qa.env` may pass through to the product. */
+export const QA_ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
+
+/** How harnessd itself checks a PR before QA approves it (D-013), and how QA runs it. */
 export interface QaConfig {
   /** Run first in the fresh QA worktree, e.g. to install dependencies. Empty skips it. */
   setup_command: string;
   /** The repo's tests. QA never approves when it fails, whatever the model says. */
   test_command: string;
+  /**
+   * How QA runs the product: web, api or cli. Unset means no live QA: QA judges the
+   * tests and the diff only (MET-177).
+   */
+  kind?: QaKind;
+  /**
+   * The command that starts the product, with `{port}` where the app should listen.
+   * For cli it is the command QA calls; harnessd does not run it as a server.
+   */
+  start?: string;
+  /** Where the product answers, with `{port}` standing for a free port. Web and api only. */
+  url?: string;
+  /** A path or command that succeeds once the product is ready. Optional for cli. */
+  health?: string;
+  /** An optional command run once after build, before health checks. */
+  seed?: string;
+  /** An optional command run before start, e.g. to build the product. */
+  build?: string;
+  /** Variable names passed from the daemon's environment to the product's commands. */
+  env?: string[];
+}
+
+/** Live QA is on only when the repo declares how to run its product (MET-177). */
+export function isLiveQa(qa: Pick<QaConfig, "kind">): boolean {
+  return qa.kind !== undefined;
 }
 
 export interface DaemonConfig {
@@ -628,6 +664,65 @@ export function parseAgentSettings(
   return out;
 }
 
+/** Validates one `[qa]` table (MET-177). */
+function parseQaConfig(value: unknown, file: string): Partial<QaConfig> {
+  const c = new Checker(file);
+  const t = c.table(value, "qa", [
+    "setup_command",
+    "test_command",
+    "kind",
+    "start",
+    "url",
+    "health",
+    "seed",
+    "build",
+    "env",
+  ]);
+  const qa: Partial<QaConfig> = {};
+  if (t.setup_command !== undefined) qa.setup_command = c.text(t.setup_command, "qa.setup_command");
+  if (t.test_command !== undefined) qa.test_command = c.string(t.test_command, "qa.test_command");
+  if (t.kind !== undefined) qa.kind = c.oneOf(t.kind, "qa.kind", QA_KINDS, isQaKind);
+  if (t.start !== undefined) qa.start = c.string(t.start, "qa.start");
+  if (t.url !== undefined) qa.url = c.string(t.url, "qa.url");
+  if (t.health !== undefined) qa.health = c.string(t.health, "qa.health");
+  if (t.seed !== undefined) qa.seed = c.string(t.seed, "qa.seed");
+  if (t.build !== undefined) qa.build = c.string(t.build, "qa.build");
+  if (t.env !== undefined) {
+    const names = c.stringArray(t.env, "qa.env");
+    for (const [i, name] of names.entries()) {
+      if (!QA_ENV_NAME.test(name)) {
+        c.fail(
+          `qa.env[${i}]`,
+          `expected a variable name matching [A-Z_][A-Z0-9_]*, got ${describe(name)}`,
+        );
+      }
+    }
+    qa.env = names;
+  }
+
+  // The run keys only mean something with a kind, so they never turn live QA on by
+  // accident. Each kind then has its own required keys.
+  if (qa.kind === undefined) {
+    for (const key of ["start", "url", "health", "seed", "build", "env"] as const) {
+      if (t[key] !== undefined) c.fail(`qa.${key}`, "requires qa.kind");
+    }
+  } else if (qa.kind === "cli") {
+    if (t.url !== undefined) c.fail("qa.url", "not allowed with kind cli");
+    if (qa.start === undefined) c.fail("qa.start", "required for kind cli");
+  } else {
+    const { start, url, health } = qa;
+    if (start === undefined) c.fail("qa.start", `required for kind ${qa.kind}`);
+    if (url === undefined) {
+      c.fail("qa.url", `required for kind ${qa.kind}`);
+    } else if (!url.includes("{port}")) {
+      c.fail("qa.url", `expected a URL with a {port} placeholder, got ${describe(url)}`);
+    }
+    if (health === undefined) c.fail("qa.health", `required for kind ${qa.kind}`);
+  }
+
+  return qa;
+}
+
 /** Validates a parsed config.toml. Unknown keys are errors, so typos never pass silently. */
 export function parseConfigFile(value: unknown, file: string): ConfigFile {
   const c = new Checker(file);
@@ -738,12 +833,7 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
   }
 
   if (root.qa !== undefined) {
-    const t = c.table(root.qa, "qa", ["setup_command", "test_command"]);
-    const qa: Partial<QaConfig> = {};
-    if (t.setup_command !== undefined)
-      qa.setup_command = c.text(t.setup_command, "qa.setup_command");
-    if (t.test_command !== undefined) qa.test_command = c.string(t.test_command, "qa.test_command");
-    out.qa = qa;
+    out.qa = parseQaConfig(root.qa, file);
   }
 
   if (root.daemon !== undefined) {

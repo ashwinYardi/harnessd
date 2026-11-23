@@ -4,6 +4,7 @@ import {
   ConfigError,
   DEFAULT_SETTINGS,
   HARNESSES,
+  isLiveQa,
   parseAgentSettings,
   parseConfigFile,
 } from "./index.ts";
@@ -213,7 +214,7 @@ test("wrong types are rejected with their path", () => {
   rejects({ qa: { setup_command: 1 } }, `${FILE}: qa.setup_command: expected a string, got 1`);
   rejects(
     { qa: { command: "x" } },
-    `${FILE}: qa.command: unknown key, expected one of setup_command, test_command`,
+    `${FILE}: qa.command: unknown key, expected one of setup_command, test_command, kind, start, url, health, seed, build, env`,
   );
   rejects({ slack: { channel: "" } }, `${FILE}: slack.channel: expected a non-empty string`);
   rejects(
@@ -394,6 +395,117 @@ test("parseConfigFile reads [secrets.<service>] references, never a value (MET-3
     () => parseConfigFile({ secrets: { linear: { api_key: 42 } } }, FILE),
     (e: unknown) => e instanceof ConfigError && /expected a reference/.test(e.message),
   );
+});
+
+test("qa parses a web, an api and a cli product (MET-177)", () => {
+  const web = {
+    setup_command: "",
+    test_command: "pnpm test",
+    kind: "web",
+    start: "pnpm dev --port {port}",
+    url: "http://127.0.0.1:{port}",
+    health: "/api/health",
+    build: "pnpm build",
+    seed: "pnpm seed",
+    env: ["DATABASE_URL", "NEXT_PUBLIC_MODE"],
+  };
+  const api = {
+    kind: "api",
+    start: "go run ./cmd/server -port {port}",
+    url: "http://localhost:{port}/health",
+    health: "/health",
+  };
+  const cli = { kind: "cli", start: "node dist/cli.js" };
+  assert.deepEqual(parseConfigFile({ qa: web }, FILE), { qa: web });
+  assert.deepEqual(parseConfigFile({ qa: api }, FILE), { qa: api });
+  assert.deepEqual(parseConfigFile({ qa: cli }, FILE), { qa: cli });
+  // A cli may also check health once after build and seed.
+  const cliHealth = {
+    kind: "cli",
+    start: "node dist/cli.js",
+    health: "node dist/cli.js --version",
+  };
+  assert.deepEqual(parseConfigFile({ qa: cliHealth }, FILE), { qa: cliHealth });
+});
+
+test("qa keeps the setup and test defaults, and off by default (MET-177)", () => {
+  assert.deepEqual(DEFAULT_SETTINGS.qa, {
+    setup_command: "pnpm install --frozen-lockfile --prefer-offline",
+    test_command: "pnpm test",
+  });
+  assert.equal(isLiveQa(DEFAULT_SETTINGS.qa), false);
+  assert.equal(isLiveQa({}), false);
+  assert.equal(isLiveQa({ kind: "web" }), true);
+  assert.deepEqual(parseConfigFile({ qa: { kind: "cli", start: "x" } }, FILE), {
+    qa: { kind: "cli", start: "x" },
+  });
+});
+
+test("a bad qa table is rejected with its key path (MET-177)", () => {
+  const web = { kind: "web", start: "pnpm dev", url: "http://localhost:{port}", health: "/" };
+  rejects(
+    { qa: { ...web, kind: "desktop" } },
+    `${FILE}: qa.kind: expected one of web, api, cli, got "desktop"`,
+  );
+  rejects({ qa: { ...web, kind: 1 } }, `${FILE}: qa.kind: expected one of web, api, cli, got 1`);
+  // A web or api url needs the port placeholder.
+  rejects(
+    { qa: { ...web, url: "http://localhost:3000" } },
+    `${FILE}: qa.url: expected a URL with a {port} placeholder, got "http://localhost:3000"`,
+  );
+  rejects(
+    { qa: { kind: "api", start: "x", url: "http://localhost", health: "/" } },
+    `${FILE}: qa.url: expected a URL with a {port} placeholder, got "http://localhost"`,
+  );
+  // cli forbids url and requires start.
+  rejects(
+    { qa: { kind: "cli", start: "x", url: "http://localhost:{port}" } },
+    `${FILE}: qa.url: not allowed with kind cli`,
+  );
+  rejects({ qa: { kind: "cli" } }, `${FILE}: qa.start: required for kind cli`);
+  // web and api require start, url and health.
+  for (const kind of ["web", "api"]) {
+    rejects({ qa: { kind } }, `${FILE}: qa.start: required for kind ${kind}`);
+    rejects({ qa: { kind, start: "x" } }, `${FILE}: qa.url: required for kind ${kind}`);
+    rejects(
+      { qa: { kind, start: "x", url: "http://localhost:{port}" } },
+      `${FILE}: qa.health: required for kind ${kind}`,
+    );
+  }
+  // An empty string, a wrong type and an unknown key.
+  rejects({ qa: { ...web, start: " " } }, `${FILE}: qa.start: expected a non-empty string`);
+  rejects({ qa: { ...web, health: "" } }, `${FILE}: qa.health: expected a non-empty string`);
+  rejects({ qa: { ...web, seed: "" } }, `${FILE}: qa.seed: expected a non-empty string`);
+  rejects({ qa: { ...web, build: 3 } }, `${FILE}: qa.build: expected a string, got 3`);
+  rejects({ qa: { ...web, url: 8 } }, `${FILE}: qa.url: expected a string, got 8`);
+  rejects(
+    { qa: { ...web, timeout: 5 } },
+    `${FILE}: qa.timeout: unknown key, expected one of setup_command, test_command, kind, start, url, health, seed, build, env`,
+  );
+  // env is a list of variable names, not values.
+  rejects(
+    { qa: { ...web, env: "PORT" } },
+    `${FILE}: qa.env: expected an array of strings, got "PORT"`,
+  );
+  rejects(
+    { qa: { ...web, env: ["DATABASE_URL", "port"] } },
+    `${FILE}: qa.env[1]: expected a variable name matching [A-Z_][A-Z0-9_]*, got "port"`,
+  );
+  rejects(
+    { qa: { ...web, env: ["1BAD"] } },
+    `${FILE}: qa.env[0]: expected a variable name matching [A-Z_][A-Z0-9_]*, got "1BAD"`,
+  );
+  // A run key without kind is an error, so QA never silently runs the product.
+  for (const [key, value] of [
+    ["start", "x"],
+    ["url", "http://localhost:{port}"],
+    ["health", "/"],
+    ["seed", "x"],
+    ["build", "x"],
+    ["env", ["PORT"]],
+  ] as const) {
+    rejects({ qa: { [key]: value } }, `${FILE}: qa.${key}: requires qa.kind`);
+  }
 });
 
 test("self-update defaults to on and requires a boolean", () => {
