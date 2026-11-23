@@ -1039,6 +1039,140 @@ test("a parent in Needs input frees its max_parents slot on the next tick", asyn
   assert.equal(second.state, "In Progress");
 });
 
+test("a waiting parent logs one wait line, and again only when the in-flight set changes", async () => {
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 3, max_parents: 2 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const adapter = fakeAdapter({
+    plans: {
+      "MET-100": plan(["backend", "S", "API"]),
+      "MET-101": plan(["backend", "S", "API too"]),
+      "MET-102": plan(["backend", "S", "API three"]),
+      "MET-103": plan(["backend", "S", "API four"]),
+    },
+  });
+  const t = setup({ config, adapter });
+  const first = t.linear.add({ title: "First", labels: ["ui"], description: BODY("S") });
+  const second = t.linear.add({ title: "Second", labels: ["ui"], description: BODY("S") });
+  const third = t.linear.add({ title: "Third", labels: ["ui"], description: BODY("S") });
+  const fourth = t.linear.add({ title: "Fourth", labels: ["ui"], description: BODY("S") });
+  const waitLines = () => t.logs.filter((line) => line.includes(" waits, "));
+
+  await t.loop.tick();
+  assert.deepEqual(waitLines(), [
+    `${third.key} waits, ${first.key}, ${second.key} are in flight`,
+    `${fourth.key} waits, ${first.key}, ${second.key} are in flight`,
+  ]);
+
+  await t.loop.tick();
+  assert.equal(waitLines().length, 2, "no second line per tick");
+
+  // The oldest parent finishes, so a slot frees for the third. The fourth still waits, and
+  // its set changed from the first two to the second and third.
+  first.state = "Done";
+  await t.loop.tick();
+
+  assert.deepEqual(grilled(t), [first.key, second.key, third.key]);
+  assert.equal(third.state, "In Progress");
+  assert.equal(fourth.state, "Ready");
+  assert.deepEqual(waitLines().slice(2), [
+    `${fourth.key} waits, ${second.key}, ${third.key} are in flight`,
+  ]);
+});
+
+test("only the oldest split records are admitted; a part of the others logs the wait line", async () => {
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 3, max_parents: 1 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const linear = new FakeLinear();
+  const older = linear.add({ title: "Older", state: "In Progress" });
+  const newer = linear.add({ title: "Newer", state: "In Progress" });
+  const olderPart = linear.add({
+    title: "Older part",
+    parentId: older.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const newerPart = linear.add({
+    title: "Newer part",
+    parentId: newer.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const state = emptyLoopState();
+  state.splits = {
+    [older.id]: {
+      key: older.key,
+      parts: [olderPart.id],
+      qa: "qa-old",
+      at: "2026-11-23T10:00:00.000Z",
+    },
+    [newer.id]: {
+      key: newer.key,
+      parts: [newerPart.id],
+      qa: "qa-new",
+      at: "2026-11-23T11:00:00.000Z",
+    },
+  };
+  const t = setup({ config, linear, store: memoryStore(state) });
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.dispatched, [olderPart.key], "only the oldest parent is admitted");
+  assert.equal(olderPart.state, "In Progress");
+  assert.equal(newerPart.state, "Ready");
+  assert.ok(t.logs.includes(`${newerPart.key} waits, ${older.key} is in flight`));
+
+  await t.loop.tick();
+  assert.equal(
+    t.logs.filter((line) => line === `${newerPart.key} waits, ${older.key} is in flight`).length,
+    1,
+    "the part logs its wait once",
+  );
+});
+
+test("a part of a parent in Needs input does not dispatch", async () => {
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "Parked", state: "Needs input" });
+  const part = linear.add({
+    title: "Part",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const state = emptyLoopState();
+  state.splits = {
+    [parent.id]: {
+      key: parent.key,
+      parts: [part.id],
+      qa: "qa",
+      at: "2026-11-23T10:00:00.000Z",
+    },
+  };
+  const t = setup({ linear, store: memoryStore(state) });
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.dispatched, []);
+  assert.equal(part.state, "Ready");
+  assert.equal(t.adapter.runs().length, 0);
+});
+
 test("at most 3 agents run at once; a finished run frees a slot", async () => {
   const config = mergeLayers([
     {
