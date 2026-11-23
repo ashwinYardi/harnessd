@@ -22,11 +22,11 @@ harnessd run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
 3. **Release holds.** A usage-limit hold whose time has passed ends (see Usage limits).
 4. **State repair.** A shipped part that Linear moved back to In Progress goes to In Review again, before dispatch (see Ship). A split record whose parent is Done or Canceled is dropped (see Split).
 5. **Merge.** Every QA approval recorded in `loop.json` goes one step through the merge gate (see Merge).
-6. **Dispatch** eligible sub-issues, then **split** Ready issues, then **dispatch** again.
+6. **Dispatch** eligible sub-issues of admitted parents, then **split** the Ready issues the queue admits, then **dispatch** again.
 7. **Save** `loop.json`.
 
 ## Split
-Every Ready issue without a part marker that the queue admits is first grilled (docs/COORDINATOR.md). The Ready column is the queue: `limits.max_parents` (default 1, D-050) caps the parents in flight, from a parent's grill until it is Done, Canceled or Needs input, and the loop takes the top Ready parent in Linear's manual order (`sortOrder`, then priority, then oldest). The other parents stay untouched in Ready. `max_parents` sits next to `limits.max_concurrent` and does not replace it: `max_concurrent` still caps agent runs at once (Dispatch). The loop reads the key with the queue, wait log and dispatch filter in the rest of MET-171.
+Every Ready issue without a part marker that the queue admits is first grilled (docs/COORDINATOR.md). The Ready column is the queue: `limits.max_parents` (default 1, D-050) caps the parents in flight, from a parent's grill until it is Done, Canceled or Needs input, and the loop takes the top Ready parent in Linear's manual order (`sortOrder`, then priority, then oldest). The other parents stay untouched in Ready. Each waiting parent logs one line per wait, `<key> waits, <in-flight key> is in flight`; with more than one in-flight parent the keys join with `, ` and the line says `are in flight`. The loop logs again only when that set changes or the parent stops waiting and then waits again. Admission is by split record time, oldest first: the first `max_parents` in-flight parents are admitted, and no new grill starts while the count is at or over the limit. `max_parents` sits next to `limits.max_concurrent` and does not replace it: `max_concurrent` still caps agent runs at once (Dispatch).
 - If the grill escalates, the issue goes to Needs input.
 - If the grill errors, the issue is retried on the next tick.
 
@@ -98,7 +98,7 @@ When the split is done, the parent moves to In Progress.
 
 ## Dispatch
 - `limits.max_concurrent` runs at once (default 1, D-040). Parallel parts of one parent touched the same files, and each merge sent the next PR back for another build and QA round, so the default is serial. A user may still set up to 3 (D-014 cap).
-- At most `limits.max_parents` parents are in flight, so only their parts and QA dispatch (see Split, D-050).
+- At most `limits.max_parents` parents are in flight, and only the admitted parents' parts and QA dispatch (see Split, D-050). Admission is by split record time, oldest first, so parts of the other in-flight parents wait and log `<part key> waits, <in-flight key> is in flight`. A part of a parent in Needs input does not start. A part whose parent has no split record was not split by the loop and runs as before.
 - A part is eligible when it is in Ready and nothing unfinished blocks it. With serial parts, part 2's blocker is part 1 until part 1 is Done (merged).
 - A QA sub-issue is eligible when a part of its parent is In Review at a head QA has not approved (see QA).
 - Each run:

@@ -1494,15 +1494,30 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   }
 
   /** Ready sub-issues in priority order; parts must be unblocked, QA needs every part reviewed. */
-  async function dispatchEligible(s: LoopState, report: TickReport): Promise<void> {
+  async function dispatchEligible(
+    s: LoopState,
+    report: TickReport,
+    waiting: Set<string>,
+  ): Promise<void> {
     const max = config.limits.max_concurrent;
     if (pausedNow || s.inFlight.length >= max) return;
     const candidates = await linear.listReadyContaining(team, PART_MARKER_PREFIX);
+    const { ids: admitted, keys: inFlightKeys } = admittedParents(await inFlightParents(s));
     for (const issue of candidates) {
       if (pausedNow || s.inFlight.length >= max) break;
       if (s.inFlight.some((e) => e.issueId === issue.id)) continue;
       const marker = readPartMarker(issue.description);
       if (marker === undefined) continue;
+      // Only an admitted in-flight parent's parts and QA start (D-050). A parent without a
+      // split record was not split by the loop, so its parts keep running as before.
+      if (
+        issue.parentId !== undefined &&
+        s.splits?.[issue.parentId] !== undefined &&
+        !admitted.has(issue.parentId)
+      ) {
+        noteWait(issue.id, issue.key, inFlightKeys, waiting);
+        continue;
+      }
       let qa: QaContext | undefined;
       if (marker.role === "qa") {
         if (issue.parentId === undefined) continue;
@@ -1724,19 +1739,31 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     return current === "done" || current === "needs input" || isCanceledState(state);
   }
 
+  /** A parent in flight, with the split record time that orders the queue (D-050). */
+  interface InFlightParent {
+    id: string;
+    key: string;
+    at: string;
+  }
+
   /**
    * Parents in flight: those with a split record whose Linear state is not Done, Canceled or
-   * Needs input (MET-174). A Ready parent with a record counts. repairSplits drops a record at
-   * Done or Canceled, and splitReady drops one whose recorded parts were all canceled.
+   * Needs input (MET-174, D-050). A Ready parent with a record counts. repairSplits drops a
+   * record at Done or Canceled, and splitReady drops one whose recorded parts were all
+   * canceled. Oldest split record first, so the earliest parent holds the first slot.
    */
-  async function inFlightParents(s: LoopState | undefined, ready: Set<string>): Promise<number> {
-    if (s?.splits === undefined) return 0;
-    let count = 0;
-    for (const id of Object.keys(s.splits)) {
+  async function inFlightParents(
+    s: LoopState | undefined,
+    ready?: Set<string>,
+  ): Promise<InFlightParent[]> {
+    if (s?.splits === undefined) return [];
+    const out: InFlightParent[] = [];
+    for (const [id, record] of Object.entries(s.splits)) {
+      const parent = { id, key: record.key, at: record.at };
       // A Ready parent is in flight while its record stands; splitReady dropped an all-canceled
-      // record before this count.
-      if (ready.has(id)) {
-        count++;
+      // record before this read.
+      if (ready?.has(id) === true) {
+        out.push(parent);
         continue;
       }
       let issue: Issue;
@@ -1744,15 +1771,51 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         issue = await linear.getIssue(id);
       } catch {
         // Its state is unknown: count it, so a grill never overfills the limit.
-        count++;
+        out.push(parent);
         continue;
       }
-      if (!endsParentSlot(issue.state)) count++;
+      if (!endsParentSlot(issue.state)) out.push(parent);
     }
-    return count;
+    return out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.key.localeCompare(b.key));
   }
 
-  async function splitReady(report: TickReport): Promise<void> {
+  /** The parents admitted now: the first max_parents in flight, oldest split record first. */
+  function admittedParents(inFlight: InFlightParent[]): { ids: Set<string>; keys: string[] } {
+    const admitted = inFlight.slice(0, config.limits.max_parents);
+    return { ids: new Set(admitted.map((p) => p.id)), keys: admitted.map((p) => p.key) };
+  }
+
+  /**
+   * The in-flight keys a waiting parent or part saw last, so it logs once per wait and again
+   * only when that set changes (D-050). An entry is dropped at the end of a tick where the
+   * issue no longer waits.
+   */
+  const waited = new Map<string, Set<string>>();
+
+  /** Logs `<key> waits, <keys in flight>` once per wait and once per change of the set. */
+  function noteWait(id: string, key: string, inFlight: string[], seen: Set<string>): void {
+    seen.add(id);
+    const next = new Set(inFlight);
+    const prev = waited.get(id);
+    if (prev !== undefined && prev.size === next.size && [...next].every((k) => prev.has(k))) {
+      return;
+    }
+    waited.set(id, next);
+    const inFlightText =
+      inFlight.length === 0
+        ? "no parent is in flight"
+        : inFlight.length === 1
+          ? `${inFlight[0]} is in flight`
+          : `${inFlight.join(", ")} are in flight`;
+    log(`${key} waits, ${inFlightText}`);
+  }
+
+  /** Forgets the waits that ended since the last tick. */
+  function clearWaits(seen: Set<string>): void {
+    for (const id of [...waited.keys()]) if (!seen.has(id)) waited.delete(id);
+  }
+
+  async function splitReady(report: TickReport, waiting: Set<string>): Promise<void> {
     const issues = (await linear.listReady(team)).filter(
       (i) => readPartMarker(i.description) === undefined,
     );
@@ -1805,10 +1868,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const limit = config.limits.max_parents;
     const inFlight = await inFlightParents(state, ready);
     let started = 0;
+    const waitingParents: Array<{ id: string; key: string }> = [];
     for (const item of work) {
       if (pausedNow) break;
       if (item.grill) {
-        if (inFlight + started >= limit) continue;
+        if (inFlight.length + started >= limit) {
+          waitingParents.push({ id: item.issue.id, key: item.issue.key });
+          continue;
+        }
         started++;
       }
       try {
@@ -1816,6 +1883,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       } catch (error) {
         log(`${item.issue.key}: split failed, retrying next tick: ${message(error)}`);
       }
+    }
+    if (waitingParents.length > 0) {
+      // The line names the parents that hold the slots, recomputed so a grill started in this
+      // tick is in the set. A parent left waiting logs again only when that set changes (D-050).
+      const now = admittedParents(await inFlightParents(state, ready));
+      for (const item of waitingParents) noteWait(item.id, item.key, now.keys, waiting);
     }
   }
 
@@ -2146,9 +2219,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         return report;
       }
     }
-    await dispatchEligible(s, report);
-    await splitReady(report);
-    await dispatchEligible(s, report);
+    const waiting = new Set<string>();
+    await dispatchEligible(s, report, waiting);
+    await splitReady(report, waiting);
+    await dispatchEligible(s, report, waiting);
+    clearWaits(waiting);
     await save();
     report.paused = pausedNow;
     return report;

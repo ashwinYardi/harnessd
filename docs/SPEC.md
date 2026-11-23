@@ -34,7 +34,7 @@ Instruction layers merge in this order: global → workspace → agent (schema a
 - **Backend, Frontend, QA**: persistent agents with a name, avatar, role and their own instructions. Default harness: **Claude Code for all** (swappable per agent).
 
 ## Autonomy loop
-1. The coordinator picks the highest-priority Ready issue.
+1. The coordinator takes the top Ready issue in Linear's manual order, with priority as tie-break.
 2. It checks the issue for ambiguity. It resolves what it can from the spec, decisions, code and vault, and records the call as a comment and a decision note (contract: docs/COORDINATOR.md).
 3. Escalation happens only when the "worth asking" test passes (D-011). Then the issue moves to **Needs input**, one Slack ping goes out, and the loop moves on to the next issue.
 4. It plans the parts by the size rule: a ticket stays one part only when it is one area with about 3 acceptance criteria or fewer and about 5 files or fewer. A larger ticket splits, backend before frontend, each part with a fixed brief and its own Done when (D-049). Then it assigns and runs each part in its own git worktree and branch. Parts of a split issue run one after another; a part starts only after the one before it is merged (split, dispatch and state file: docs/LOOP.md).
@@ -45,10 +45,11 @@ Instruction layers merge in this order: global → workspace → agent (schema a
 ## Merge gate (D-013)
 A PR auto-merges when **all** of these hold: CI is green, QA approves every "Done when" item, and no protected path is touched. Protected paths are auth, payments, secrets, release config, and the merge-gate config itself. Protected PRs wait for the human.
 
-## Limits (D-014, D-040, D-043)
+## Limits (D-014, D-040, D-043, D-050)
 - Per-task token and time budget by size: S 30 min, M 2 h, L must be split.
 - Per-issue token budget by size: weighted tokens S 3M, M 6M (D-043). At or over it the loop stops and asks the coordinator (Needs input).
 - One agent runs at a time by default (configurable up to 3).
+- The Ready column is a queue: at most `limits.max_parents` parents are in flight (default 1, D-050).
 - Two QA failures → escalate rather than loop.
 - A global kill switch: `harnessd pause`, plus a UI button.
 
