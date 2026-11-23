@@ -20,6 +20,7 @@ import {
   parseResetAt,
   summarizeInput,
 } from "./claude-code.ts";
+import { killAllLiveRuns } from "./process.ts";
 
 const FAKE = join(import.meta.dirname, "../../test/fixtures/fake-claude.mjs");
 const scratch = mkdtempSync(join(tmpdir(), "harnessd-claude-"));
@@ -157,6 +158,16 @@ test("adds --max-turns and the bash output cap to every run", async () => {
   assert.deepEqual(argv.slice(-2), ["--max-turns", "80"]);
   assert.equal(bashMaxOutput, "20000");
   assert.equal(result.status, "ok");
+});
+
+test("a resumed run adds --resume and keeps every isolation flag and the turn cap", () => {
+  const argv = claudeArgs(task({ resumeSessionId: "sess-1", maxTurns: 80 }), {}, scratch);
+  assert.equal(argv[argv.indexOf("--resume") + 1], "sess-1");
+  for (const flag of ["--setting-sources", "--strict-mcp-config", "--mcp-config"]) {
+    assert.ok(argv.includes(flag), flag);
+  }
+  assert.deepEqual(argv.slice(-2), ["--max-turns", "80"]);
+  assert.equal(createClaudeCodeAdapter().canResume, true);
 });
 
 test("an error_max_turns result is an error with turn cap and no reason", async () => {
@@ -297,6 +308,30 @@ test("cancel() stops the run and reports cancelled", async () => {
   assert.equal(seen.at(-1), "end");
   assert.ok(result.durationMs < 30_000);
   await r.cancel(); // no-op once finished
+});
+
+test("a run left live when the daemon exits is killed with its whole group", async () => {
+  const { run: r, record } = run("hang-stubborn", task({ budgetMs: 60_000 }), {
+    killGraceMs: 10_000,
+  });
+  // The fake writes the grandchild pid from its own process, so the tree exists before the kill.
+  const deadline = Date.now() + 2_000;
+  let grandchild: number | undefined;
+  while (grandchild === undefined && Date.now() < deadline) {
+    try {
+      grandchild = (readRecord(record) as { grandchildPid?: number }).grandchildPid;
+    } catch {
+      grandchild = undefined;
+    }
+    if (grandchild === undefined) await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(grandchild !== undefined, "the fake wrote its grandchild pid");
+
+  killAllLiveRuns();
+
+  const result = await r.result;
+  assert.notEqual(result.status, "ok");
+  assert.ok(await waitDead(grandchild), "the grandchild outlived the daemon");
 });
 
 test("a missing binary is an error, not a throw", async () => {

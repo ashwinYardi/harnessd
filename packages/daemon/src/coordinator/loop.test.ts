@@ -63,6 +63,17 @@ after(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
+// A harness run exports GIT_CONFIG_* that point at that run's own excludes file. The daemon
+// itself has no such entries, and these tests make their own repos, so drop them: no test
+// may inherit git config from the process that happens to start it. The owner's global
+// config (a credential helper or a hook, say) must not decide whether a test git call ends.
+for (const key of Object.keys(process.env)) {
+  if (key === "GIT_CONFIG_COUNT" || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(key))
+    delete process.env[key];
+}
+process.env.GIT_TERMINAL_PROMPT = "0";
+process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+
 // --- fake Linear -----------------------------------------------------------
 
 interface FakeIssue {
@@ -230,6 +241,7 @@ interface PendingRun {
     resetAt?: string,
     tokens?: RunResult["tokens"],
     turns?: number,
+    sessionId?: string,
   ): void;
 }
 
@@ -245,12 +257,15 @@ function fakeAdapter(
     /** Grill and plan runs end with this status instead of `ok`. */
     grillStatus?: RunResult["status"];
     planStatus?: RunResult["status"];
+    /** True when the fake adapter honors `Task.resumeSessionId` (MET-156). */
+    canResume?: boolean;
   } = {},
 ) {
   const tasks: Task[] = [];
   const pending: PendingRun[] = [];
   const adapter: HarnessAdapter = {
     id: options.id ?? "claude-code",
+    ...(options.canResume === true ? { canResume: true } : {}),
     start(task, cwd) {
       tasks.push(task);
       const result = (
@@ -260,6 +275,7 @@ function fakeAdapter(
         resetAt?: string,
         tokens?: RunResult["tokens"],
         turns?: number,
+        sessionId?: string,
       ): RunResult => {
         const r: RunResult = {
           status,
@@ -271,6 +287,7 @@ function fakeAdapter(
         if (error !== undefined) r.error = error;
         if (resetAt !== undefined) r.resetAt = resetAt;
         if (turns !== undefined) r.turns = turns;
+        if (sessionId !== undefined) r.sessionId = sessionId;
         return r;
       };
       let resolve: (r: RunResult) => void = () => {};
@@ -294,8 +311,8 @@ function fakeAdapter(
         pending.push({
           task,
           cwd,
-          finish: (status = "ok", error, text, resetAt, tokens, turns) =>
-            resolve(result(status, text, error, resetAt, tokens, turns)),
+          finish: (status = "ok", error, text, resetAt, tokens, turns, sessionId) =>
+            resolve(result(status, text, error, resetAt, tokens, turns, sessionId)),
         });
       }
       // Like a real adapter, each iteration replays the run from the start.
@@ -1636,6 +1653,147 @@ test("a failed QA sends the part back with the review; the second failure escala
   assert.equal(t.pings.length, 1);
 });
 
+// --- a resumed send-back (MET-156) -------------------------------------------
+
+/** A parent with one backend part in Ready, its QA part and a fresh empty state. */
+function sendBackFixture() {
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress" });
+  const backend = linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: "Ready",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const qa = linear.add({
+    title: "QA: P",
+    parentId: parent.id,
+    description: `${partMarker("qa")}\n**Size**: M`,
+  });
+  linear.relations.push({ blocker: backend.id, blocked: qa.id });
+  const state = emptyLoopState();
+  state.qaFeedback[backend.id] = {
+    prUrl: "https://github.test/o/r/pull/7",
+    reviewUrl: "https://github.test/o/r/pull/7#review-1",
+    failing: ["Has tests: none"],
+    testTail: "not ok 3 - avatars",
+  };
+  return { linear, backend, state };
+}
+
+function storedSession(backend: FakeIssue, harness: HarnessId = "claude-code") {
+  return {
+    harness,
+    sessionId: "sess-a",
+    worktree: `/wt/${backend.key}`,
+    branch: backend.key.toLowerCase(),
+    at: "2026-11-19T10:00:00.000Z",
+  };
+}
+
+test("a part run stores its session, so a later send-back can resume it", async () => {
+  const adapter = fakeAdapter({ canResume: true });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const a = part(t, parent.id, "backend", "A");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  t.adapter.pending[0]?.finish("ok", undefined, "done", undefined, undefined, 4, "sess-a");
+  await t.loop.idle();
+
+  const session = t.memory.state.sessions?.[a.id];
+  assert.equal(session?.harness, "claude-code");
+  assert.equal(session?.sessionId, "sess-a");
+  assert.equal(session?.worktree, `/wt/${a.key}`);
+  assert.equal(session?.branch, a.key.toLowerCase());
+  assert.equal(typeof session?.at, "string");
+});
+
+test("a QA send-back resumes the builder's session with only the failures", async () => {
+  const { linear, backend, state } = sendBackFixture();
+  state.sessions = { [backend.id]: storedSession(backend) };
+  const adapter = fakeAdapter({ canResume: true });
+  const t = setup({ linear, adapter, store: memoryStore(state) });
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  const fix = t.adapter.runs().at(-1);
+  assert.equal(fix?.resumeSessionId, "sess-a");
+  assert.match(fix?.prompt ?? "", /## QA send-back/);
+  assert.match(fix?.prompt ?? "", /Has tests: none/);
+  assert.match(fix?.prompt ?? "", /not ok 3 - avatars/);
+  assert.match(fix?.prompt ?? "", /Fix only these items\./);
+  assert.match(fix?.prompt ?? "", /Run focused tests\./);
+  assert.match(fix?.prompt ?? "", /Do not commit, push or open a PR/);
+  assert.doesNotMatch(fix?.prompt ?? "", /## Your instructions/, "the session already holds them");
+  assert.doesNotMatch(fix?.prompt ?? "", /## Task /);
+  assert.doesNotMatch(fix?.prompt ?? "", /## When you are done/);
+  assert.ok(t.logs.includes(`${backend.key}: resuming Claude Code session`));
+  await t.loop.pause();
+});
+
+test("a send-back with no stored session starts cold and logs why", async () => {
+  const { linear, backend, state } = sendBackFixture();
+  const adapter = fakeAdapter({ canResume: true });
+  const t = setup({ linear, adapter, store: memoryStore(state) });
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  const fix = t.adapter.runs().at(-1);
+  assert.equal(fix?.resumeSessionId, undefined);
+  assert.match(fix?.prompt ?? "", /## QA requested changes/, "the cold run reads the review");
+  assert.match(fix?.prompt ?? "", /## Task /, "the cold run reads the brief again");
+  assert.doesNotMatch(fix?.prompt ?? "", /## QA send-back/);
+  assert.ok(t.logs.includes(`${backend.key}: cold run (no session)`));
+  await t.loop.pause();
+});
+
+test("a send-back on another harness than the stored session starts cold and logs why", async () => {
+  const { linear, backend, state } = sendBackFixture();
+  state.sessions = { [backend.id]: storedSession(backend, "claude-code") };
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 3 } },
+      agents: { backend: { harness: "codex", label: "backend", keyPrefix: "agents.backend" } },
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const adapter = fakeAdapter({ id: "codex", canResume: true });
+  const t = setup({ linear, adapter, store: memoryStore(state), config });
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  assert.equal(t.adapter.runs().at(-1)?.resumeSessionId, undefined);
+  assert.ok(t.logs.includes(`${backend.key}: cold run (session on Claude Code, run on Codex)`));
+  await t.loop.pause();
+});
+
+test("a failed resume counts no attempt, drops the session and runs cold next", async () => {
+  const { linear, backend, state } = sendBackFixture();
+  state.sessions = { [backend.id]: storedSession(backend) };
+  const adapter = fakeAdapter({ canResume: true });
+  const t = setup({ linear, adapter, store: memoryStore(state) });
+
+  await t.loop.tick();
+  assert.equal(t.adapter.runs().at(-1)?.resumeSessionId, "sess-a");
+  t.adapter.pending.at(-1)?.finish("error", "session not found");
+  await t.loop.idle();
+
+  assert.equal(backend.state, "Ready");
+  assert.equal(t.memory.state.attempts[backend.id], undefined, "no attempt is counted");
+  assert.equal(t.memory.state.sessions?.[backend.id], undefined, "the session is dropped");
+  assert.ok(t.logs.includes(`${backend.key}: resume failed (session not found), cold next`));
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  const cold = t.adapter.runs().at(-1);
+  assert.equal(cold?.resumeSessionId, undefined);
+  assert.match(cold?.prompt ?? "", /## QA requested changes/);
+  assert.ok(t.logs.includes(`${backend.key}: cold run (no session)`));
+  await t.loop.pause();
+});
+
 // --- merge gate (MET-14) ----------------------------------------------------
 
 /** A parent with one backend part whose PR #7 QA has approved at sha7. */
@@ -1968,9 +2126,13 @@ test("start ticks now and on every interval; stop cancels the timer", async () =
 
 // --- restart, with real git worktrees and the file store --------------------
 
+/** A git call that hangs fails the test in 30 s instead of stalling the whole file. */
+const TEST_GIT_TIMEOUT_MS = 30_000;
+
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
     encoding: "utf8",
+    timeout: TEST_GIT_TIMEOUT_MS,
   }).trim();
 }
 
@@ -1978,7 +2140,7 @@ test("a restart re-queues runs left in loop.json, cleans their worktrees and cou
   const root = await mkdtemp(join(tmpdir(), "harnessd-loop-"));
   roots.push(root);
   const repo = join(root, "repo");
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -2030,7 +2192,7 @@ test("a restart keeps a dirty worktree instead of removing it, then resumes it",
   const root = await mkdtemp(join(tmpdir(), "harnessd-requeue-keep-"));
   roots.push(root);
   const repo = join(root, "repo");
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -2069,7 +2231,7 @@ test("a worktree with unshipped work is kept, commented on and recorded in inter
   const root = await mkdtemp(join(tmpdir(), "harnessd-keep-"));
   roots.push(root);
   const repo = join(root, "repo");
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -2110,7 +2272,7 @@ test("a failed, cancelled or limited run keeps its worktree when it holds unship
     const root = await mkdtemp(join(tmpdir(), `harnessd-keep-${status}-`));
     roots.push(root);
     const repo = join(root, "repo");
-    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
     await writeFile(join(repo, "README.md"), "hi\n");
     git(repo, "add", ".");
     git(repo, "commit", "-q", "-m", "init");
@@ -2470,7 +2632,7 @@ test("pause stops a real claude run within 10 s; the paused flag and the worktre
   roots.push(root);
   const repo = join(root, "repo");
   const home = join(root, "home");
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -2645,8 +2807,10 @@ test("a run in a repo with no committed skills sees the pack, the memory vault a
   const origin = join(root, "origin.git");
   const repo = join(root, "repo");
   const home = join(root, "home");
-  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
-  execFileSync("git", ["clone", "-q", origin, repo]);
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin], {
+    timeout: TEST_GIT_TIMEOUT_MS,
+  });
+  execFileSync("git", ["clone", "-q", origin, repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -3157,7 +3321,10 @@ test("a merge in a pass the pause flag stops is checked after resume, with its t
 // --- the ship step (MET-109) -------------------------------------------------
 
 function remoteGit(remote: string, ...args: string[]): string {
-  return execFileSync("git", ["--git-dir", remote, ...args], { encoding: "utf8" }).trim();
+  return execFileSync("git", ["--git-dir", remote, ...args], {
+    encoding: "utf8",
+    timeout: TEST_GIT_TIMEOUT_MS,
+  }).trim();
 }
 
 /** A repo with a bare origin, its identity set, and a `.harnessd/` for the sync. */
@@ -3166,8 +3333,8 @@ async function shipRepo() {
   roots.push(root);
   const repo = join(root, "repo");
   const remote = join(root, "remote.git");
-  execFileSync("git", ["init", "-q", "--bare", remote]);
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "--bare", remote], { timeout: TEST_GIT_TIMEOUT_MS });
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   git(repo, "config", "user.name", "Test Owner");
   git(repo, "config", "user.email", "owner@example.test");
   await writeFile(join(repo, "README.md"), "hi\n");

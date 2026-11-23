@@ -101,3 +101,37 @@ export function buildPartPrompt({ agent, issue, branch, review, memory }: PartPr
   parts.push(shipSteps(branch, 'every "Done when" item in your brief is met, with tests,', review));
   return `${parts.join("\n\n")}\n`;
 }
+
+export interface ResumePromptInput {
+  issue: LinkedIssue;
+  /** What QA asked to fix; a send-back always has one. */
+  review: QaFeedback;
+}
+
+/**
+ * The prompt of a resumed send-back (MET-156): the session already holds the brief, the
+ * decisions and the code, so only the failures and the failing test output go in.
+ */
+export function buildResumePrompt({ issue, review }: ResumePromptInput): string {
+  const where = [
+    `Part ${issue.key}: ${issue.title}`,
+    review.prUrl ? `PR: ${review.prUrl}` : "",
+    review.reviewUrl ? `Review: ${review.reviewUrl}` : "",
+  ].filter(Boolean);
+  const parts = [`## QA send-back\n${where.join("\n")}`];
+  if (review.failing.length > 0) {
+    parts.push(`Failing items:\n${review.failing.map((f) => `- ${f}`).join("\n")}`);
+  }
+  if (review.testTail !== undefined) {
+    parts.push(`Last lines of the tests:\n\`\`\`text\n${review.testTail || "(no output)"}\n\`\`\``);
+  }
+  parts.push(
+    [
+      "## What to do",
+      "- Fix only these items.",
+      "- Run focused tests.",
+      "- Do not commit, push or open a PR: harnessd ships the work after your run (D-039).",
+    ].join("\n"),
+  );
+  return `${parts.join("\n\n")}\n`;
+}

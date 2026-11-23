@@ -61,6 +61,8 @@ export function claudeArgs(task: Task, options: ClaudeCodeOptions = {}, cwd?: st
     "--verbose",
     ...isolationArgs(cwd),
   ];
+  // MET-156: a QA send-back resumes the part's own session; every flag above stays.
+  if (task.resumeSessionId !== undefined) args.push("--resume", task.resumeSessionId);
   const model = task.model ?? options.model;
   if (model) args.push("--model", model);
   if (options.permissionMode) args.push("--permission-mode", options.permissionMode);
@@ -72,6 +74,7 @@ export function claudeArgs(task: Task, options: ClaudeCodeOptions = {}, cwd?: st
 export function createClaudeCodeAdapter(options: ClaudeCodeOptions = {}): HarnessAdapter {
   return {
     id: "claude-code",
+    canResume: true,
     start: (task, worktree) =>
       startProcessRun({
         task,

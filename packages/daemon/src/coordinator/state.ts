@@ -82,6 +82,18 @@ export interface QaFeedback {
   reviewUrl?: string;
   /** One line per failing item: the item and its evidence. */
   failing: string[];
+  /** The last lines of the tests when they failed, for the resume prompt (MET-156). */
+  testTail?: string;
+}
+
+/** A part run's session, so a QA send-back can resume it (MET-156). */
+export interface PartSession {
+  harness: HarnessId;
+  sessionId: string;
+  /** The worktree and branch the session ran in; a different one starts cold. */
+  worktree: string;
+  branch: string;
+  at: string;
 }
 
 /** One PR QA approved, waiting for the merge gate (MET-14). */
@@ -204,6 +216,8 @@ export interface LoopState {
   usageBaseline?: Record<string, UsageBaseline>;
   /** Parents the loop split, per parent issue id (MET-154). Optional for old files. */
   splits?: Record<string, SplitRecord>;
+  /** The last session of each part run, per part id (MET-156). Optional for old files. */
+  sessions?: Record<string, PartSession>;
 }
 
 export function emptyLoopState(): LoopState {
@@ -306,6 +320,7 @@ function feedback(value: unknown): Record<string, QaFeedback> {
     const entry: QaFeedback = { failing: f.failing.filter((l) => typeof l === "string") };
     if (typeof f.prUrl === "string") entry.prUrl = f.prUrl;
     if (typeof f.reviewUrl === "string") entry.reviewUrl = f.reviewUrl;
+    if (typeof f.testTail === "string") entry.testTail = f.testTail;
     out[id] = entry;
   }
   return out;
@@ -466,6 +481,28 @@ function splitRecords(value: unknown): Record<string, SplitRecord> {
   return out;
 }
 
+function partSessions(value: unknown): Record<string, PartSession> {
+  const out: Record<string, PartSession> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const s = raw as Partial<PartSession> | null;
+    if (typeof s !== "object" || s === null) continue;
+    if (typeof s.harness !== "string" || !isHarnessId(s.harness)) continue;
+    if (typeof s.sessionId !== "string" || s.sessionId === "") continue;
+    if (typeof s.worktree !== "string" || s.worktree === "") continue;
+    if (typeof s.branch !== "string" || s.branch === "") continue;
+    if (typeof s.at !== "string" || s.at === "") continue;
+    out[id] = {
+      harness: s.harness,
+      sessionId: s.sessionId,
+      worktree: s.worktree,
+      branch: s.branch,
+      at: s.at,
+    };
+  }
+  return out;
+}
+
 function tokenSum(value: unknown): TokenSum | undefined {
   const s = value as Partial<TokenSum> | null;
   if (typeof s !== "object" || s === null) return undefined;
@@ -524,6 +561,7 @@ export function parseLoopState(text: string): LoopState {
       ? {}
       : { usageBaseline: usageBaselines(raw.usageBaseline) }),
     ...(raw.splits === undefined ? {} : { splits: splitRecords(raw.splits) }),
+    ...(raw.sessions === undefined ? {} : { sessions: partSessions(raw.sessions) }),
   };
 }
 

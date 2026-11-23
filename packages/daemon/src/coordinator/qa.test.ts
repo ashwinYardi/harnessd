@@ -18,6 +18,7 @@ import { formatNotice, type Notifier } from "./notifier.ts";
 import {
   type CommandResult,
   type CommandRunner,
+  MAX_TEST_TAIL,
   type PrReview,
   parseQaVerdict,
   type QaRunInput,
@@ -385,6 +386,30 @@ test("failing tests request changes even when the model says everything passes",
   );
   assert.match(body, /```text\nnot ok 3 - avatars\n```/);
   assert.match(h.tasks[0]?.prompt ?? "", /`pnpm test` exited with code 1/);
+});
+
+test("a failing test tail is stored for the send-back and cut to the fixed limit", async () => {
+  const output = `${"x".repeat(MAX_TEST_TAIL + 500)}not ok 3 - avatars`;
+  const h = harness({ replies: [verdict([true, true])], testExit: 1 });
+  const result = await runQa(h.input, {
+    ...h.deps,
+    runCommand: async () => ({ exitCode: 1, timedOut: false, output }),
+  });
+  const tail = result.reviews[0]?.testTail ?? "";
+  assert.equal(tail.length, MAX_TEST_TAIL + 1, "one leading ellipsis plus the limit");
+  assert.equal(tail.startsWith("…"), true);
+  assert.equal(tail.endsWith("not ok 3 - avatars"), true);
+
+  const state = emptyLoopState();
+  const s = settleDeps();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "sent_back");
+  assert.equal(state.qaFeedback[backend.id]?.testTail, tail);
+});
+
+test("a passing test run stores no test tail", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.reviews[0]?.testTail, undefined);
 });
 
 test("the model reporting failing tests also blocks approval", async () => {

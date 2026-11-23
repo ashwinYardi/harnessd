@@ -102,6 +102,36 @@ class EventLog implements AsyncIterable<AdapterEvent> {
   }
 }
 
+/** The process groups of runs still live in this process. */
+const liveGroups = new Map<number, ChildProcess>();
+let exitHookInstalled = false;
+
+function trackGroup(child: ChildProcess): void {
+  if (child.pid === undefined) return;
+  liveGroups.set(child.pid, child);
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  // A run must never outlive the daemon. On a normal exit no later code can cancel it, so
+  // SIGKILL the group now; a test runner that stops leaves no fixture behind either.
+  process.once("exit", () => killAllLiveRuns());
+}
+
+function untrackGroup(pid: number | undefined): void {
+  if (pid !== undefined) liveGroups.delete(pid);
+}
+
+/** SIGKILLs every live run's process group. The exit hook calls it; tests use it too. */
+export function killAllLiveRuns(): void {
+  for (const pid of liveGroups.keys()) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      // ESRCH: the group is already gone.
+    }
+  }
+  liveGroups.clear();
+}
+
 /** Runs a harness CLI in the worktree and streams its events (D-014 budget, process-group kill). */
 export function startProcessRun(options: ProcessRunOptions): AdapterRun {
   const { task, worktree, bin, argv } = options;
@@ -136,6 +166,7 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     finish(null);
     return { events, result, cancel: async () => {} };
   }
+  trackGroup(child);
 
   if (child.pid !== undefined) {
     events.push({
@@ -217,6 +248,7 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
   function finish(exitCode: number | null): void {
     if (settled) return;
     settled = true;
+    untrackGroup(child?.pid);
     clearTimeout(budgetTimer);
     for (const timer of killTimers) clearTimeout(timer);
     const parsed = parser.outcome(exitCode);

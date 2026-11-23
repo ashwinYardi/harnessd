@@ -66,6 +66,9 @@ export type CommandRunner = (
 
 export const MAX_COMMAND_OUTPUT = 64 * 1024;
 
+/** The failing test tail the review comment and the resume prompt share (MET-156). */
+export const MAX_TEST_TAIL = 3000;
+
 /** `sh -c <command>` in its own process group with CI=1; the group is killed on timeout or abort. */
 export const runShellCommand: CommandRunner = (command, cwd, timeoutMs, signal) =>
   new Promise((resolve) => {
@@ -342,7 +345,7 @@ export function buildQaPrompt(input: QaPromptInput): string {
     `## Changed files (${files?.length ?? "?"})\n${fileList}`,
     `## CI\n${describeCi(ci)}`,
     `## Tests\nharnessd ran the repo's tests in this worktree before you started: ${describeTests(tests)}.\n` +
-      `\`\`\`text\n${tail(tests.output, 3000) || "(no output)"}\n\`\`\``,
+      `\`\`\`text\n${tail(tests.output, MAX_TEST_TAIL) || "(no output)"}\n\`\`\``,
     `## Part brief\n${part.description.trim() || "(none)"}`,
     `## Done when (${parent.key}: ${parent.title})\n${checklist.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
     [
@@ -381,6 +384,8 @@ export interface PrReview {
   setup?: boolean;
   /** One line per failing item: the item and its evidence. */
   failing: string[];
+  /** The last lines of the tests when they failed, for the send-back prompt (MET-156). */
+  testTail?: string;
   /** The posted review. */
   reviewUrl?: string;
   /** COMMENT when GitHub refused the real review event (e.g. on your own PR). */
@@ -460,7 +465,7 @@ export function formatReviewBody(input: ReviewBodyInput): string {
       "",
       `Last lines of \`${tests.command}\`:`,
       "```text",
-      tail(tests.output, 3000),
+      tail(tests.output, MAX_TEST_TAIL),
       "```",
     );
   }
@@ -730,7 +735,14 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       maxRounds: input.maxRounds,
     });
     const event: ReviewEvent = decision.decision === "approve" ? "APPROVE" : "REQUEST_CHANGES";
-    const result: PrReview = { part, pr, decision: decision.decision, failing: decision.failing };
+    const result: PrReview = {
+      part,
+      pr,
+      decision: decision.decision,
+      failing: decision.failing,
+      // MET-156: the send-back prompt shows only the tail of a failing test run.
+      ...(tests.passed ? {} : { testTail: tail(tests.output, MAX_TEST_TAIL) }),
+    };
     try {
       const posted = await post(pr, event, body);
       result.reviewUrl = posted.url;
@@ -835,7 +847,7 @@ function times(n: number): string {
  * with one comment and one ping, and nothing is sent back again (D-014).
  */
 export async function settleQa(
-  state: Pick<LoopState, "qaFailures" | "qaFeedback">,
+  state: Pick<LoopState, "qaFailures" | "qaFeedback" | "sessions">,
   input: { qa: LinkedIssue; parent: Issue },
   result: QaRunResult,
   deps: QaSettleDeps,
@@ -880,7 +892,10 @@ export async function settleQa(
 
   if (failures >= deps.maxFailures) {
     delete state.qaFailures[parent.id];
-    for (const r of result.reviews) delete state.qaFeedback[r.part.id];
+    for (const r of result.reviews) {
+      delete state.qaFeedback[r.part.id];
+      if (state.sessions !== undefined) delete state.sessions[r.part.id];
+    }
     const body = [
       `**harnessd QA**: QA failed ${times(failures)} for ${parent.key}, so this needs a human (D-014). ` +
         `${qa.key} and ${parent.key} are in Needs input, and nothing is sent back again.`,
@@ -913,6 +928,7 @@ export async function settleQa(
     const feedback: (typeof state.qaFeedback)[string] = { failing: r.failing };
     if (r.pr) feedback.prUrl = r.pr.url;
     if (r.reviewUrl) feedback.reviewUrl = r.reviewUrl;
+    if (r.testTail !== undefined) feedback.testTail = r.testTail;
     state.qaFeedback[r.part.id] = feedback;
     const role = readPartMarker(r.part.description)?.role ?? "part";
     const where = r.pr

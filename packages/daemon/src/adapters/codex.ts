@@ -34,10 +34,16 @@ export interface CodexOptions {
  * Builds the argv for `codex exec --json` (D-032). `cwd` is the worktree: it holds the synced
  * `.codex/config.toml`, whose MCP servers go in as -c overrides, because codex ignores project
  * config in an untrusted directory.
+ *
+ * MET-156: a QA send-back uses `codex exec resume <id>`. On 0.171.0 that subcommand refuses
+ * `--sandbox`, so the same setting goes in as the `sandbox_mode` config override. Every
+ * isolation flag stays; nothing is dropped for the resume.
  */
 export function codexArgs(task: Task, options: CodexOptions = {}, cwd?: string): string[] {
+  const resume = task.resumeSessionId;
   const args = [
     "exec",
+    ...(resume === undefined ? [] : ["resume", resume]),
     "--json",
     // D-031: no owner config, no execpolicy rules. Auth still comes from CODEX_HOME.
     "--ignore-user-config",
@@ -46,8 +52,9 @@ export function codexArgs(task: Task, options: CodexOptions = {}, cwd?: string):
     "--dangerously-bypass-hook-trust",
     // D-032 (amended): no OS sandbox, as for Claude runs. The seatbelt sandbox hides the
     // keychain (so gh has no login) and keeps .git read-only (so git commit fails).
-    "--sandbox",
-    "danger-full-access",
+    ...(resume === undefined
+      ? ["--sandbox", "danger-full-access"]
+      : ["-c", 'sandbox_mode="danger-full-access"']),
     // Nobody is there to answer a prompt.
     "-c",
     'approval_policy="never"',
@@ -65,6 +72,7 @@ export function codexArgs(task: Task, options: CodexOptions = {}, cwd?: string):
 export function createCodexAdapter(options: CodexOptions = {}): HarnessAdapter {
   return {
     id: "codex",
+    canResume: true,
     start: (task, worktree) =>
       startProcessRun({
         task,
