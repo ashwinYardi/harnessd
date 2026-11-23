@@ -106,6 +106,7 @@ const SNAPSHOT: LoopSnapshot = {
       agent: "backend",
       role: "backend",
       harness: "opencode",
+      switchReason: "timed out",
       startedAt: ago(26),
       budgetMs: 30 * 60_000,
       tokens: 184_300,

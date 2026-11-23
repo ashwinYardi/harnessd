@@ -139,7 +139,7 @@ function AgentRows({
               </span>
               <span
                 className={cn(
-                  "flex items-center gap-1.5 font-mono text-muted-foreground text-xs",
+                  "flex min-w-0 items-center gap-1.5 overflow-hidden font-mono text-muted-foreground text-xs",
                   run.stopping && !ended && "text-warning-foreground",
                 )}
               >
@@ -147,8 +147,8 @@ function AgentRows({
                   harness={run.harness ?? agent.harness}
                   className="shrink-0 font-sans"
                 />
-                {run.harness !== undefined && run.harness !== agent.harness && (
-                  <span className="shrink-0">· {run.switchReason ?? "another harness"}</span>
+                {run.switchReason !== undefined && run.harness !== agent.harness && (
+                  <span className="min-w-0 truncate">· {run.switchReason}</span>
                 )}
                 <span className="truncate">
                   {ended
