@@ -181,6 +181,17 @@ export interface SplitRecord {
   at: string;
 }
 
+/**
+ * A run that must move to the next harness in the role order (D-048). The next dispatch of
+ * that issue picks the first usable harness after `from`.
+ */
+export interface HarnessSwitch {
+  from: HarnessId;
+  /** Why it moved, as the log says it: "timed out", "stalled", "hit its usage limit", … */
+  reason: string;
+  at: string;
+}
+
 export interface LoopState {
   version: 1;
   /** ISO time of the last poll, null before the first. */
@@ -218,6 +229,8 @@ export interface LoopState {
   splits?: Record<string, SplitRecord>;
   /** The last session of each part run, per part id (MET-156). Optional for old files. */
   sessions?: Record<string, PartSession>;
+  /** The next harness to try, per issue id (D-048). Optional for old files. */
+  harnessSwitch?: Record<string, HarnessSwitch>;
 }
 
 export function emptyLoopState(): LoopState {
@@ -481,6 +494,20 @@ function splitRecords(value: unknown): Record<string, SplitRecord> {
   return out;
 }
 
+function harnessSwitches(value: unknown): Record<string, HarnessSwitch> {
+  const out: Record<string, HarnessSwitch> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const s = raw as Partial<HarnessSwitch> | null;
+    if (typeof s !== "object" || s === null) continue;
+    if (typeof s.from !== "string" || !isHarnessId(s.from)) continue;
+    if (typeof s.reason !== "string" || s.reason === "") continue;
+    if (typeof s.at !== "string" || s.at === "") continue;
+    out[id] = { from: s.from, reason: s.reason, at: s.at };
+  }
+  return out;
+}
+
 function partSessions(value: unknown): Record<string, PartSession> {
   const out: Record<string, PartSession> = {};
   if (typeof value !== "object" || value === null) return out;
@@ -562,6 +589,9 @@ export function parseLoopState(text: string): LoopState {
       : { usageBaseline: usageBaselines(raw.usageBaseline) }),
     ...(raw.splits === undefined ? {} : { splits: splitRecords(raw.splits) }),
     ...(raw.sessions === undefined ? {} : { sessions: partSessions(raw.sessions) }),
+    ...(raw.harnessSwitch === undefined
+      ? {}
+      : { harnessSwitch: harnessSwitches(raw.harnessSwitch) }),
   };
 }
 

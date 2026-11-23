@@ -52,8 +52,11 @@ export interface RunResult {
   resetAt?: string;
 }
 
-/** A failure the human fixes outside the run: a usage limit, or a harness that is not signed in. */
-export type RunFailureReason = "usage_limit" | "auth";
+/**
+ * A failure the human fixes outside the run: a usage limit, a harness that is not signed in,
+ * a stalled run, or a turn-capped run (D-045, D-048). In memory only, never in loop.json.
+ */
+export type RunFailureReason = "usage_limit" | "auth" | "stalled" | "turn_cap";
 
 /** Events streamed while a harness runs, in the order they happened. `end` is always last. */
 export type AdapterEvent =

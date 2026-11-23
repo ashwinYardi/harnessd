@@ -27,6 +27,8 @@ export interface ClaudeCodeOptions {
   model?: string;
   /** Time between SIGTERM and SIGKILL when the run is killed. Default 5000. */
   killGraceMs?: number;
+  /** No adapter event for this long is a stall. Default STALL_MS (10 min); tests shorten it. */
+  stallMs?: number;
   /** Extra environment for the child, merged over process.env. */
   env?: Record<string, string>;
 }
@@ -83,6 +85,7 @@ export function createClaudeCodeAdapter(options: ClaudeCodeOptions = {}): Harnes
         argv: claudeArgs(task, options, worktree),
         parser: (emit) => new StreamJsonParser(emit, task.maxTurns),
         ...(options.killGraceMs !== undefined ? { killGraceMs: options.killGraceMs } : {}),
+        ...(options.stallMs !== undefined ? { stallMs: options.stallMs } : {}),
         // D-045: about 5k tokens of one Bash result. The default is 30,000 characters.
         env: { ...options.env, BASH_MAX_OUTPUT_LENGTH: BASH_MAX_OUTPUT_LENGTH },
       }),
@@ -152,10 +155,11 @@ class StreamJsonParser implements LineParser {
     if (this.turns !== undefined) out.turns = this.turns;
     if (this.sessionId !== undefined) out.sessionId = this.sessionId;
     if (this.finalText !== undefined) out.finalText = this.finalText;
-    // D-045: --max-turns ended the run. It is an error with no failure reason.
+    // D-045: --max-turns ended the run. It is an error with reason turn_cap (D-048).
     if (this.errorSubtype === "error_max_turns") {
       out.ok = false;
       out.error = this.#maxTurns === undefined ? "turn cap" : `turn cap (${this.#maxTurns} turns)`;
+      out.reason = "turn_cap";
       return out;
     }
     if (exitCode === 0 && out.ok) return out;

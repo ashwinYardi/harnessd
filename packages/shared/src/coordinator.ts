@@ -71,6 +71,11 @@ export interface GrillResult {
   precedents?: Precedent[];
   /** Short reason when the outcome is `error` or `limited`. */
   error?: string;
+  /**
+   * Why a harness failure moves the next grill or plan run to the next harness (D-048).
+   * Unset for an unusable reply: that retries on the same harness.
+   */
+  switchReason?: string;
   /** Tokens the grill run used, when it ran (D-040). */
   tokens?: TokenUsage;
   /** Turns the grill runs took, when the harness reports them. */

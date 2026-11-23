@@ -242,6 +242,7 @@ interface PendingRun {
     tokens?: RunResult["tokens"],
     turns?: number,
     sessionId?: string,
+    reason?: RunResult["reason"],
   ): void;
 }
 
@@ -276,6 +277,7 @@ function fakeAdapter(
         tokens?: RunResult["tokens"],
         turns?: number,
         sessionId?: string,
+        reason?: RunResult["reason"],
       ): RunResult => {
         const r: RunResult = {
           status,
@@ -288,6 +290,7 @@ function fakeAdapter(
         if (resetAt !== undefined) r.resetAt = resetAt;
         if (turns !== undefined) r.turns = turns;
         if (sessionId !== undefined) r.sessionId = sessionId;
+        if (reason !== undefined) r.reason = reason;
         return r;
       };
       let resolve: (r: RunResult) => void = () => {};
@@ -311,8 +314,8 @@ function fakeAdapter(
         pending.push({
           task,
           cwd,
-          finish: (status = "ok", error, text, resetAt, tokens, turns, sessionId) =>
-            resolve(result(status, text, error, resetAt, tokens, turns, sessionId)),
+          finish: (status = "ok", error, text, resetAt, tokens, turns, sessionId, reason) =>
+            resolve(result(status, text, error, resetAt, tokens, turns, sessionId, reason)),
         });
       }
       // Like a real adapter, each iteration replays the run from the start.
@@ -1023,6 +1026,19 @@ const FRONTEND_ON_CODEX = mergeLayers([
   },
 ]);
 
+const BACKEND_ON_OPENCODE = mergeLayers([
+  {
+    scope: "workspace",
+    dir: "/repo/.harnessd",
+    settings: { limits: { max_concurrent: 3 } },
+    agents: { backend: { harness: "opencode", label: "backend", keyPrefix: "agents.backend" } },
+    rules: [],
+    skills: [],
+    mcp: {},
+    skillSettings: {},
+  },
+]);
+
 const MINUTE = 60_000;
 
 function part(t: ReturnType<typeof setup>, parentId: string, role: string, title: string) {
@@ -1074,7 +1090,7 @@ test("a hold that starts during worktree creation prevents the next adapter star
   assert.ok(wt.removed.includes(`/wt/${second.key}`));
 });
 
-test("a limited run holds its harness until the reset while another harness keeps working", async () => {
+test("a limited run holds its harness; the next try skips it and counts no attempt (D-048)", async () => {
   const time = manualClock();
   const codex = fakeAdapter({ id: "codex" });
   const claude = fakeAdapter();
@@ -1098,35 +1114,40 @@ test("a limited run holds its harness until the reset while another harness keep
     until: resetAt,
     since: time.at(0),
   });
+  assert.equal(t.memory.state.harnessSwitch?.[a.id]?.from, "claude-code");
   assert.deepEqual(
     t.logs.filter((l) => /limited until/.test(l)),
     [limitHoldLine("claude-code", resetAt)],
   );
 
-  // Claude Code is held: the backend part waits, a new Codex part still starts.
+  // The next tick skips the held harness: the backend runs on Codex, and the frontend joins it.
   codex.pending[0]?.finish("ok");
   const ui2 = part(t, parent.id, "frontend", "UI 2");
   time.advance(30 * MINUTE);
-  assert.deepEqual((await t.loop.tick()).dispatched, [ui2.key]);
-  assert.equal(claude.runs().length, 1);
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key, ui2.key]);
+  assert.equal(claude.runs().length, 1, "the held harness starts nothing");
+  assert.equal(codex.runs().length, 3, "UI, A and UI 2 all ran on Codex");
+  assert.ok(
+    t.logs.includes(`${a.key}: Claude Code hit its usage limit, retrying on Codex`),
+    t.logs.join("\n"),
+  );
   assert.equal(
     t.logs.filter((l) => /limited until/.test(l)).length,
     1,
     "logged once, not per tick",
   );
+  for (const run of [...codex.pending]) run.finish("ok");
+  await t.loop.idle();
+  assert.equal(a.state, "In Review");
 
-  // The reset passes: the hold ends, once, and the part runs again.
+  // The reset passes: the hold ends, once.
   time.advance(30 * MINUTE);
-  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  await t.loop.tick();
   assert.deepEqual(t.memory.state.limits, {});
   assert.deepEqual(
     t.logs.filter((l) => /available again/.test(l)),
     [limitAvailableLine("claude-code")],
   );
-  claude.pending.at(-1)?.finish("ok");
-  codex.pending.at(-1)?.finish("ok");
-  await t.loop.idle();
-  assert.equal(a.state, "In Review");
 });
 
 test("a hold shows in the snapshot and reports its start and end once (MET-82)", async () => {
@@ -1401,7 +1422,10 @@ test("while the main harness is held, the agent runs on its fallback harness and
   assert.equal(claude.runs().length, 1, "the held harness starts nothing");
   assert.equal(codex.runs().length, 1);
   assert.equal(codex.runs()[0]?.model, "gpt-5");
-  assert.ok(t.logs.includes(`${a.key}: backend on Codex while Claude Code is limited`));
+  assert.ok(
+    t.logs.includes(`${a.key}: Claude Code hit its usage limit, retrying on Codex`),
+    t.logs.join("\n"),
+  );
   codex.pending[0]?.finish("ok");
   await t.loop.idle();
   assert.equal(a.state, "In Review");
@@ -1455,6 +1479,192 @@ test("no fallback harness, or one with no adapter: a held agent waits as before"
   assert.deepEqual((await t.loop.tick()).dispatched, [], "codex has no adapter");
   assert.ok(!t.logs.some((l) => / while /.test(l)));
   assert.equal(a.state, "Ready");
+});
+
+test("a timeout moves the next try to the next harness and counts one attempt (D-048)", async () => {
+  const opencode = fakeAdapter({ id: "opencode" });
+  const codex = fakeAdapter({ id: "codex" });
+  const t = setup({
+    adapter: opencode,
+    config: BACKEND_ON_OPENCODE,
+    extra: { adapters: { opencode: opencode.adapter, codex: codex.adapter } },
+  });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const a = part(t, parent.id, "backend", "A");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.equal(opencode.runs().length, 1);
+  opencode.pending[0]?.finish("timeout", "budget of 1800000ms exceeded");
+  await t.loop.idle();
+  assert.equal(a.state, "Ready");
+  assert.equal(t.memory.state.attempts[a.id], 1);
+  assert.equal(t.memory.state.harnessSwitch?.[a.id]?.from, "opencode");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.equal(codex.runs().length, 1, "the retry runs on the next harness");
+  assert.equal(opencode.runs().length, 1, "the timed-out harness does not retry");
+  assert.ok(t.logs.includes(`${a.key}: OpenCode timed out, retrying on Codex`), t.logs.join("\n"));
+
+  codex.pending.at(-1)?.finish("timeout", "budget of 1800000ms exceeded");
+  await t.loop.idle();
+  assert.equal(a.state, "Needs input", "two failures still go to Needs input");
+  assert.equal(t.memory.state.harnessSwitch?.[a.id], undefined);
+  assert.equal(t.pings.length, 1);
+});
+
+test("a harness whose installed check failed is skipped (D-048)", async () => {
+  const opencode = fakeAdapter({ id: "opencode" });
+  const codex = fakeAdapter({ id: "codex" });
+  const t = setup({
+    adapter: opencode,
+    config: BACKEND_ON_OPENCODE,
+    extra: {
+      adapters: { opencode: opencode.adapter, codex: codex.adapter },
+      harnessChecks: () => [{ id: "harness.opencode.cli", state: "missing" as const }],
+    },
+  });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const a = part(t, parent.id, "backend", "A");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.equal(opencode.runs().length, 0, "the not-installed harness starts nothing");
+  assert.equal(codex.runs().length, 1);
+  assert.ok(
+    t.logs.includes(`${a.key}: OpenCode is not installed, running on Codex`),
+    t.logs.join("\n"),
+  );
+  codex.pending[0]?.finish("ok");
+  await t.loop.idle();
+});
+
+test("with no harness left the issue stays Ready and logs the line once (D-048)", async () => {
+  const opencode = fakeAdapter({ id: "opencode" });
+  const t = setup({
+    adapter: opencode,
+    config: BACKEND_ON_OPENCODE,
+    extra: {
+      harnessChecks: () => [
+        { id: "harness.opencode.cli", state: "missing" as const },
+        { id: "harness.codex.cli", state: "missing" as const },
+        { id: "harness.claude-code.cli", state: "missing" as const },
+      ],
+    },
+  });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const a = part(t, parent.id, "backend", "A");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  assert.equal(a.state, "Ready");
+  assert.equal(t.memory.state.attempts[a.id], undefined, "no attempt is counted");
+  assert.deepEqual(t.linear.comments, [], "no comment is posted");
+  assert.deepEqual(t.pings, [], "no notice is sent");
+  const lines = t.logs.filter((l) => l.startsWith(`${a.key}: no harness left`));
+  assert.equal(lines.length, 1, "logged once per set of reasons");
+  assert.match(lines[0] ?? "", /OpenCode is not installed/);
+  assert.match(lines[0] ?? "", /Codex has no adapter/);
+});
+
+test("a turn cap keeps the same harness and counts one attempt (D-048)", async () => {
+  const opencode = fakeAdapter({ id: "opencode" });
+  const codex = fakeAdapter({ id: "codex" });
+  const t = setup({
+    adapter: opencode,
+    config: BACKEND_ON_OPENCODE,
+    extra: { adapters: { opencode: opencode.adapter, codex: codex.adapter } },
+  });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const a = part(t, parent.id, "backend", "A");
+
+  await t.loop.tick();
+  opencode.pending[0]?.finish(
+    "error",
+    "turn cap (80 turns)",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    "turn_cap",
+  );
+  await t.loop.idle();
+  assert.equal(t.memory.state.harnessSwitch?.[a.id], undefined, "no switch on a turn cap");
+  assert.equal(t.memory.state.attempts[a.id], 1);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.equal(opencode.runs().length, 2, "the retry stays on the same harness");
+  assert.equal(codex.runs().length, 0);
+  opencode.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+});
+
+test("a ship failure keeps the harness of the switched run (D-048)", async () => {
+  const opencode = fakeAdapter({ id: "opencode" });
+  const codex = fakeAdapter({ id: "codex" });
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress" });
+  const a = linear.add({
+    title: "A",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const store = memoryStore();
+  store.state.harnessSwitch = {
+    [a.id]: { from: "opencode", reason: "timed out", at: "2026-11-23T09:00:00.000Z" },
+  };
+  const t = setup({
+    linear,
+    store,
+    adapter: opencode,
+    config: BACKEND_ON_OPENCODE,
+    extra: {
+      adapters: { opencode: opencode.adapter, codex: codex.adapter },
+      ship: async () => ({ ok: false as const, error: "push failed: nope" }),
+    },
+  });
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.equal(codex.runs().length, 1, "the switch picks the next harness");
+  assert.equal(opencode.runs().length, 0);
+  codex.pending[0]?.finish("ok");
+  await t.loop.idle();
+  assert.equal(a.state, "Ready");
+  assert.equal(store.state.attempts[a.id], 1);
+  assert.equal(store.state.harnessSwitch?.[a.id]?.from, "opencode", "the record stays");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [a.key]);
+  assert.equal(codex.runs().length, 2, "the retry stays on the same harness");
+  assert.equal(opencode.runs().length, 0);
+  codex.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+});
+
+test("a grill timeout switches the coordinator harness (D-048)", async () => {
+  const claude = fakeAdapter({ grillStatus: "timeout" });
+  const codex = fakeAdapter({ id: "codex" });
+  const t = setup({
+    adapter: claude,
+    extra: { adapters: { "claude-code": claude.adapter, codex: codex.adapter } },
+  });
+  const issue = t.linear.add({ title: "Work", description: BODY("M") });
+
+  const first = await t.loop.tick();
+  assert.deepEqual(first.split, []);
+  assert.equal(issue.state, "Ready");
+  assert.equal(t.memory.state.harnessSwitch?.[issue.id]?.from, "claude-code");
+  assert.equal(claude.tasks.filter((task) => task.id.startsWith("grill-")).length, 2, "two tries");
+
+  const next = await t.loop.tick();
+  assert.deepEqual(next.split, [issue.key]);
+  assert.ok(
+    codex.tasks.some((task) => task.id.startsWith("grill-")),
+    "the grill ran on Codex",
+  );
+  assert.ok(
+    t.logs.includes(`${issue.key}: Claude Code timed out, retrying on Codex`),
+    t.logs.join("\n"),
+  );
+  assert.equal(t.memory.state.harnessSwitch?.[issue.id], undefined, "the split ends the switch");
 });
 
 test("a limited grill or plan run does not escalate: the issue stays Ready, nothing is posted", async () => {
@@ -2766,6 +2976,7 @@ test("snapshot lists each run with its budget, tokens and latest action", async 
       title: "Board API",
       agent: "backend",
       role: "backend",
+      harness: "claude-code",
       startedAt: "2026-11-19T10:00:00.000Z",
       budgetMs: 30 * 60_000,
       tokens: 1500,

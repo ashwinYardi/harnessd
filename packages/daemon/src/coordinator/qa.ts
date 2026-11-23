@@ -17,6 +17,7 @@ import {
   type Task,
   type TokenUsage,
 } from "@harnessd/shared";
+import { killProcessTree } from "../adapters/process.ts";
 import type {
   GitHub,
   PullRequest,
@@ -86,16 +87,9 @@ export const runShellCommand: CommandRunner = (command, cwd, timeoutMs, signal) 
       resolve(result);
     };
     let pid: number | undefined;
-    const kill = (sig: NodeJS.Signals) => {
-      try {
-        if (pid !== undefined) process.kill(-pid, sig);
-      } catch {
-        // already gone
-      }
-    };
     function terminate() {
-      kill("SIGTERM");
-      setTimeout(() => kill("SIGKILL"), 5_000).unref();
+      // The test command may start a run of its own in another process group (D-048).
+      if (pid !== undefined) void killProcessTree(pid, 5_000);
     }
     if (signal?.aborted) {
       finish(null, "cancelled");

@@ -1,7 +1,7 @@
 // The process side of every harness adapter: spawn, the event log, line reading, the budget
 // timer, the process-group kill and the final result. Each adapter gives only its argv and a
 // line parser.
-import { type ChildProcess, spawn } from "node:child_process";
+import { type ChildProcess, execFile, execFileSync, spawn } from "node:child_process";
 import type { Readable } from "node:stream";
 import type {
   AdapterEvent,
@@ -13,6 +13,8 @@ import type {
 } from "@harnessd/shared";
 
 const DEFAULT_KILL_GRACE_MS = 5_000;
+/** A run that sends no adapter event for this long is stalled (D-048). */
+export const STALL_MS = 10 * 60_000;
 /** setTimeout overflows past this and fires at once. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const SUMMARY_MAX = 120;
@@ -62,6 +64,8 @@ export interface ProcessRunOptions {
   env?: Record<string, string>;
   /** Stop the run when the parser has counted this many turns (D-045). */
   maxTurns?: number;
+  /** No event for this long is a stall. Default STALL_MS. A test can shorten it. */
+  stallMs?: number;
 }
 
 /** Append-only event log; every iterator replays from the first event and ends after close(). */
@@ -106,6 +110,96 @@ class EventLog implements AsyncIterable<AdapterEvent> {
 const liveGroups = new Map<number, ChildProcess>();
 let exitHookInstalled = false;
 
+/** The live descendants of a process, with the groups to signal (D-048). */
+export interface ProcessTree {
+  /** Every live descendant pid. */
+  pids: number[];
+  /** The root's own group and each descendant's group. */
+  groups: number[];
+}
+
+/**
+ * Reads `ps -axo pid=,ppid=,pgid=` output and returns the descendants of `rootPid`.
+ * A nested startProcessRun's child leads a group of its own, so the root's group alone
+ * misses it. Groups always include the root's own group. The caller's own process and
+ * group (`selfPid`) are never in the result, so a stop can never signal the daemon itself.
+ */
+export function parseProcessTree(
+  text: string,
+  rootPid: number,
+  selfPid: number = process.pid,
+): ProcessTree {
+  const rows = new Map<number, { ppid: number; pgid: number }>();
+  for (const line of text.split("\n")) {
+    const [pid, ppid, pgid] = line.trim().split(/\s+/).map(Number);
+    if (pid === undefined || ppid === undefined || pgid === undefined) continue;
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid) || !Number.isInteger(pgid)) continue;
+    rows.set(pid, { ppid, pgid });
+  }
+  const childrenOf = new Map<number, number[]>();
+  for (const [pid, row] of rows) {
+    const list = childrenOf.get(row.ppid) ?? [];
+    list.push(pid);
+    childrenOf.set(row.ppid, list);
+  }
+  const ownGroup = rows.get(selfPid)?.pgid;
+  const safe = (group: number) => group > 1 && group !== selfPid && group !== ownGroup;
+  const pids: number[] = [];
+  const groups = new Set<number>(safe(rootPid) ? [rootPid] : []);
+  const queue = [rootPid];
+  while (queue.length > 0) {
+    const parent = queue.shift() as number;
+    for (const child of childrenOf.get(parent) ?? []) {
+      if (child !== selfPid) pids.push(child);
+      const row = rows.get(child);
+      if (row !== undefined && safe(row.pgid)) groups.add(row.pgid);
+      queue.push(child);
+    }
+  }
+  return { pids, groups: [...groups] };
+}
+
+/** Lists the live descendants of `pid` through `ps`. A failed `ps` keeps the root group. */
+export function processTree(pid: number): Promise<ProcessTree> {
+  return new Promise((resolve) => {
+    execFile("ps", ["-axo", "pid=,ppid=,pgid="], { timeout: 2_000 }, (error, stdout) => {
+      resolve(error ? { pids: [], groups: [pid] } : parseProcessTree(stdout, pid));
+    });
+  });
+}
+
+/** Signals the root's group, each descendant's group and each descendant itself. */
+function signalTree(tree: ProcessTree, signal: NodeJS.Signals): void {
+  for (const group of tree.groups) {
+    try {
+      process.kill(-group, signal);
+    } catch {
+      // ESRCH or EPERM: that group is gone or not ours.
+    }
+  }
+  for (const pid of tree.pids) {
+    try {
+      process.kill(pid, signal);
+    } catch {
+      // ESRCH: that process is gone.
+    }
+  }
+}
+
+/**
+ * SIGTERMs a process and every descendant, with each one's process group, then SIGKILLs
+ * after `graceMs` (D-048). The QA test command uses it too.
+ */
+export async function killProcessTree(pid: number, graceMs: number): Promise<void> {
+  const tree = await processTree(pid);
+  signalTree(tree, "SIGTERM");
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, graceMs);
+    timer.unref();
+  });
+  signalTree(tree, "SIGKILL");
+}
+
 function trackGroup(child: ChildProcess): void {
   if (child.pid === undefined) return;
   liveGroups.set(child.pid, child);
@@ -120,14 +214,16 @@ function untrackGroup(pid: number | undefined): void {
   if (pid !== undefined) liveGroups.delete(pid);
 }
 
-/** SIGKILLs every live run's process group. The exit hook calls it; tests use it too. */
+/** SIGKILLs every live run's process group and every descendant's group (D-048). */
 export function killAllLiveRuns(): void {
+  let text = "";
+  try {
+    text = execFileSync("ps", ["-axo", "pid=,ppid=,pgid="], { encoding: "utf8", timeout: 2_000 });
+  } catch {
+    // No ps: the root groups still die below.
+  }
   for (const pid of liveGroups.keys()) {
-    try {
-      process.kill(-pid, "SIGKILL");
-    } catch {
-      // ESRCH: the group is already gone.
-    }
+    signalTree(parseProcessTree(text, pid), "SIGKILL");
   }
   liveGroups.clear();
 }
@@ -139,18 +235,20 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
   const events = new EventLog();
   const startedAt = performance.now();
 
-  const parser = options.parser((event) => events.push(event));
-  let stopReason: "timeout" | "cancelled" | "turn-cap" | undefined;
+  const parser = options.parser((event) => pushEvent(event));
+  let stopReason: "timeout" | "cancelled" | "turn-cap" | "stall" | undefined;
   let hitTurnCap = false;
   let spawnError: string | undefined;
-  let killTimers: NodeJS.Timeout[] = [];
   let budgetTimer: NodeJS.Timeout | undefined;
+  let stallTimer: NodeJS.Timeout | undefined;
+  let stopping = false;
   let exited = false;
   let settled = false;
   let resolveResult: (result: RunResult) => void = () => {};
   const result = new Promise<RunResult>((resolve) => {
     resolveResult = resolve;
   });
+  const stallMs = options.stallMs ?? STALL_MS;
 
   let child: ChildProcess;
   try {
@@ -169,7 +267,7 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
   trackGroup(child);
 
   if (child.pid !== undefined) {
-    events.push({
+    pushEvent({
       type: "start",
       taskId: task.id,
       pid: child.pid,
@@ -185,10 +283,11 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
   }
   if (child.stderr) {
     readLines(child.stderr, (line) => {
-      events.push({ type: "log", stream: "stderr", line });
+      pushEvent({ type: "log", stream: "stderr", line });
       parser.stderr?.(line);
     });
   }
+  resetStall();
 
   if (Number.isFinite(task.budgetMs) && task.budgetMs > 0) {
     budgetTimer = setTimeout(
@@ -212,18 +311,64 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
   });
   child.on("close", (code) => finish(code));
 
-  /** SIGTERM the process group, SIGKILL after the grace period, then stop waiting on stdio. */
+  /**
+   * SIGTERM the run's group and each descendant's group (D-048), then SIGKILL after the
+   * grace period and stop waiting on stdio. A nested run's child leads its own group, so
+   * the descendant list is taken before the first signal.
+   */
   function terminate(): void {
-    if (killTimers.length > 0 || settled) return;
-    signalGroup("SIGTERM");
-    killTimers = [
-      setTimeout(() => signalGroup("SIGKILL"), graceMs),
-      setTimeout(() => {
-        child.stdout?.destroy();
-        child.stderr?.destroy();
-      }, graceMs + 250),
-    ];
-    for (const timer of killTimers) timer.unref();
+    if (stopping || settled) return;
+    stopping = true;
+    void stopTree();
+  }
+
+  async function stopTree(): Promise<void> {
+    const pid = child.pid;
+    const tree = pid === undefined ? { pids: [], groups: [] } : await processTree(pid);
+    signalTree(tree, "SIGTERM");
+    if (!exited) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // ESRCH: already gone.
+      }
+    }
+    const kill = setTimeout(() => {
+      signalTree(tree, "SIGKILL");
+      if (!exited) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // ESRCH: already gone.
+        }
+      }
+    }, graceMs);
+    const destroy = setTimeout(() => {
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+    }, graceMs + 250);
+    kill.unref();
+    destroy.unref();
+  }
+
+  /** Every event resets the stall watchdog, stdout events and stderr lines included (D-048). */
+  function pushEvent(event: AdapterEvent): void {
+    events.push(event);
+    resetStall();
+  }
+
+  /** Starts the no-output timer again; at STALL_MS the run stops like a timeout. */
+  function resetStall(): void {
+    clearTimeout(stallTimer);
+    if (settled || !Number.isFinite(stallMs) || stallMs <= 0) return;
+    stallTimer = setTimeout(
+      () => {
+        stopReason ??= "stall";
+        terminate();
+      },
+      Math.min(stallMs, MAX_TIMER_MS),
+    );
+    stallTimer.unref();
   }
 
   /** The parser counted the cap: kill the run the way a cancel does, and report `error` (D-045). */
@@ -235,22 +380,12 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     terminate();
   }
 
-  function signalGroup(signal: NodeJS.Signals): void {
-    if (child.pid === undefined) return;
-    try {
-      process.kill(-child.pid, signal);
-    } catch {
-      // ESRCH: the group is already gone.
-    }
-    if (!exited) child.kill(signal);
-  }
-
   function finish(exitCode: number | null): void {
     if (settled) return;
     settled = true;
     untrackGroup(child?.pid);
     clearTimeout(budgetTimer);
-    for (const timer of killTimers) clearTimeout(timer);
+    clearTimeout(stallTimer);
     const parsed = parser.outcome(exitCode);
     const status = statusOf(exitCode, parsed);
     const run: RunResult = {
@@ -265,8 +400,11 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     if (parsed.finalText !== undefined) run.finalText = parsed.finalText;
     const error = errorOf(status, exitCode, parsed);
     if (error !== undefined) run.error = error;
-    if (
-      !hitTurnCap &&
+    if (stopReason === "stall") {
+      run.reason = "stalled";
+    } else if (hitTurnCap) {
+      run.reason = "turn_cap";
+    } else if (
       (status === "error" || status === "limited") &&
       spawnError === undefined &&
       parsed.reason !== undefined
@@ -274,14 +412,15 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
       run.reason = parsed.reason;
     }
     if (status === "limited" && parsed.resetAt !== undefined) run.resetAt = parsed.resetAt;
-    events.push({ type: "end", result: run });
+    pushEvent({ type: "end", result: run });
     events.close();
     resolveResult(run);
   }
 
-  /** Order: timeout and cancel, then the turn cap, then a spawn failure, then success, then a limit. */
+  /** Order: timeout and cancel, then a stall, then the turn cap, then a spawn failure, then success, then a limit. */
   function statusOf(exitCode: number | null, parsed: ParsedOutcome): RunStatus {
     if (stopReason === "timeout" || stopReason === "cancelled") return stopReason;
+    if (stopReason === "stall") return "error";
     if (hitTurnCap) return "error";
     if (spawnError !== undefined) return "error";
     if (parsed.ok && (exitCode === 0 || parsed.exitExplained)) return "ok";
@@ -296,6 +435,7 @@ export function startProcessRun(options: ProcessRunOptions): AdapterRun {
     if (status === "ok") return undefined;
     if (status === "timeout") return `budget of ${task.budgetMs}ms exceeded`;
     if (status === "cancelled") return "cancelled";
+    if (stopReason === "stall") return "stalled (no output for 10 min)";
     if (hitTurnCap && options.maxTurns !== undefined) {
       return `turn cap (${options.maxTurns} turns)`;
     }

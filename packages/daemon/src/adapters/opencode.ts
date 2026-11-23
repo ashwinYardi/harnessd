@@ -103,6 +103,8 @@ export function openCodeFailureReason(message: string): RunFailureReason | undef
 const REASON_PREFIX: Record<RunFailureReason, string> = {
   usage_limit: "usage limit reached",
   auth: "not signed in",
+  stalled: "stalled",
+  turn_cap: "turn cap",
 };
 
 const UNIT_MS = { second: 1_000, minute: 60_000, hour: 3_600_000, day: 86_400_000 };

@@ -55,7 +55,9 @@ export function agentsView(config: MergedConfig, loop: LoopSnapshot): AgentsSnap
               budgetMs: r.budgetMs,
               tokens: r.tokens,
               stopping: r.stopping,
+              harness: r.harness,
             };
+            if (r.switchReason !== undefined) run.switchReason = r.switchReason;
             if (r.lastAction !== undefined) run.lastAction = r.lastAction;
             return run;
           }),

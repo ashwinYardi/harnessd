@@ -170,12 +170,12 @@ test("a resumed run adds --resume and keeps every isolation flag and the turn ca
   assert.equal(createClaudeCodeAdapter().canResume, true);
 });
 
-test("an error_max_turns result is an error with turn cap and no reason", async () => {
+test("an error_max_turns result is an error with turn cap and reason turn_cap", async () => {
   const { run: r } = run("max-turns", task({ maxTurns: 80 }));
   const result = await r.result;
   assert.equal(result.status, "error");
   assert.equal(result.error, "turn cap (80 turns)");
-  assert.equal(result.reason, undefined);
+  assert.equal(result.reason, "turn_cap");
 });
 
 test("omits --model and permission flags when not configured", async () => {
@@ -280,6 +280,21 @@ test("timeout kills the process tree with SIGTERM", async () => {
   const { grandchildPid } = readRecord(record);
   assert.ok(grandchildPid !== undefined);
   assert.ok(await waitDead(grandchildPid), "grandchild still running");
+});
+
+test("a stall stops the run with reason stalled and kills a detached grandchild (D-048)", async () => {
+  const { run: r, record } = run("silent", task({ budgetMs: 30_000 }), {
+    stallMs: 250,
+    killGraceMs: 500,
+  });
+  const result = await r.result;
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "stalled (no output for 10 min)");
+  assert.equal(result.reason, "stalled");
+  assert.ok(result.durationMs < 5_000, `ran ${result.durationMs}ms`);
+  const { grandchildPid } = readRecord(record);
+  assert.ok(grandchildPid !== undefined);
+  assert.ok(await waitDead(grandchildPid), "the detached grandchild outlived the stall");
 });
 
 test("timeout escalates to SIGKILL after the grace period", async () => {

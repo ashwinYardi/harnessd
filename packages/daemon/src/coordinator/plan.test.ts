@@ -395,7 +395,7 @@ test("planIssue falls back to one part when a two-part plan has a blank reason",
   assert.equal(plan.parts.length, 1);
 });
 
-test("planIssue falls back on a bad reply, a failed run or a harness mismatch", async () => {
+test("planIssue falls back on a bad reply or a harness mismatch, and retries a failed run", async () => {
   const deps = { agent, context: { spec: "", decisions: [] }, cwd: "/repo" };
   const bad = await planIssue(issue(), { ...deps, adapter: adapterReplying("nope").adapter });
   assert.equal(bad.source, "fallback");
@@ -406,7 +406,9 @@ test("planIssue falls back on a bad reply, a failed run or a harness mismatch", 
     ...deps,
     adapter: adapterReplying({ status: "timeout", error: "over budget" }).adapter,
   });
-  assert.equal(failed.source, "fallback");
+  // A harness failure is no bad reply: the next tick retries on the next harness (D-048).
+  assert.equal(failed.source, "harness");
+  assert.deepEqual(failed.parts, []);
 
   const other = adapterReplying("{}");
   const mismatch = await planIssue(issue(), {

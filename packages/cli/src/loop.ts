@@ -180,6 +180,8 @@ interface Deps {
   github: GitHub;
   /** Built once from the start detection, or supplied by a test. */
   selfUpdater?: SelfUpdater;
+  /** The status checks the loop holds from start or POST /api/start (D-048). */
+  harnessChecks: () => readonly Check[] | undefined;
   log: (line: string) => void;
 }
 
@@ -409,6 +411,8 @@ async function buildLoop(deps: Deps): Promise<Built | Blocker> {
         }
       : {}),
     notifier: visibility.notifier,
+    // A harness whose start check failed is skipped in the role order (D-048).
+    harnessChecks: deps.harnessChecks,
     // Each hold's start and end goes to the daily summary (MET-82).
     onHold: (event) => void visibility.hold(event),
     log,
@@ -496,6 +500,8 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
       ...(io.selfUpdateRunner ? { runner: io.selfUpdateRunner } : {}),
     });
   }
+  /** The latest status checks, held for the loop's harness order (D-048). */
+  let latestChecks: Check[] | undefined;
   const deps: Deps = {
     parsed,
     io,
@@ -506,6 +512,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     secrets,
     github,
     ...(selfUpdater ? { selfUpdater } : {}),
+    harnessChecks: () => latestChecks,
     log,
   };
 
@@ -517,6 +524,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
 
   // Every harness and connection, before anything is dispatched (MET-27, D-023).
   const startChecks = await startChecksWithRetry(checks, options, log);
+  latestChecks = startChecks;
   const startIds = startChecks.filter(isBlocking).map((c) => c.id);
   const blocking = isBlocker(built) ? [...new Set([built.check, ...startIds])] : startIds;
   if (blocking.length > 0 && parsed.once) {
@@ -561,6 +569,7 @@ export async function runLoop(args: readonly string[], io: LoopIO): Promise<numb
     fresh = false,
   ): Promise<{ blocking: string[]; blocker?: Blocker }> => {
     const now = await checks({ ...options, servingPort: true, freshWorktreeWrite: fresh });
+    latestChecks = now;
     const ready = await findBlocker(deps);
     const ids = now.filter(isBlocking).map((c) => c.id);
     if (!isBlocker(ready)) return { blocking: ids };

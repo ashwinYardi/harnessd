@@ -139,15 +139,24 @@ function AgentRows({
               </span>
               <span
                 className={cn(
-                  "block truncate font-mono text-muted-foreground text-xs",
+                  "flex items-center gap-1.5 font-mono text-muted-foreground text-xs",
                   run.stopping && !ended && "text-warning-foreground",
                 )}
               >
-                {ended
-                  ? "Ended"
-                  : run.stopping
-                    ? "Stopping for pause"
-                    : (run.lastAction ?? "Starting")}
+                <HarnessName
+                  harness={run.harness ?? agent.harness}
+                  className="shrink-0 font-sans"
+                />
+                {run.harness !== undefined && run.harness !== agent.harness && (
+                  <span className="shrink-0">· {run.switchReason ?? "another harness"}</span>
+                )}
+                <span className="truncate">
+                  {ended
+                    ? "Ended"
+                    : run.stopping
+                      ? "Stopping for pause"
+                      : (run.lastAction ?? "Starting")}
+                </span>
               </span>
             </td>
             <td className="px-4 py-2.5 text-right align-top tabular-nums">

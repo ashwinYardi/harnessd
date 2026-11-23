@@ -220,6 +220,34 @@ test("sessions are optional, and a malformed one is dropped", () => {
   assert.equal(parsed.qaFeedback.a?.testTail, "not ok");
 });
 
+test("harnessSwitch is optional and drops a malformed entry (D-048)", () => {
+  assert.equal(parseLoopState('{"inFlight":[]}').harnessSwitch, undefined, "old files still load");
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      harnessSwitch: {
+        a: { from: "claude-code", reason: "timed out", at: "2026-11-23T09:00:00.000Z" },
+        b: { from: "nope", reason: "timed out", at: "2026-11-23T09:00:00.000Z" },
+        c: { from: "codex", reason: "", at: "2026-11-23T09:00:00.000Z" },
+        d: { from: "codex", reason: "stalled" },
+      },
+    }),
+  );
+  assert.deepEqual(parsed.harnessSwitch, {
+    a: { from: "claude-code", reason: "timed out", at: "2026-11-23T09:00:00.000Z" },
+  });
+});
+
+test("harnessSwitch survives a save and a load (D-048)", async () => {
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.harnessSwitch = {
+    "id-1": { from: "opencode", reason: "stalled", at: "2026-11-23T09:00:00.000Z" },
+  };
+  await store.save(state);
+  assert.deepEqual((await store.load()).harnessSwitch, state.harnessSwitch);
+});
+
 test("an interrupted run from before the keep reasons loads as paused", () => {
   const old = {
     issueId: "id-2",
