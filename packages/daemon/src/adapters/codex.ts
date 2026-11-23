@@ -141,6 +141,8 @@ export function failureReason(message: string): RunFailureReason | undefined {
 const REASON_PREFIX: Record<RunFailureReason, string> = {
   usage_limit: "usage limit reached",
   auth: "not signed in",
+  stalled: "stalled",
+  turn_cap: "turn cap",
 };
 
 /** Codex can report either a retry interval or a dated retry time. */

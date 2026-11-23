@@ -58,6 +58,10 @@ export interface RunView {
   lastAction?: string;
   /** True while a pause stops the run. */
   stopping: boolean;
+  /** The harness this run uses (D-048). An older daemon sends none. */
+  harness?: HarnessId;
+  /** Why the run is on a harness other than the agent's, as the log says it (D-048). */
+  switchReason?: string;
 }
 
 export interface AgentView {

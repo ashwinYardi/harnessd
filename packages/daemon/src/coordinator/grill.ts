@@ -18,6 +18,7 @@ import {
 import type { LinearClient } from "../linear/client.ts";
 import type { DecisionSink } from "./decisions.ts";
 import { COORDINATOR_MAX_TURNS } from "./dispatch.ts";
+import { switchWhy } from "./limits.ts";
 import type { Notice, Notifier } from "./notifier.ts";
 import { buildGrillPrompt, type GrillContext } from "./prompt.ts";
 
@@ -258,7 +259,15 @@ export function noteTitle(question: string): string {
 /** A run's reply. `limited` is set when the harness hit a usage limit (MET-70). */
 export type RunReply =
   | { ok: true; text: string; tokens: TokenUsage; turns?: number }
-  | { ok: false; error: string; limited?: true; tokens: TokenUsage; turns?: number };
+  | {
+      ok: false;
+      error: string;
+      limited?: true;
+      /** Why the next run must use the next harness (D-048). */
+      switchReason?: string;
+      tokens: TokenUsage;
+      turns?: number;
+    };
 
 /** Runs one task to the end and returns the final assistant text, or why there is none. */
 export async function runForReply(
@@ -270,6 +279,7 @@ export async function runForReply(
   let finalText: string | undefined;
   let status: string | undefined;
   let runError: string | undefined;
+  let switchReason: string | undefined;
   let tokens: TokenUsage = emptyTokenUsage();
   let turns: number | undefined;
   try {
@@ -281,6 +291,7 @@ export async function runForReply(
         status = event.result.status;
         finalText = event.result.finalText;
         runError = event.result.error;
+        switchReason = switchWhy(event.result);
         tokens = event.result.tokens;
         turns = event.result.turns;
       }
@@ -290,9 +301,14 @@ export async function runForReply(
   }
   if (status !== "ok") {
     const error = `harness run ${status ?? "ended without a result"}${runError ? `: ${runError}` : ""}`;
-    return status === "limited"
-      ? { ok: false, error, limited: true, tokens, ...(turns === undefined ? {} : { turns }) }
-      : { ok: false, error, tokens, ...(turns === undefined ? {} : { turns }) };
+    return {
+      ok: false,
+      error,
+      ...(status === "limited" ? { limited: true as const } : {}),
+      ...(switchReason === undefined ? {} : { switchReason }),
+      tokens,
+      ...(turns === undefined ? {} : { turns }),
+    };
   }
   const text = finalText ?? lastText;
   if (text === undefined || text.trim() === "") {
@@ -337,6 +353,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
   let parsed: ParsedGrillReply = { ok: false, error: "not run" };
   let spent: TokenUsage = emptyTokenUsage();
   let turns: number | undefined;
+  let switchReason: string | undefined;
   for (let attempt = 1; attempt <= 2; attempt++) {
     const text =
       attempt === 1
@@ -350,6 +367,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
     };
     if (reply.turns !== undefined) turns = (turns ?? 0) + reply.turns;
+    switchReason = reply.ok ? undefined : reply.switchReason;
     if (!reply.ok && reply.limited) {
       // A usage limit is no bad reply: no retry, nothing written, the issue stays (MET-70).
       return {
@@ -357,6 +375,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
         escalation: null,
         outcome: "limited",
         error: reply.error,
+        ...(switchReason === undefined ? {} : { switchReason }),
         tokens: spent,
         ...(turns === undefined ? {} : { turns }),
       };
@@ -377,6 +396,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       escalation: null,
       outcome: "error",
       error: parsed.error,
+      ...(switchReason === undefined ? {} : { switchReason }),
       tokens: spent,
       ...(turns === undefined ? {} : { turns }),
     };

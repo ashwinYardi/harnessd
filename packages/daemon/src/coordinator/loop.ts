@@ -51,10 +51,16 @@ import {
   activeLimits,
   afterLimited,
   afterOk,
+  type HarnessAvailability,
+  type HarnessSkipReason,
   type HoldEvent,
+  harnessCandidates,
   harnessForRun,
+  harnessSkip,
   isHeld,
+  pickHarness,
   releaseExpired,
+  switchWhy,
 } from "./limits.ts";
 import { advanceMerges, pendingMerge } from "./merge.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
@@ -73,6 +79,7 @@ import {
 } from "./split.ts";
 import type {
   HarnessHold,
+  HarnessSwitch,
   InFlightRun,
   InterruptedReason,
   InterruptedRun,
@@ -128,6 +135,12 @@ export interface LoopSelfUpdate {
   pause(reason: string): Promise<unknown>;
 }
 
+/** The part of a status check the harness order needs (D-048). */
+export interface HarnessCheck {
+  id: string;
+  state: "ok" | "warn" | "fail" | "missing";
+}
+
 export interface CoordinatorLoopOptions {
   config: MergedConfig;
   linear: LoopLinear;
@@ -176,6 +189,12 @@ export interface CoordinatorLoopOptions {
   /** Not set when `[daemon] self_update = false`: then the loop never updates itself. */
   selfUpdate?: LoopSelfUpdate;
   /**
+   * The status checks the loop holds from start or POST /api/start (D-048). A harness whose
+   * `harness.<id>.cli` or `harness.<id>.auth` check is fail or missing is skipped. The loop
+   * runs no new check per tick. Default: no checks, so no harness is skipped for that reason.
+   */
+  harnessChecks?: () => readonly HarnessCheck[] | undefined;
+  /**
    * Commits, pushes and opens or updates the PR after an ok part run (MET-109).
    * Default `shipPart`; tests pass a fake or the real one over a temp repo.
    */
@@ -208,6 +227,10 @@ interface LiveRun {
   budgetMs: number;
   /** Input plus output tokens so far. */
   tokens: number;
+  /** The harness this run really started on (D-048). */
+  harness: HarnessId;
+  /** Why it is not the agent's configured harness (D-048). */
+  switchReason?: string;
   lastAction?: string;
 }
 
@@ -221,6 +244,10 @@ export interface RunActivity {
   startedAt: string;
   budgetMs: number;
   tokens: number;
+  /** The harness this run uses (D-048). */
+  harness: HarnessId;
+  /** Why it is on another harness (D-048). */
+  switchReason?: string;
   lastAction?: string;
   /** True while a pause stops the run. */
   stopping: boolean;
@@ -546,20 +573,108 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     };
   }
 
-  /**
-   * The agent config a run starts with: the agent on its main harness, or on its fallback
-   * while a limit holds the main one (MET-81). Undefined when the run must wait.
-   */
-  function forRun(main: ResolvedAgentConfig): ResolvedAgentConfig | undefined {
-    return harnessForRun(main, held, (h) => adapters[h] !== undefined);
+  /** The status-engine answer for one harness, from the checks the loop holds (D-048). */
+  function harnessCheckOk(harness: HarnessId, suffix: "cli" | "auth"): boolean {
+    const checks = options.harnessChecks?.() ?? [];
+    const check = checks.find((c) => c.id === `harness.${harness}.${suffix}`);
+    return check === undefined || (check.state !== "fail" && check.state !== "missing");
   }
 
-  /** Logs a run that starts on the fallback harness. Called once the run really starts. */
-  function logFallback(key: string, main: ResolvedAgentConfig, agent: ResolvedAgentConfig): void {
-    if (agent.harness === main.harness) return;
-    log(
-      `${key}: ${main.name} on ${harnessName(agent.harness)} while ${harnessName(main.harness)} is limited`,
-    );
+  /** Harnesses that failed sign-in at run time, per issue id (D-048). In memory only. */
+  const authFailed = new Map<string, Set<HarnessId>>();
+
+  /** True when an earlier run of this issue ended with reason `auth` on the harness. */
+  function failedAuth(issueId: string, harness: HarnessId): boolean {
+    return authFailed.get(issueId)?.has(harness) === true;
+  }
+
+  /** What the loop knows about each harness now. It runs no check per tick. */
+  function availability(issueId: string): HarnessAvailability {
+    return {
+      held,
+      hasAdapter: (h) => adapters[h] !== undefined,
+      installed: (h) => harnessCheckOk(h, "cli"),
+      signedIn: (h) => harnessCheckOk(h, "auth") && !failedAuth(issueId, h),
+    };
+  }
+
+  /** The harnesses a run of this issue may use now, in order (D-048). */
+  function orderFor(issueId: string, main: ResolvedAgentConfig): ResolvedAgentConfig[] {
+    return harnessForRun(main, availability(issueId));
+  }
+
+  /** The one log line a first run on another harness writes (D-048). */
+  function switchLine(
+    key: string,
+    main: ResolvedAgentConfig,
+    chosen: ResolvedAgentConfig,
+    record: HarnessSwitch | undefined,
+    why: string | undefined,
+  ): string | undefined {
+    if (chosen.harness === main.harness) return undefined;
+    if (record !== undefined) {
+      if (record.from === chosen.harness) return undefined;
+      return `${key}: ${harnessName(record.from)} ${record.reason}, retrying on ${harnessName(chosen.harness)}`;
+    }
+    return `${key}: ${harnessName(main.harness)} ${why ?? "is not available"}, running on ${harnessName(chosen.harness)}`;
+  }
+
+  /**
+   * Where this issue's next run goes (D-048). It picks the first usable harness after the
+   * harness of the last failed run, wrapping around. Undefined means no harness is left.
+   */
+  function chooseForRun(
+    s: LoopState,
+    issueId: string,
+    main: ResolvedAgentConfig,
+  ): {
+    agent: ResolvedAgentConfig | undefined;
+    skipped: Array<{ harness: HarnessId; why: HarnessSkipReason }>;
+    record: HarnessSwitch | undefined;
+    why: string | undefined;
+  } {
+    const availabilityNow = availability(issueId);
+    const skipped = harnessCandidates(main)
+      .map((harness) => ({ harness, why: harnessSkip(harness, availabilityNow) }))
+      .filter(
+        (item): item is { harness: HarnessId; why: HarnessSkipReason } => item.why !== undefined,
+      );
+    const order = orderFor(issueId, main);
+    const record = s.harnessSwitch?.[issueId];
+    const agent = pickHarness(order, record?.from);
+    return { agent, skipped, record, why: harnessSkip(main.harness, availabilityNow) };
+  }
+
+  /** Logs the no-harness line once per set of reasons for an issue (D-048). */
+  const noHarness = new Map<string, string>();
+  function logNoHarness(
+    key: string,
+    issueId: string,
+    skipped: Array<{ harness: HarnessId; why: HarnessSkipReason }>,
+  ): void {
+    const text =
+      skipped.map((s) => `${harnessName(s.harness)} ${s.why}`).join(", ") || "no harness";
+    if (noHarness.get(issueId) === text) return;
+    noHarness.set(issueId, text);
+    log(`${key}: no harness left (${text})`);
+  }
+
+  /** Remembers why this issue's next run must use the next harness (D-048). */
+  function recordSwitch(s: LoopState, issueId: string, from: HarnessId, reason: string): void {
+    s.harnessSwitch ??= {};
+    s.harnessSwitch[issueId] = { from, reason, at: clock.now().toISOString() };
+    if (reason === "is not signed in") {
+      const failed = authFailed.get(issueId) ?? new Set<HarnessId>();
+      failed.add(from);
+      authFailed.set(issueId, failed);
+    }
+  }
+
+  /** Forgets the switch on an ok run, at Needs input and at Done (D-048). */
+  function clearSwitch(issueId: string): void {
+    if (state?.harnessSwitch !== undefined) delete state.harnessSwitch[issueId];
+    authFailed.delete(issueId);
+    noHarness.delete(issueId);
   }
 
   /** Ends the holds whose time has come, with one log line each. */
@@ -629,6 +744,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
       if (issue.state.toLowerCase() === "done" || isCanceledState(issue.state)) {
         delete s.splits[id];
+        // Done ends any harness switch for the parent (D-048).
+        clearSwitch(id);
         changed = true;
       }
     }
@@ -693,6 +810,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     summary: string,
     comment: string,
   ): Promise<void> {
+    // Needs input ends the harness switch for this issue (D-048).
+    clearSwitch(target.id);
     await safely(`comment on ${target.key}`, () => linear.comment(target.id, comment));
     await safely(`move ${target.key} to Needs input`, () =>
       linear.moveTo(target.id, "Needs input"),
@@ -861,6 +980,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const id = entry.issueId;
     let drop = true;
     try {
+      // The switch reads the adapter result, not the shipped outcome (D-048): a ship failure
+      // stays a task failure on the same harness, so an existing switch record stays.
+      const startedOn = runHarnesses.get(entry.issueId);
+      const switchReason = startedOn === undefined ? undefined : switchWhy(result);
+      if (startedOn !== undefined && switchReason !== undefined) {
+        recordSwitch(s, id, startedOn, switchReason);
+      }
       recordUsage(
         s,
         runParents.get(entry.issueId),
@@ -942,6 +1068,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       } else if (outcome.status === "ok") {
         delete s.attempts[id];
         delete s.qaFeedback[id];
+        // An ok run ends the harness switch for this issue (D-048).
+        clearSwitch(id);
         await safely(`move ${entry.issueKey} to In Review`, () => linear.moveTo(id, "In Review"));
         log(`${entry.issueKey}: done, In Review`);
       } else if (outcome.status === "cancelled" || outcome.status === "limited") {
@@ -998,14 +1126,6 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       return;
     }
     const main = resolveAgentConfig(config, agentName);
-    if (adapters[main.harness] === undefined) {
-      log(`${issue.key}: no adapter for harness ${main.harness}`);
-      return;
-    }
-    // A held harness starts nothing: the agent runs on its fallback, or the issue waits in Ready (MET-70).
-    const agent = forRun(main);
-    const adapter = agent && adapters[agent.harness];
-    if (agent === undefined || adapter === undefined) return;
     const budget = budgetMs(issue.size, config.limits);
     if (budget === undefined) {
       await escalate(
@@ -1027,11 +1147,23 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
     }
     if (parentIssue !== undefined && (await overTokenBudget(s, parentIssue))) return;
+    // The next harness in the fixed role order (D-048). With none left, the issue stays Ready.
+    const choice = chooseForRun(s, issue.id, main);
+    const agent = choice.agent;
+    const adapter = agent && adapters[agent.harness];
+    if (agent === undefined || adapter === undefined) {
+      logNoHarness(issue.key, issue.id, choice.skipped);
+      return;
+    }
+    noHarness.delete(issue.id);
     const started = await safely(`move ${issue.key} to In Progress`, () =>
       linear.moveTo(issue.id, "In Progress"),
     );
     if (!started) return;
-    logFallback(issue.key, main, agent);
+    const switched = switchLine(issue.key, main, agent, choice.record, choice.why);
+    if (switched !== undefined) log(switched);
+    const switchReason =
+      agent.harness === main.harness ? undefined : (choice.record?.reason ?? choice.why);
 
     const entry: InFlightRun = {
       issueId: issue.id,
@@ -1074,7 +1206,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         await save();
       }
       report.dispatched.push(issue.key);
-      startQa(s, entry, issue, qa, agent, adapter, budget);
+      startQa(s, entry, issue, qa, agent, adapter, budget, switchReason);
       log(`${issue.key}: ${agentName} started QA of ${qa.parts.map((p) => p.key).join(", ")}`);
       return;
     }
@@ -1185,6 +1317,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       title: issue.title,
       budgetMs: budget,
       tokens: 0,
+      harness: agent.harness,
+      ...(switchReason === undefined ? {} : { switchReason }),
     };
     live.set(issue.id, l);
     follow(l, run);
@@ -1207,9 +1341,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     agent: ResolvedAgentConfig,
     adapter: HarnessAdapter,
     budget: number,
+    switchReason?: string,
   ): void {
     const maxRounds = config.limits.qa_max_failures;
     const abort = new AbortController();
+    /** The QA agent's last run result, to tell a harness failure from a bad verdict (D-048). */
+    let agentResult: RunResult | undefined;
     const l: LiveRun = {
       key: issue.key,
       entry,
@@ -1218,6 +1355,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       title: issue.title,
       budgetMs: budget,
       tokens: 0,
+      harness: agent.harness,
+      ...(switchReason === undefined ? {} : { switchReason }),
     };
     // The QA agent's run is the live run while it lasts, so a pause cancels it.
     const qaAdapter: HarnessAdapter = {
@@ -1229,7 +1368,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         l.run = run;
         follow(l, run);
         void run.result.then(
-          (result) => noteRun(adapter.id, result),
+          (result) => {
+            agentResult = result;
+            noteRun(adapter.id, result);
+          },
           () => undefined,
         );
         const clear = (): void => {
@@ -1306,6 +1448,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       if (result.cancelled === true) {
         await save();
         return;
+      }
+      // The switch reads the QA agent's own result, not its verdict (D-048).
+      if (agentResult !== undefined) {
+        if (agentResult.status === "ok") clearSwitch(issue.id);
+        else {
+          const why = switchWhy(agentResult);
+          if (why !== undefined) recordSwitch(s, issue.id, agent.harness, why);
+        }
       }
       s.inFlight = s.inFlight.filter((e) => e !== entry);
       if (result.limited === true) {
@@ -1404,15 +1554,20 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       return;
     }
     const main = resolveAgentConfig(config, name);
-    if (adapters[main.harness] === undefined) {
-      log(`${issue.key}: no adapter for harness ${main.harness}`);
+    const s = state;
+    if (s === undefined) return;
+    // The next coordinator harness in the fixed order (D-048).
+    const choice = chooseForRun(s, issue.id, main);
+    const agent = choice.agent;
+    const harness = agent && adapters[agent.harness];
+    if (agent === undefined || harness === undefined) {
+      logNoHarness(issue.key, issue.id, choice.skipped);
       return;
     }
-    const agent = forRun(main);
-    const harness = agent && adapters[agent.harness];
-    if (agent === undefined || harness === undefined) return;
+    noHarness.delete(issue.id);
+    const switched = switchLine(issue.key, main, agent, choice.record, choice.why);
+    if (switched !== undefined) log(switched);
     const adapter = tracked(harness);
-    logFallback(issue.key, main, agent);
 
     const children = (await linear.listChildren(issue.id)).filter(
       (child) => !isCanceledState(child.state),
@@ -1448,15 +1603,22 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         return;
       }
       if (grill.outcome === "limited") {
+        if (grill.switchReason !== undefined) {
+          recordSwitch(s, issue.id, agent.harness, grill.switchReason);
+        }
         log(`${issue.key}: grill limited, the issue stays Ready`);
         return;
       }
       if (grill.outcome === "needs_input") {
         report.escalated.push(issue.key);
+        clearSwitch(issue.id);
         log(`${issue.key}: grill escalated, Needs input`);
         return;
       }
       if (grill.outcome === "error") {
+        if (grill.switchReason !== undefined) {
+          recordSwitch(s, issue.id, agent.harness, grill.switchReason);
+        }
         log(`${issue.key}: grill failed, retrying next tick: ${grill.error ?? "unknown"}`);
         return;
       }
@@ -1484,7 +1646,17 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         return;
       }
       if (plan.source === "limited") {
+        if (plan.switchReason !== undefined) {
+          recordSwitch(s, issue.id, agent.harness, plan.switchReason);
+        }
         log(`${issue.key}: plan limited, the issue stays Ready`);
+        return;
+      }
+      if (plan.source === "harness") {
+        if (plan.switchReason !== undefined) {
+          recordSwitch(s, issue.id, agent.harness, plan.switchReason);
+        }
+        log(`${issue.key}: plan failed, retrying next tick: ${plan.error ?? "unknown"}`);
         return;
       }
       if (plan.source === "fallback") log(`${issue.key}: plan fallback: ${plan.error ?? ""}`);
@@ -1530,6 +1702,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       );
     }
     await linear.moveTo(issue.id, "In Progress");
+    // The coordinator's run is done: the next Ready issue starts on the main harness (D-048).
+    clearSwitch(issue.id);
     report.split.push(issue.key);
     log(
       `${issue.key}: split into ${result.parts.map((p) => p.key).join(", ")} and QA ${result.qa.key}`,
@@ -1961,8 +2135,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           startedAt: l.entry.startedAt,
           budgetMs: l.budgetMs,
           tokens: l.tokens,
+          harness: l.harness,
           stopping: l.entry.pausedAt !== undefined,
         };
+        if (l.switchReason !== undefined) a.switchReason = l.switchReason;
         if (l.lastAction !== undefined) a.lastAction = l.lastAction;
         return a;
       });

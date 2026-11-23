@@ -1,6 +1,12 @@
 // The hold on a harness that hit a usage limit (MET-70, docs/LOOP.md "Usage limits").
 // Pure: the loop owns the state, the clock and the log.
-import type { HarnessId, HarnessLimit, ResolvedAgentConfig } from "@harnessd/shared";
+import type {
+  AgentRole,
+  HarnessId,
+  HarnessLimit,
+  ResolvedAgentConfig,
+  RunResult,
+} from "@harnessd/shared";
 import type { HarnessHold } from "./state.ts";
 
 /** The wait after the first limited run that gave no reset time. */
@@ -65,24 +71,120 @@ export function releaseExpired(
 }
 
 /**
- * The agent config a run uses now (MET-81). It is the agent itself while its harness is
- * free. While a limit holds that harness, it is the agent on its fallback harness and
- * model, if the fallback is set, has an adapter and is not held. Undefined otherwise:
- * the run waits.
+ * The fixed harness order of each role (D-048). The agent's configured harness comes first,
+ * then `fallback_harness`, then this order. It lives in code, not config: Settings → Team
+ * is v0.2.
+ */
+export const HARNESS_ORDER: Record<AgentRole, readonly HarnessId[]> = {
+  coordinator: ["claude-code", "codex"],
+  backend: ["opencode", "codex", "claude-code"],
+  frontend: ["opencode", "codex", "claude-code"],
+  qa: ["codex", "claude-code"],
+};
+
+/** Why a harness cannot take this run (D-048). */
+export type HarnessSkipReason =
+  | "has no adapter"
+  | "is not installed"
+  | "is not signed in"
+  | "is limited";
+
+/** What the loop knows about each harness at dispatch time (D-048). */
+export interface HarnessAvailability {
+  /** A usage-limit hold is in force (D-034). */
+  held(harness: HarnessId): boolean;
+  /** The loop has an adapter for the harness. */
+  hasAdapter(harness: HarnessId): boolean;
+  /** The status engine's `harness.<id>.cli` check did not fail or go missing. */
+  installed(harness: HarnessId): boolean;
+  /** The status engine's `harness.<id>.auth` check did not fail or go missing. */
+  signedIn(harness: HarnessId): boolean;
+}
+
+/** The harness ids one run may use, in order, before any is dropped (D-048). */
+export function harnessCandidates(agent: ResolvedAgentConfig): HarnessId[] {
+  const ids = [agent.harness];
+  const fallback = agent.fallback_harness;
+  if (fallback !== undefined && fallback !== agent.harness) ids.push(fallback);
+  ids.push(...HARNESS_ORDER[agent.role]);
+  return [...new Set(ids)];
+}
+
+/** Why this harness cannot take the run now, or undefined when it can. */
+export function harnessSkip(
+  harness: HarnessId,
+  availability: HarnessAvailability,
+): HarnessSkipReason | undefined {
+  if (!availability.hasAdapter(harness)) return "has no adapter";
+  if (!availability.installed(harness)) return "is not installed";
+  if (!availability.signedIn(harness)) return "is not signed in";
+  if (availability.held(harness)) return "is limited";
+  return undefined;
+}
+
+/** The agent config for one harness: the main model, the fallback model, or the CLI default. */
+export function configOnHarness(
+  agent: ResolvedAgentConfig,
+  harness: HarnessId,
+): ResolvedAgentConfig {
+  const { model, fallback_harness, fallback_model, ...rest } = agent;
+  const out: ResolvedAgentConfig = { ...rest, harness };
+  if (harness === agent.harness) {
+    if (model !== undefined) out.model = model;
+  } else if (harness === fallback_harness && fallback_model !== undefined) {
+    out.model = fallback_model;
+  }
+  return out;
+}
+
+/**
+ * The agent configs a run may start on, in order (D-048). The configured harness comes
+ * first, then `fallback_harness`, then the role order. A harness is dropped when it has no
+ * adapter, is not installed or signed in, or is held (D-034). The first item is the run's
+ * first try. An empty list means no harness is left: the issue stays Ready.
  */
 export function harnessForRun(
   agent: ResolvedAgentConfig,
-  held: (harness: HarnessId) => boolean,
-  hasAdapter: (harness: HarnessId) => boolean,
+  availability: HarnessAvailability,
+): ResolvedAgentConfig[] {
+  return harnessCandidates(agent)
+    .filter((harness) => harnessSkip(harness, availability) === undefined)
+    .map((harness) => configOnHarness(agent, harness));
+}
+
+/**
+ * The first usable harness after `after` in `order`, wrapping around to the first one
+ * (D-048). A harness that is not in `order` means the first one. Undefined when none is.
+ */
+export function pickHarness(
+  order: readonly ResolvedAgentConfig[],
+  after?: HarnessId,
 ): ResolvedAgentConfig | undefined {
-  if (!held(agent.harness)) return agent;
-  const fallback = agent.fallback_harness;
-  if (fallback === undefined || fallback === agent.harness) return undefined;
-  if (!hasAdapter(fallback) || held(fallback)) return undefined;
-  const { model: _mainModel, fallback_harness: _fallbackHarness, fallback_model, ...rest } = agent;
-  const onFallback: ResolvedAgentConfig = { ...rest, harness: fallback };
-  if (fallback_model !== undefined) onFallback.model = fallback_model;
-  return onFallback;
+  if (order.length === 0) return undefined;
+  if (after === undefined) return order[0];
+  const at = order.findIndex((agent) => agent.harness === after);
+  return order[at === -1 ? 0 : (at + 1) % order.length];
+}
+
+/**
+ * Why a run moves to the next harness, as the log and the run view say it (D-048).
+ * Undefined for an ok run, a cancel, a turn cap (D-045) and a task failure such as an
+ * unusable reply: those retry on the same harness.
+ */
+export function switchWhy(result: RunResult): string | undefined {
+  if (result.status === "timeout") return "timed out";
+  if (result.status === "limited") return "hit its usage limit";
+  if (result.reason === "auth") return "is not signed in";
+  if (result.reason === "stalled") return "stalled";
+  if (result.reason === "turn_cap") return undefined;
+  if (result.status === "error") {
+    return result.error === undefined ? "failed" : `failed (${oneLine(result.error)})`;
+  }
+  return undefined;
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
 }
 
 /**

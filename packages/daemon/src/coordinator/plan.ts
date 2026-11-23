@@ -51,13 +51,16 @@ export interface SplitPlan {
   parts: PlanPart[];
   /**
    * `fallback` when the model's reply was unusable. `limited` when the harness hit a
-   * usage limit: there are no parts and the issue is not split (MET-70).
+   * usage limit: there are no parts and the issue is not split (MET-70). `harness` when
+   * the harness run itself failed: the next tick uses the next harness (D-048).
    */
-  source: "model" | "fallback" | "limited";
+  source: "model" | "fallback" | "limited" | "harness";
   /** Why the issue needs more than one part. Required when `parts` has more than one. */
   reason?: string;
-  /** Why the model's plan was not used. */
+  /** Why the model's plan was not used, or why the harness run failed. */
   error?: string;
+  /** Why the next plan run must use the next harness (D-048). */
+  switchReason?: string;
   /** Tokens the plan run used (D-040). */
   tokens?: TokenUsage;
   /** Turns the plan run took, when the harness reports them. */
@@ -365,6 +368,17 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
       parts: [],
       source: "limited",
       error: reply.error,
+      tokens: reply.tokens,
+      ...turnsOf(reply),
+    };
+  }
+  if (!reply.ok && reply.switchReason !== undefined) {
+    // The harness run itself failed (timeout, stall, crash): retry on the next harness (D-048).
+    return {
+      parts: [],
+      source: "harness",
+      error: reply.error,
+      switchReason: reply.switchReason,
       tokens: reply.tokens,
       ...turnsOf(reply),
     };

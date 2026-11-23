@@ -891,17 +891,24 @@ test("while Claude Code is held, a codex fallback dispatches through harnessAdap
   const main = resolveAgentConfig(config, "backend");
   const hasAdapter = (h: keyof typeof adapters) => adapters[h] !== undefined;
 
+  const available = {
+    held: () => false,
+    hasAdapter,
+    installed: () => true,
+    signedIn: () => true,
+  };
   assert.equal(
-    harnessForRun(main, () => false, hasAdapter),
-    main,
-    "a free main harness runs",
+    harnessForRun(main, available)[0]?.harness,
+    "claude-code",
+    "a free main harness runs first",
   );
-  const agent = harnessForRun(main, (h) => h === "claude-code", hasAdapter);
+  const order = harnessForRun(main, { ...available, held: (h) => h === "claude-code" });
+  const agent = order[0];
   assert.equal(agent?.harness, "codex");
   assert.equal(agent?.model, "gpt-5");
-  assert.equal(
-    harnessForRun(main, () => true, hasAdapter),
-    undefined,
+  assert.deepEqual(
+    harnessForRun(main, { ...available, held: () => true }),
+    [],
     "a held fallback is not used",
   );
 

@@ -301,7 +301,7 @@ The limit also starts a **hold** on that harness, kept in `loop.json` under `lim
 | a reset time | at the reset time |
 | no reset time | after a backoff: 15 minutes, doubled after each hold that ended, at most 2 hours |
 
-While a hold lasts, no part, QA, grill or plan run starts on that harness. An agent with a usable `fallback_harness` runs on its fallback harness and model instead (docs/CONFIG.md "Fallback harness", MET-81). A fallback is usable when it has an adapter and no hold of its own. Otherwise the issue waits in Ready and nothing is logged per tick. Agents on other harnesses dispatch as usual. Runs in flight are not cancelled. More limited runs during a hold do not double it. An ok run that ends after the hold clears the backoff. An ok run that ends during the hold leaves the hold as it is.
+While a hold lasts, no part, QA, grill or plan run starts on that harness. The run moves to the next usable harness in the fixed role order (D-048, replaces the D-035 fallback rule). A harness is usable when it has an adapter, no hold, and no `harness.<id>.cli` or `harness.<id>.auth` check in state fail or missing. A harness with no check result yet counts as usable. When none is usable, the issue waits in Ready and the loop logs `<key>: no harness left (<harness> <why>, ...)` once per set of reasons. Agents on other harnesses dispatch as usual. Runs in flight are not cancelled. More limited runs during a hold do not double it. An ok run that ends after the hold clears the backoff. An ok run that ends during the hold leaves the hold as it is.
 
 The log gets one line when a hold starts and one when it ends, in the daemon's local time:
 
@@ -309,12 +309,27 @@ The log gets one line when a hold starts and one when it ends, in the daemon's l
 Claude Code limited until 18:37
 Claude Code limited until 17:52 (backoff)
 Claude Code available again
-MET-61: backend on Codex while Claude Code is limited
+MET-61: Claude Code is limited, running on Codex
 ```
 
 GET /api/loop and the `agents` event list the holds in force under `limits` (docs/API.md). The app reads them for "Claude Code limited until HH:MM".
 
 The daily summary records each hold's start and end. It adds one line per harness with the limited time since the last summary, such as `Claude Code limited 2h 10m`. A hold still open counts up to the summary time and carries over to the next. A hold that expired while the daemon was off counts only up to its recorded expiry. An end entry also carries the hold's own start. So a hold with no recorded start counts from its start, not from the last summary. A day with no hold has no such line. No Slack notice goes out per hold.
+
+## Harness switch (D-048)
+A run that fails on its harness moves to the next harness in a fixed role order. The work stays in the same worktree. The order is in code (`HARNESS_ORDER` in `coordinator/limits.ts`): coordinator claude-code, codex; backend and frontend opencode, codex, claude-code; qa codex, claude-code. The run's list is the configured harness, then `fallback_harness` when it differs, then the role order, without duplicates and without unusable harnesses. `fallback_model` applies only on the `fallback_harness`; any other harness gets no `--model`.
+
+| Run ends | Switch? | Attempt |
+|---|---|---|
+| `timeout`, a stall (`stalled`), reason `auth`, any other adapter error | yes | counted, as before (D-014) |
+| `limited` | yes: the harness is held (D-034) | none |
+| turn cap (D-045), ship failure (`no changes`, `push failed`, `pr failed`), invalid QA verdict, invalid grill or plan reply | no: same harness | as before |
+
+A switch is recorded in `harnessSwitch` in `loop.json`. The next dispatch picks the first usable harness after `from`, or the first usable one when none follows. An ok run, Needs input and Done delete the record. A grill or plan timeout, stall or harness error records the switch on the parent, and the next tick uses the next coordinator harness. MAX_RUN_ATTEMPTS stays 2.
+
+**Stall watchdog.** A run with no event for 10 minutes is stopped like a timeout and ends `error` with `stalled (no output for 10 min)` and reason `stalled`. Every stop (cap, stall, timeout, pause, cancel, daemon exit, the QA test command) signals the run's group and each descendant's group, then SIGKILLs after the grace time.
+
+**Log lines.** `<key>: <from> <why>, retrying on <to>`, with `<why>` one of `timed out`, `stalled`, `hit its usage limit`, `is not signed in`, `failed (<error>)`. The line is logged when the next run starts. A hold with no earlier failure logs `<key>: <harness> is limited, running on <to>`. The run row in the app shows the run's harness and the reason.
 
 ## Merge
 The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR merges only when **all** of these hold:
@@ -381,4 +396,4 @@ daemon start and loop ticks ──┴─► check ─► pending ─► safe poi
 
 `pausedAt` is set only on an in-flight run that a pause is cancelling. `stopReason: "self-update"` is set with it when a waiting self-update stops the run. `interrupted[].reason` is `paused`, `self-update`, `uncommitted changes` or `commits not on the remote`; a file from before these reasons loads as `paused`. `excludesFile` is the run's exclude file, so synced files do not count as uncommitted changes; it is optional. `selfUpdate.state` is `pending`, `applying`, `done`, `blocked` or `failed`. `endedAt` is set only on an ended hold kept for its backoff.
 
-Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the last session of each part run, the QA approvals waiting to merge, the needs-human notices already sent, the usage-limit holds and the parents the loop split. `sessions` is optional: a part run's last session, keyed by part id, with the harness, the worktree and branch it ran in, and the time. `qaFeedback.testTail` is optional: the last 3,000 characters of the tests when they failed. `reviewedHeads`, `usage` and `usageBaseline` are additive and optional: a file from before D-040 still loads. `shipped` is optional too: a file from before MET-128 loads with no shipped parts. `splits` is optional: a file from before MET-154 loads with no split records. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.
+Linear stays the source of truth. The file only records in-flight runs, paused runs, failure counts, the QA feedback a sent-back part gets in its prompt, the last session of each part run, the QA approvals waiting to merge, the needs-human notices already sent, the usage-limit holds and the parents the loop split. `sessions` is optional: a part run's last session, keyed by part id, with the harness, the worktree and branch it ran in, and the time. `qaFeedback.testTail` is optional: the last 3,000 characters of the tests when they failed. `reviewedHeads`, `usage` and `usageBaseline` are additive and optional: a file from before D-040 still loads. `shipped` is optional too: a file from before MET-128 loads with no shipped parts. `splits` is optional: a file from before MET-154 loads with no split records. `harnessSwitch` is optional: keyed by issue id, `{ from, reason, at }`; a file from before D-048 loads, and a malformed entry is dropped. An approval that cannot be read back whole is dropped rather than merged on a guess. If the file is unreadable, it is moved aside to `loop.json.corrupt-<ts>` and the loop starts empty.

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Stand-in for `claude -p ... --output-format stream-json --verbose` in adapter tests.
-// FAKE_CLAUDE_MODE: ok (default) | error | malformed | hang | hang-stubborn | limit-result |
+// FAKE_CLAUDE_MODE: ok (default) | error | malformed | hang | hang-stubborn | silent | limit-result |
 // limit-stderr | limit-hang | rate-limit-ok | error-success | error-stderr |
 // rate-limit-then-error | max-turns
 // FAKE_CLAUDE_RECORD: file to write {argv, cwd, grandchildPid?, probe?, inspect?} into.
@@ -170,14 +170,26 @@ if (mode === "ok" || mode === "malformed") {
   setInterval(() => {}, 1000);
 } else if (mode === "hang" || mode === "hang-stubborn") {
   if (mode === "hang-stubborn") process.on("SIGTERM", () => {});
-  // A grandchild in the same process group, to prove the whole tree is killed.
+  // A detached grandchild leads a group of its own, as a nested run's child does (D-048).
   const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
     stdio: "ignore",
+    detached: true,
   });
+  grandchild.unref();
   record.grandchildPid = grandchild.pid;
   save();
   init();
   assistant("msg_1", [{ type: "text", text: "Working." }], usage(1, 1, 0, 0));
+  setInterval(() => {}, 1000);
+} else if (mode === "silent") {
+  // No adapter event at all: the stall watchdog must stop it (D-048).
+  const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+    detached: true,
+  });
+  grandchild.unref();
+  record.grandchildPid = grandchild.pid;
+  save();
   setInterval(() => {}, 1000);
 } else {
   process.stderr.write(`fake-claude: unknown mode ${mode}\n`);

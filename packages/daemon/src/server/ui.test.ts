@@ -44,6 +44,7 @@ const running: LoopSnapshot = {
       startedAt: "2026-11-20T09:50:00.000Z",
       budgetMs: 1_800_000,
       tokens: 1500,
+      harness: "claude-code",
       lastAction: "Edit src/app.ts",
       stopping: false,
     },
@@ -107,6 +108,7 @@ test("agentsView lists every agent in role order with its runs", () => {
     startedAt: "2026-11-20T09:50:00.000Z",
     budgetMs: 1_800_000,
     tokens: 1500,
+    harness: "claude-code",
     lastAction: "Edit src/app.ts",
     stopping: false,
   });

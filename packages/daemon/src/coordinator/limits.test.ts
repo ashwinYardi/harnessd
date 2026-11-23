@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { HarnessId, ResolvedAgentConfig } from "@harnessd/shared";
+import type { ResolvedAgentConfig, RunResult } from "@harnessd/shared";
 import {
   activeLimits,
   afterLimited,
   afterOk,
   FIRST_BACKOFF_MS,
+  type HarnessAvailability,
   harnessForRun,
   isHeld,
   MAX_BACKOFF_MS,
+  pickHarness,
   releaseExpired,
+  switchWhy,
 } from "./limits.ts";
 import type { HarnessHold } from "./state.ts";
 
@@ -84,7 +87,7 @@ test("releaseExpired ends a hold once, and drops one with no backoff", () => {
   assert.deepEqual(releaseExpired(first.hold, at(17 * MIN)), { hold: first.hold, ended: false });
 });
 
-// --- harnessForRun (MET-81) ---------------------------------------------------
+// --- harnessForRun (MET-81, D-048) -------------------------------------------
 
 const AGENT: ResolvedAgentConfig = {
   name: "backend",
@@ -97,42 +100,99 @@ const AGENT: ResolvedAgentConfig = {
   rules: [],
   skills: [],
 };
-const heldSet =
-  (...ids: HarnessId[]) =>
-  (h: HarnessId) =>
-    ids.includes(h);
-const all = () => true;
 
-test("harnessForRun keeps the agent while its harness is free", () => {
-  assert.equal(harnessForRun(AGENT, heldSet(), all), AGENT);
+function availability(overrides: Partial<HarnessAvailability> = {}): HarnessAvailability {
+  return {
+    held: () => false,
+    hasAdapter: () => true,
+    installed: () => true,
+    signedIn: () => true,
+    ...overrides,
+  };
+}
+
+const harnesses = (agent: ResolvedAgentConfig, a = availability()) =>
+  harnessForRun(agent, a).map((c) => c.harness);
+
+test("harnessForRun orders the configured harness first, the fallback second, then the role order", () => {
+  assert.deepEqual(harnesses(AGENT), ["claude-code", "codex", "opencode"]);
+  const { fallback_harness: _, ...noFallback } = AGENT;
+  assert.deepEqual(harnesses(noFallback), ["claude-code", "opencode", "codex"]);
 });
 
-test("harnessForRun moves a held agent to its fallback harness and model", () => {
-  const chosen = harnessForRun(AGENT, heldSet("claude-code"), all);
-  assert.equal(chosen?.harness, "codex");
-  assert.equal(chosen?.model, "gpt-5");
-  assert.equal(chosen?.name, "backend");
+test("harnessForRun removes duplicates, including a fallback equal to the main harness", () => {
+  assert.deepEqual(harnesses({ ...AGENT, fallback_harness: "claude-code" }), [
+    "claude-code",
+    "opencode",
+    "codex",
+  ]);
+  const { fallback_harness: _fallback, ...opencodeMain } = AGENT;
+  assert.deepEqual(harnesses({ ...opencodeMain, harness: "opencode" }), [
+    "opencode",
+    "codex",
+    "claude-code",
+  ]);
 });
 
-test("harnessForRun drops the main model when no fallback model is set", () => {
-  const { fallback_model: _, ...noModel } = AGENT;
-  const chosen = harnessForRun(noModel, heldSet("claude-code"), all);
-  assert.equal(chosen?.harness, "codex");
-  assert.equal("model" in (chosen ?? {}), false);
+test("harnessForRun keeps the main model, the fallback model, and no model elsewhere", () => {
+  const order = harnessForRun(AGENT, availability());
+  assert.equal(order[0]?.model, "opus");
+  assert.equal(order[1]?.model, "gpt-5");
+  assert.equal("model" in (order[2] ?? {}), false);
+  const { fallback_model: _, ...noFallbackModel } = AGENT;
+  const without = harnessForRun(noFallbackModel, availability());
+  assert.equal("model" in (without[1] ?? {}), false);
 });
 
-test("harnessForRun waits with no fallback, a held fallback or one without an adapter", () => {
-  const { fallback_harness: _, ...none } = AGENT;
-  assert.equal(harnessForRun(none, heldSet("claude-code"), all), undefined);
-  assert.equal(harnessForRun(AGENT, heldSet("claude-code", "codex"), all), undefined);
-  assert.equal(
-    harnessForRun(AGENT, heldSet("claude-code"), (h) => h === "claude-code"),
-    undefined,
-  );
-  assert.equal(
-    harnessForRun({ ...AGENT, fallback_harness: "claude-code" }, heldSet("claude-code"), all),
-    undefined,
-  );
+test("harnessForRun drops a held harness, one with no adapter, and one not installed or signed in", () => {
+  assert.deepEqual(harnesses(AGENT, availability({ held: (h) => h === "claude-code" })), [
+    "codex",
+    "opencode",
+  ]);
+  assert.deepEqual(harnesses(AGENT, availability({ hasAdapter: (h) => h !== "codex" })), [
+    "claude-code",
+    "opencode",
+  ]);
+  assert.deepEqual(harnesses(AGENT, availability({ installed: (h) => h !== "codex" })), [
+    "claude-code",
+    "opencode",
+  ]);
+  assert.deepEqual(harnesses(AGENT, availability({ signedIn: (h) => h !== "codex" })), [
+    "claude-code",
+    "opencode",
+  ]);
+});
+
+test("harnessForRun is empty when no harness is left", () => {
+  assert.deepEqual(harnesses(AGENT, availability({ held: () => true })), []);
+});
+
+test("pickHarness takes the first after `from` and wraps around", () => {
+  const order = harnessForRun(AGENT, availability());
+  assert.equal(pickHarness(order)?.harness, "claude-code");
+  assert.equal(pickHarness(order, "claude-code")?.harness, "codex");
+  assert.equal(pickHarness(order, "codex")?.harness, "opencode");
+  assert.equal(pickHarness(order, "opencode")?.harness, "claude-code", "wraps around");
+  assert.equal(pickHarness(order, "cursor")?.harness, "claude-code", "unknown from: first");
+  assert.equal(pickHarness([], "claude-code"), undefined);
+});
+
+test("switchWhy names a harness failure and leaves task failures on the same harness", () => {
+  const run = (fields: Partial<RunResult>): RunResult => ({
+    status: "error",
+    exitCode: 1,
+    durationMs: 1,
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    ...fields,
+  });
+  assert.equal(switchWhy(run({ status: "timeout" })), "timed out");
+  assert.equal(switchWhy(run({ status: "limited" })), "hit its usage limit");
+  assert.equal(switchWhy(run({ reason: "auth" })), "is not signed in");
+  assert.equal(switchWhy(run({ reason: "stalled" })), "stalled");
+  assert.equal(switchWhy(run({ error: "exited with code 1" })), "failed (exited with code 1)");
+  assert.equal(switchWhy(run({ reason: "turn_cap", error: "turn cap (80 turns)" })), undefined);
+  assert.equal(switchWhy(run({ status: "ok" })), undefined);
+  assert.equal(switchWhy(run({ status: "cancelled" })), undefined);
 });
 
 test("activeLimits lists only holds in force, with the backoff flag", () => {

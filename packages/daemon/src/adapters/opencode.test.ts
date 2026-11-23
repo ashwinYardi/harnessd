@@ -381,7 +381,7 @@ test("a run over the turn cap is killed and reports turn cap", async () => {
   const result = await r.result;
   assert.equal(result.status, "error");
   assert.equal(result.error, "turn cap (1 turns)");
-  assert.equal(result.reason, undefined);
+  assert.equal(result.reason, "turn_cap");
   // The run ended at the cap, not at its 10 s budget.
   assert.ok(Date.now() - started < 5_000);
 });
