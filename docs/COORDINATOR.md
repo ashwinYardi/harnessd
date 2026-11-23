@@ -65,14 +65,22 @@ Term notes and drafts are never overwritten. A sink without `term` or `draft` sk
 
 On `proceed`, the issue's state is left alone; the loop goes on to split and assign the issue (docs/LOOP.md).
 
-## Split (D-040)
-After the grill, the coordinator plans the parts. The plan prompt asks for **one part by default**: one part is one PR. It allows more parts only when the issue's Size is L, or when one part cannot fit the M budget (about 2 hours).
+## Split (D-049)
+After the grill, the coordinator plans the parts. `MAX_PLAN_PARTS` is 6.
+
+**Size rule.** A ticket stays one part only when it is small: one area (backend or UI), about 3 Done-when items or fewer, and about 5 files or fewer. Otherwise it splits. A part is at most size M.
+
+**Area split.** Backend work (shared types, API, daemon) comes first, in a backend part, and blocks the frontend part. The frontend part builds against the merged contract and runs on the frontend agent with its design checks. Docs changes go in the part whose code they describe; there is no separate docs part. Parts that list the same file are chained with `blocks`.
+
+**Brief shape.** Each part has these fields, and the part's Linear description shows them as sections in this order: the marker, **Goal**, **Done when** (the covered parent items, copied as text), **Files**, **Steps**, **Verify** (each command with what its output must show) and **Out of scope**. **Decisions**, **Grill calls**, **Why**, **Spec links** and **Size** follow. The part's own Done when replaces the parent's checklist. There is no free-text **Brief** section.
 
 - Each part has an optional `decisions` array of `{ id, line }`. `id` is `D-NNN` and names a record in `docs/decisions/`; `line` is one sentence on why it applies. The plan prompt asks for it, and forbids "Read docs/SPEC.md and docs/decisions/" in the brief (D-044).
-- A missing or empty `decisions` array is valid. A malformed entry makes the plan invalid and the loop uses the one-part fallback. A well-formed id with no record file is dropped with one log line and does not cause the fallback.
-- Each part also has an optional `calls` array of grill call numbers (1-based) or question texts. The split writes a **Decisions** section (`- D-031: …`) and a **Grill calls** section (question → answer) in the sub-issue body, next to **Brief**. The part prompt carries the body, so the builder and QA send-back runs see both.
-- The one-part fallback carries every grill call and no decision ids.
-- The reply has an optional `reason`. A plan with more than one part **must** state why the issue cannot ship as one part. A multi-part plan with no reason is invalid and the loop uses the one-part fallback.
-- The split comment on the parent lists the parts and the QA sub-issue, then `Reason for more than one part: …`.
-- Parts of a split issue run one after another (docs/LOOP.md "Dispatch"). Each part blocks the next, so only one PR of the parent is open at a time.
-- `MAX_PLAN_PARTS` still caps a plan, and an L part is refused: the issue goes to Needs input (D-014).
+- A missing or empty `decisions` array is valid. A malformed entry makes the plan invalid. A well-formed id with no record file is dropped with one log line.
+- Each part also has an optional `calls` array of grill call numbers (1-based) or question texts. The split writes a **Decisions** section (`- D-031: …`) and a **Grill calls** section (question → answer) after the brief in the sub-issue body. The part prompt carries the body, so the builder and QA send-back runs see both.
+- The reply always states a `reason`: why the issue stayed one part, or why it split. A plan with no reason is invalid.
+
+**Plan check.** The loop rejects a plan where a part has an empty field, more than about 3 Done-when items or more than 8 files, or where one parent Done-when item is in no part. It also rejects a part that lists a file in the other area, a frontend part before a backend part, and a docs-only part in a multi-part plan. A rejected plan goes back to the coordinator once with every error. A second bad plan moves the parent to Needs input (MET-160).
+
+**Split note.** The parent's split comment lists each part with its key, role, size, goal and files, and the QA sub-issue with its blockers. It always ends with `Reason: …`, for a split and for a one-part plan.
+
+Parts of a split issue run one after another (docs/LOOP.md "Dispatch"). Each part blocks the next, so only one PR of the parent is open at a time. An L part is refused: the issue goes to Needs input (D-014).

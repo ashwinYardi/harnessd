@@ -1,5 +1,6 @@
-// QA: every part's PR is checked against the parent's "Done when" checklist before merge
-// (SPEC "Autonomy loop" step 5, D-013, D-014). See docs/LOOP.md "QA".
+// QA: every part's PR is checked against that part's own "Done when" items and Verify
+// section before merge (SPEC "Autonomy loop" step 5, D-013, D-014, D-049). See docs/LOOP.md
+// "QA".
 //
 // For each part: find its PR (the part key is in the title), check the PR head out in a
 // worktree of its own, run the repo's tests in harnessd, then run the QA agent for a
@@ -31,7 +32,7 @@ import { agentPromptHeader } from "./dispatch.ts";
 import { extractJson, runForReply } from "./grill.ts";
 import type { Notifier } from "./notifier.ts";
 import { type AgentMemory, memorySection } from "./prompt.ts";
-import { readPartMarker } from "./split.ts";
+import { extractSection, readPartMarker, sectionChecklist, sectionList } from "./split.ts";
 import type { LoopState } from "./state.ts";
 
 function message(error: unknown): string {
@@ -209,7 +210,8 @@ const ITEM_KEYS = ["text", "pass", "evidence"];
 
 /**
  * Strictly validates a verdict: known keys only, booleans for `pass` and `testsPassed`,
- * non-empty `text` and `evidence`, and exactly one item per "Done when" item.
+ * non-empty `text` and `evidence`, and exactly one item per checked item, the last of
+ * which is `Verify` (MET-162).
  */
 export function parseQaVerdict(text: string, expectedItems: number): ParsedQaVerdict {
   let value: unknown;
@@ -231,7 +233,7 @@ export function parseQaVerdict(text: string, expectedItems: number): ParsedQaVer
   if (value.items.length !== expectedItems) {
     return {
       ok: false,
-      error: `items: expected ${expectedItems}, one per "Done when" item, got ${value.items.length}`,
+      error: `items: expected ${expectedItems}, one per item plus "Verify", got ${value.items.length}`,
     };
   }
   const items: QaVerdictItem[] = [];
@@ -261,8 +263,34 @@ export function parseQaVerdict(text: string, expectedItems: number): ParsedQaVer
 
 // --- the prompt ---------------------------------------------------------------
 
+/** The part's own "Done when" items; empty for a body from before MET-162. */
+export function partItems(part: LinkedIssue): string[] {
+  return sectionChecklist(extractSection(part.description, "Done when")).map(oneLine);
+}
+
+/** The commands of the part's own Verify section, each with what it must show. */
+export function partVerify(part: LinkedIssue): string[] {
+  return sectionList(extractSection(part.description, "Verify")).map(oneLine);
+}
+
+/**
+ * What QA checks for one part (MET-162): the part's own "Done when" items, plus one last
+ * item "Verify". A body without those sections falls back to the parent's checklist.
+ */
+export function qaChecklist(parent: Issue, part?: LinkedIssue): string[] {
+  if (part !== undefined && partHasItems(part)) {
+    return [...partItems(part), "Verify"];
+  }
+  return parentChecklist(parent);
+}
+
+/** True when the part body has both its Done-when items and its Verify section. */
+function partHasItems(part: LinkedIssue): boolean {
+  return partItems(part).length > 0 && partVerify(part).length > 0;
+}
+
 /** The parent's "Done when" items; an issue without any is checked "as written". */
-export function qaChecklist(parent: Issue): string[] {
+function parentChecklist(parent: Issue): string[] {
   if (parent.doneWhen.length === 0) return [`Matches ${parent.key} as written`];
   return parent.doneWhen.map((d) => oneLine(d.text));
 }
@@ -286,6 +314,8 @@ export interface QaPromptInput {
   /** Undefined when `gh` could not list them. */
   files: PullRequestFile[] | undefined;
   checklist: string[];
+  /** The part's Verify commands, each with what it must show (MET-162). */
+  verify?: string[];
   tests: TestRun;
   /** The vaults, when the loop synced the harness files into the checkout (MET-55). */
   memory?: AgentMemory;
@@ -305,8 +335,10 @@ function describeCi(checks: PullRequestCheck[] | undefined): string {
 
 /** The QA agent's prompt for one PR. */
 export function buildQaPrompt(input: QaPromptInput): string {
-  const { agent, qa, parent, part, pr, diff, ci, files, checklist, tests, memory } = input;
+  const { agent, qa, parent, part, pr, diff, ci, files, checklist, verify, tests, memory } = input;
   const out = agentPromptHeader(agent, qa);
+  const ownItems = partHasItems(part);
+  const doneWhen = ownItems ? `${part.key}: ${part.title}` : `${parent.key}: ${parent.title}`;
 
   let fileList: string;
   if (files === undefined) fileList = "(could not list them; run `gh pr diff`)";
@@ -341,21 +373,26 @@ export function buildQaPrompt(input: QaPromptInput): string {
     `## Tests\nharnessd ran the repo's tests in this worktree before you started: ${describeTests(tests)}.\n` +
       `\`\`\`text\n${tail(tests.output, MAX_TEST_TAIL) || "(no output)"}\n\`\`\``,
     `## Part brief\n${part.description.trim() || "(none)"}`,
-    `## Done when (${parent.key}: ${parent.title})\n${checklist.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
+    `## Done when (${doneWhen})\n${checklist.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
+    ...(verify !== undefined && verify.length > 0
+      ? [
+          `## Verify\nRun each command in the part brief and quote its result as the evidence for the last item:\n${verify.map((v) => `- ${v}`).join("\n")}`,
+        ]
+      : []),
     [
       "## How to verify",
-      "- Read this part's brief, the decision IDs it names in the part body, the parent's \"Done when\", the diff, the CI result and the tests. Do not read docs/SPEC.md or every decision record.",
+      "- Read this part's brief, the decision IDs it names in the part body, the part's \"Done when\" and Verify sections, the diff, the CI result and the tests. Do not read docs/SPEC.md or every decision record.",
       "- Judge from this diff, the CI result and the tests. Open a file only to check a line the diff touches.",
       "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
       "- An item passes only with concrete evidence: a file and line, a test name, or command output.",
-      "- An item outside this part's brief passes when this PR does not break it and another part covers it; say so in the evidence.",
+      "- The last item, `Verify`, passes only when each Verify command ran and its result is quoted.",
       "- `testsPassed` is false when any test or check you ran fails.",
     ].join("\n"),
   );
   if (memory) out.push(memorySection(memory));
   out.push(
     `## Verdict\nYour final message is strict JSON only, no prose and no code fence, with exactly ${checklist.length} ` +
-      `item(s), one per "Done when" item in the order above, \`text\` copied from the list:\n${QA_VERDICT_SHAPE}`,
+      `item(s), one per item above in the order listed, \`text\` copied from the list:\n${QA_VERDICT_SHAPE}`,
   );
   return `${out.join("\n\n")}\n`;
 }
@@ -532,7 +569,6 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
   const now = deps.now ?? Date.now;
   const log = deps.log ?? (() => {});
   const deadline = now() + input.budgetMs;
-  const checklist = qaChecklist(parent);
   const cancelled = () => deps.signal?.aborted === true;
   let limited = false;
   let spent: TokenUsage = emptyTokenUsage();
@@ -563,6 +599,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
   }
 
   async function review(part: LinkedIssue): Promise<PrReview> {
+    const checklist = qaChecklist(parent, part);
     let pr: PullRequest | undefined;
     try {
       pr = await deps.github.findPrForIssue(part.key);
@@ -659,6 +696,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
             ...(status === undefined ? {} : { ci: status.checks }),
             files,
             checklist,
+            verify: partVerify(part),
             tests,
             ...(deps.memory ? { memory: deps.memory } : {}),
           }),

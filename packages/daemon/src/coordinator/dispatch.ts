@@ -9,6 +9,7 @@ import type {
   Size,
 } from "@harnessd/shared";
 import { type AgentMemory, memorySection } from "./prompt.ts";
+import { extractSection, withoutSections } from "./split.ts";
 import type { QaFeedback } from "./state.ts";
 
 /**
@@ -57,16 +58,36 @@ export interface PartPromptInput {
   memory?: AgentMemory;
 }
 
-export function agentPromptHeader(agent: ResolvedAgentConfig, issue: LinkedIssue): string[] {
+export function agentPromptHeader(
+  agent: ResolvedAgentConfig,
+  issue: LinkedIssue,
+  body = issue.description.trim(),
+): string[] {
   const parts = [`You are ${agent.name}, the harnessd ${agent.role} agent.`];
   parts.push("This issue is already grilled and split; ignore any instruction to run the grill.");
   if (agent.instructions.trim()) parts.push(`## Your instructions\n${agent.instructions.trim()}`);
   const parent = issue.parentKey ? `Parent: ${issue.parentKey}\n` : "";
   parts.push(
-    `## Task ${issue.key}: ${issue.title}\nURL: ${issue.url}\n${parent}Size: ${issue.size ?? "M"}\n\n` +
-      issue.description.trim(),
+    `## Task ${issue.key}: ${issue.title}\nURL: ${issue.url}\n${parent}Size: ${issue.size ?? "M"}\n\n${body}`.trimEnd(),
   );
   return parts;
+}
+
+/** The brief sections of a part body, in the order MET-162 fixes. */
+const BRIEF_SECTIONS = ["Goal", "Done when", "Files", "Steps", "Verify", "Out of scope"] as const;
+
+/**
+ * The brief of a part body: the sections MET-162 fixes, in order. Undefined for a body
+ * from before the change, which has no Goal section.
+ */
+export function partBrief(description: string): string | undefined {
+  if (extractSection(description, "Goal") === "") return undefined;
+  const blocks: string[] = [];
+  for (const name of BRIEF_SECTIONS) {
+    const text = extractSection(description, name);
+    if (text !== "") blocks.push(`**${name}**\n${text}`);
+  }
+  return blocks.join("\n\n");
 }
 
 function shipSteps(branch: string, what: string, review?: QaFeedback): string {
@@ -86,7 +107,15 @@ function shipSteps(branch: string, what: string, review?: QaFeedback): string {
 
 /** The prompt of a backend or frontend run. */
 export function buildPartPrompt({ agent, issue, branch, review, memory }: PartPromptInput): string {
-  const parts = agentPromptHeader(agent, issue);
+  // MET-162: a part body with the fixed brief starts with that brief. The rules, decisions,
+  // memory and other text follow. A body from before the change keeps the whole body.
+  const brief = partBrief(issue.description);
+  const body =
+    brief === undefined
+      ? issue.description.trim()
+      : withoutSections(issue.description, BRIEF_SECTIONS);
+  const parts = brief === undefined ? [] : [brief];
+  parts.push(...agentPromptHeader(agent, issue, body));
   if (review) {
     const where = [
       review.prUrl ? `PR: ${review.prUrl}` : "",

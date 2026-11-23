@@ -633,7 +633,7 @@ test("a Ready issue splits into backend and frontend parts plus a QA part they b
   assert.equal(report.split[0], parent.key);
   const splitComment = t.linear.comments.find((c) => c.body.startsWith("**Coordinator split**"));
   assert.match(splitComment?.body ?? "", new RegExp(`${qa.key} qa \\(M\\): blocked by`));
-  assert.match(splitComment?.body ?? "", /Reason for more than one part: The work does not fit/);
+  assert.match(splitComment?.body ?? "", /Reason: The work does not fit/);
 
   // The grill ran first and its comment came before the split comment.
   assert.ok(t.adapter.tasks[0]?.id.startsWith("grill-"));
