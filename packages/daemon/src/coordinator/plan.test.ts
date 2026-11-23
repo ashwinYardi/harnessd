@@ -311,6 +311,125 @@ test("checkPlan caps a part at 3 Done-when items and 8 files", () => {
   if (ok.ok) assert.ok(MAX_PART_FILES === 8 && ok.parts[0]?.files.length === 8);
 });
 
+test("a small one-area plan stays one part (MET-161)", () => {
+  const small = issue({
+    doneWhen: [
+      { text: "API serves avatars", checked: false },
+      { text: "API test passes", checked: false },
+      { text: "Docs match", checked: false },
+    ],
+  });
+  const one = parsePlanReply(
+    reply([
+      brief({
+        doneWhen: [1, 2, 3],
+        files: ["packages/daemon/src/api.ts", "packages/shared/src/types.ts", "docs/LOOP.md"],
+      }),
+    ]),
+  );
+  assert.equal(one.ok, true);
+  if (one.ok) assert.deepEqual(checkPlan(one.parts, small), []);
+});
+
+test("checkPlan rejects a part that lists a file in the wrong area (MET-161)", () => {
+  const part = (fields: Partial<PlanPart>): PlanPart => ({
+    role: "backend",
+    title: "work",
+    size: "S",
+    goal: "Do the work.",
+    doneWhen: [1],
+    files: ["packages/daemon/src/a.ts"],
+    steps: ["Do it."],
+    verify: [{ run: "pnpm test", expect: "passes" }],
+    outOfScope: "Other parts.",
+    ...fields,
+  });
+  const backend = checkPlan(
+    [part({ files: ["packages/daemon/src/a.ts", "packages/ui/app/src/x.tsx"] })],
+    issue(),
+  ).join("\n");
+  assert.match(
+    backend,
+    /parts\[0\]\.files\[1\]: a backend part lists the frontend file "packages\/ui\/app\/src\/x\.tsx"/,
+  );
+  for (const file of [
+    "packages/daemon/src/a.ts",
+    "packages/shared/src/a.ts",
+    "packages/cli/src/a.ts",
+  ]) {
+    const errors = checkPlan(
+      [part({ role: "frontend", files: [file, "packages/ui/app/src/x.tsx"] })],
+      issue(),
+    );
+    assert.ok(
+      errors.some((error) => error.includes(`a frontend part lists the backend file "${file}"`)),
+      `${file}: ${errors.join("\n")}`,
+    );
+  }
+  // Docs, DESIGN.md and the daemon-side UI serving sit in either area.
+  assert.deepEqual(
+    checkPlan(
+      [
+        part({
+          files: [
+            "packages/shared/src/a.ts",
+            "packages/cli/src/a.ts",
+            "packages/ui/src/serve.ts",
+            "docs/LOOP.md",
+            "DESIGN.md",
+          ],
+        }),
+      ],
+      issue(),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    checkPlan(
+      [
+        part({
+          role: "frontend",
+          files: ["packages/ui/app/src/x.tsx", "packages/ui/src/serve.ts", "docs/LOOP.md"],
+        }),
+      ],
+      issue(),
+    ),
+    [],
+  );
+});
+
+test("checkPlan rejects a frontend part that comes before a backend part (MET-161)", () => {
+  const frontend = brief({ role: "frontend", files: ["packages/ui/app/src/x.tsx"] });
+  const backend = brief({ role: "backend", files: ["packages/daemon/src/a.ts"] });
+  const reversed = parsePlanReply(reply([frontend, backend]));
+  assert.equal(reversed.ok, true);
+  if (reversed.ok) {
+    const errors = checkPlan(reversed.parts, issue()).join("\n");
+    assert.match(errors, /parts\[1\]: a backend part comes after the frontend part at parts\[0\]/);
+    assert.match(errors, /plan the backend part first/);
+  }
+  const ordered = parsePlanReply(reply([backend, frontend]));
+  assert.equal(ordered.ok, true);
+  if (ordered.ok) assert.deepEqual(checkPlan(ordered.parts, issue()), []);
+});
+
+test("checkPlan rejects a docs-only part in a multi-part plan (MET-161)", () => {
+  const two = parsePlanReply(
+    reply([brief({ files: ["docs/LOOP.md"] }), brief({ files: ["packages/daemon/src/a.ts"] })]),
+  );
+  assert.equal(two.ok, true);
+  if (two.ok) {
+    const errors = checkPlan(two.parts, issue());
+    assert.equal(errors.length, 1, errors.join("\n"));
+    assert.match(errors[0] ?? "", /parts\[0\]\.files: a part in a multi-part plan needs code/);
+    assert.match(errors[0] ?? "", /docs go in the part whose code they describe/);
+  }
+  // A one-part docs-only ticket is still a valid plan.
+  const one = parsePlanReply(reply([brief({ files: ["docs/LOOP.md", "DESIGN.md"] })]));
+  assert.equal(one.ok, true);
+  if (one.ok) assert.deepEqual(checkPlan(one.parts, issue()), []);
+});
+
 test("checkPlan rejects a Done-when number outside the parent list", () => {
   const parsed = parsePlanReply(reply([brief({ doneWhen: [2] })]));
   assert.equal(parsed.ok, true);
@@ -338,7 +457,10 @@ test("checkPlan rejects a plan that leaves a parent Done-when item in no part", 
   }
   // Two parts that name the same item cover everything: one item may sit in two parts.
   const both = parsePlanReply(
-    reply([brief({ role: "backend" }), brief({ role: "frontend", doneWhen: [1, 2] })]),
+    reply([
+      brief({ role: "backend" }),
+      brief({ role: "frontend", doneWhen: [1, 2], files: ["packages/ui/app/src/board.tsx"] }),
+    ]),
   );
   assert.equal(both.ok, true);
   if (both.ok) assert.deepEqual(checkPlan(both.parts, two), []);
@@ -412,8 +534,8 @@ test("buildPlanPrompt carries the brief fields, the rules, the issue and the con
   });
   for (const text of [
     "Reply with strict JSON only",
-    "Plan ONE part by default",
-    '"reason" must say why the issue is one part or why it splits',
+    "Size rule: keep the issue as ONE part only when it is small",
+    '"reason" must say why the issue stayed one part or why it split',
     "L is not allowed",
     "Do not plan QA",
     "## Coordinator instructions\nKeep parts small.",
@@ -429,6 +551,20 @@ test("buildPlanPrompt carries the brief fields, the rules, the issue and the con
   assert.ok(prompt.includes('"doneWhen": [1, 2]'), prompt);
   assert.ok(prompt.includes('"verify": [{ "run"'), prompt);
   assert.ok(prompt.includes('"outOfScope"'), prompt);
+});
+
+test("the plan prompt states the size rule, the area split and the docs rule (MET-161)", () => {
+  const prompt = buildPlanPrompt({ issue: issue(), context: { spec: "", decisions: [] } });
+  assert.doesNotMatch(prompt, /Plan ONE part by default/);
+  assert.match(prompt, /one area \(backend or UI\), about 3 Done-when items or fewer/);
+  assert.match(prompt, /about 5 files or fewer/);
+  assert.match(prompt, /Every part is at most size M/);
+  assert.match(prompt, /backend and UI work go in separate parts/i);
+  assert.match(prompt, /The backend part .* comes first/);
+  assert.match(prompt, /Docs changes go in the part whose code they describe/);
+  assert.match(prompt, /A backend part lists no file under "packages\/ui\/app\/"/);
+  assert.match(prompt, /A frontend part lists no file in "packages\/daemon\/"/);
+  assert.match(prompt, /also for a one-part plan/i);
 });
 
 test("the plan prompt asks for decision IDs and forbids the read-everything line (D-044)", () => {
