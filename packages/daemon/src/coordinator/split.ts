@@ -66,6 +66,49 @@ export function extractSection(body: string, name: string): string {
   return out.join("\n").trim();
 }
 
+/** The body without the named sections, their headers and their text. Other lines stay. */
+export function withoutSections(body: string, names: readonly string[]): string {
+  const wanted = new Set(names.map((name) => name.toLowerCase()));
+  const out: string[] = [];
+  let skipping = false;
+  for (const line of body.split(/\r?\n/)) {
+    const header = SECTION_HEADER.exec(line)?.[1]?.trim().toLowerCase();
+    if (header !== undefined && wanted.has(header)) {
+      skipping = true;
+      continue;
+    }
+    if (skipping && SECTION_START.test(line)) {
+      skipping = false;
+    }
+    if (!skipping) out.push(line);
+  }
+  return out.join("\n").trim();
+}
+
+/** The items of a bullet-list section, as `- item` or `* item`. Empty when absent. */
+export function sectionList(section: string): string[] {
+  const out: string[] = [];
+  for (const line of section.split(/\r?\n/)) {
+    const match = /^\s*[-*]\s+(.+?)\s*$/.exec(line);
+    if (match?.[1]) out.push(match[1]);
+  }
+  return out;
+}
+
+/** The text of each checklist line in a `Done when` section, checked or not. */
+export function sectionChecklist(section: string): string[] {
+  const out: string[] = [];
+  for (const line of section.split(/\r?\n/)) {
+    const match = /^\s*[-*]\s*\[[ xX]\]\s*(.+?)\s*$/.exec(line);
+    if (match?.[1]) out.push(match[1]);
+  }
+  return out;
+}
+
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 function doneWhenChecklist(issue: Issue, suffix = ""): string {
   if (issue.doneWhen.length === 0) return `- [ ] Matches ${issue.key} as written${suffix}`;
   return issue.doneWhen.map((d) => `- [ ] ${d.text}${suffix}`).join("\n");
@@ -274,18 +317,24 @@ export async function splitIssue(
   return { parts, qa, created, related };
 }
 
-/** The parent comment after a split that created something. */
+/**
+ * The parent comment after a split that created something (MET-162). Each part names its
+ * goal and files; the QA line names the parts that block it. The note always ends with
+ * `Reason: <reason>`, for a split and for a one-part plan.
+ */
 export function formatSplitComment(result: SplitResult, reason?: string): string {
   const lines = [`**Coordinator split**: ${result.parts.length + 1} sub-issues.`, ""];
   for (const part of result.parts) {
     const role = readPartMarker(part.description)?.role ?? "part";
-    lines.push(`- ${part.key} ${role} (${part.size ?? "?"}): ${part.title}`);
+    const goal = oneLine(extractSection(part.description, "Goal") || part.title);
+    const files = sectionList(extractSection(part.description, "Files"));
+    lines.push(`- ${part.key} ${role} (${part.size ?? "?"}): ${goal}`);
+    lines.push(`  Files: ${files.length > 0 ? files.join(", ") : "(none)"}`);
   }
   lines.push(
     `- ${result.qa.key} qa (${result.qa.size ?? "?"}): blocked by ${result.parts.map((p) => p.key).join(", ")}`,
+    "",
+    `Reason: ${reason?.trim() ? oneLine(reason) : "not given"}`,
   );
-  if (result.parts.length > 1) {
-    lines.push("", `Reason for more than one part: ${reason ?? "not given"}`);
-  }
   return `${lines.join("\n")}\n`;
 }

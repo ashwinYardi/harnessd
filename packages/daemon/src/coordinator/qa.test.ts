@@ -71,6 +71,34 @@ const qa = issue("MET-53", { parentId: parent.id, description: partMarker("qa"),
 const backend = issue("MET-51", { parentId: parent.id, description: partMarker("backend") });
 const frontend = issue("MET-52", { parentId: parent.id, description: partMarker("frontend") });
 
+/** A part body with the fixed brief (MET-162). */
+const briefed = issue("MET-51", {
+  parentId: parent.id,
+  description: [
+    partMarker("backend"),
+    "",
+    "**Goal**",
+    "Serve the avatar field.",
+    "",
+    "**Done when**",
+    "- [ ] Avatars are served",
+    "",
+    "**Files**",
+    "- src/avatars.ts",
+    "",
+    "**Steps**",
+    "1. Add the field.",
+    "",
+    "**Verify**",
+    "- `pnpm test` → passes",
+    "",
+    "**Out of scope**",
+    "The UI.",
+    "",
+    "**Size**: S",
+  ].join("\n"),
+});
+
 function pr(number: number, key: string): PullRequest {
   return {
     number,
@@ -222,10 +250,10 @@ function harness(options: Options = {}) {
   };
 }
 
-const verdict = (pass: boolean[], testsPassed = true) =>
+const verdict = (pass: boolean[], testsPassed = true, items = qaChecklist(parent)) =>
   JSON.stringify({
     items: pass.map((p, i) => ({
-      text: qaChecklist(parent)[i],
+      text: items[i] ?? `item ${i + 1}`,
       pass: p,
       evidence: p ? `src/avatars.ts:${i + 1}` : `nothing covers item ${i + 1}`,
     })),
@@ -303,6 +331,40 @@ test("every item and the tests pass: approve at the PR head, then QA stays Ready
     /MET-51 \[PR #7\]\(https:\/\/github\.test\/o\/r\/pull\/7\): approved \(\[review\]\(https:\/\/github\.test\/o\/r\/pull\/7#review-1\)\)/,
   );
   assert.deepEqual(s.pings, []);
+});
+
+test("QA checks the part's own Done-when items and Verify, not the parent's list (MET-162)", async () => {
+  const h = harness({
+    replies: [verdict([true, true], true, qaChecklist(parent, briefed))],
+    prs: { [briefed.key]: pr(7, briefed.key) },
+  });
+  h.input.parts = [briefed];
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "approved");
+  assert.equal(h.reviews[0]?.event, "APPROVE");
+  assert.deepEqual(result.reviews[0]?.failing, [], "the part's item and its Verify item pass");
+  const prompt = h.tasks[0]?.prompt ?? "";
+  assert.match(prompt, /## Done when \(MET-51: Title MET-51\)\n1\. Avatars are served\n2\. Verify/);
+  assert.match(
+    prompt,
+    /## Verify\nRun each command in the part brief[^\n]*\n- `pnpm test` → passes/,
+  );
+  assert.doesNotMatch(prompt, /It has tests/);
+  assert.match(prompt, /exactly 2 item\(s\)/);
+  assert.match(prompt, /The last item, `Verify`, passes only when each Verify command ran/);
+});
+
+test("the verdict needs one item per part Done-when item plus Verify (MET-162)", async () => {
+  // One item for a part that has one Done-when item and a Verify item: unusable.
+  const h = harness({
+    replies: [verdict([true], true, qaChecklist(parent, briefed))],
+    prs: { [briefed.key]: pr(7, briefed.key) },
+  });
+  h.input.parts = [briefed];
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "error");
+  assert.equal(h.reviews.length, 0, "no review for an unusable verdict");
+  assert.match(result.reviews[0]?.error ?? "", /expected 2.*got 1/);
 });
 
 test("the QA agent run gets the role turn cap", async () => {
@@ -624,8 +686,14 @@ test("parseQaVerdict is strict", () => {
   );
 });
 
-test("qaChecklist falls back to the issue as written", () => {
+test("qaChecklist uses the part's own items plus Verify, else the parent's list", () => {
   assert.deepEqual(qaChecklist(parent), ["Avatars are served", "It has tests"]);
+  assert.deepEqual(qaChecklist(parent, briefed), ["Avatars are served", "Verify"]);
+  assert.deepEqual(
+    qaChecklist(parent, backend),
+    ["Avatars are served", "It has tests"],
+    "a part body without the sections falls back to the parent's checklist",
+  );
   assert.deepEqual(qaChecklist(issue("MET-9")), ["Matches MET-9 as written"]);
 });
 

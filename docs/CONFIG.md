@@ -104,7 +104,7 @@ The weighted sum is `input + output + round(cached × limits.cached_token_weight
 
 The other roles have caps in code, not in config: **QA S 40 and M 80** for the parent's size, and **coordinator grill and plan 50**. QA judges one PR against a checklist, and grill and plan write one reply. A QA cap of 40 for every size stopped the QA of a 17-file M PR twice with no verdict (D-047).
 
-A run at its cap ends `error` with `turn cap (<n> turns)` and no failure reason. It is not shipped; it follows the normal error rule: one attempt is counted, the worktree is kept when it holds unshipped work, and the next attempt resumes the same branch (D-039). A turn-capped QA run counts as a QA failure, as an agent error does. A turn-capped grill or plan run is an error run, and the plan uses the one-part fallback.
+A run at its cap ends `error` with `turn cap (<n> turns)` and no failure reason. It is not shipped; it follows the normal error rule: one attempt is counted, the worktree is kept when it holds unshipped work, and the next attempt resumes the same branch (D-039). A turn-capped QA run counts as a QA failure, as an agent error does. A turn-capped grill or plan run is an error run; the plan retries once, and a second bad plan moves the parent to Needs input (D-049).
 
 **The numbers come from MET-131 and D-043.**
 - A MET-128 build averaged about **22.6k weighted tokens per turn** (1,470,055 weighted tokens over about 65 turns). 80 turns is about **1.8M** weighted tokens, under the S budget of 3M. 160 turns is about **3.6M**, under the M budget of 6M.

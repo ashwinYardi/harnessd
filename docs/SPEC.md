@@ -37,7 +37,7 @@ Instruction layers merge in this order: global → workspace → agent (schema a
 1. The coordinator picks the highest-priority Ready issue.
 2. It checks the issue for ambiguity. It resolves what it can from the spec, decisions, code and vault, and records the call as a comment and a decision note (contract: docs/COORDINATOR.md).
 3. Escalation happens only when the "worth asking" test passes (D-011). Then the issue moves to **Needs input**, one Slack ping goes out, and the loop moves on to the next issue.
-4. It plans one part, one PR, by default, splits only when the issue is too big for one PR (and says why), then assigns and runs each part in its own git worktree and branch. Parts of a split issue run one after another; a part starts only after the one before it is merged (split, dispatch and state file: docs/LOOP.md).
+4. It plans the parts by the size rule: a ticket stays one part only when it is one area with about 3 acceptance criteria or fewer and about 5 files or fewer. A larger ticket splits, backend before frontend, each part with a fixed brief and its own Done when (D-049). Then it assigns and runs each part in its own git worktree and branch. Parts of a split issue run one after another; a part starts only after the one before it is merged (split, dispatch and state file: docs/LOOP.md).
 5. A PR opens and CI runs. QA verifies against the "Done when" checklist.
 6. Auto-merge happens when the gate passes (D-013). Otherwise the PR is sent back once, then escalated.
 7. Issue → Done, then a Slack line. Repeat.

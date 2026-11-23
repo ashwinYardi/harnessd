@@ -32,6 +32,40 @@ const issue: LinkedIssue = {
   blockers: [],
 };
 
+const briefIssue: LinkedIssue = {
+  ...issue,
+  description: [
+    "harnessd part: backend",
+    "Part of [MET-40](https://linear.test/MET-40): Agents show avatars. Role: backend.",
+    "",
+    "**Goal**",
+    "Serve the avatar field from the API.",
+    "",
+    "**Done when**",
+    "- [ ] Avatars show",
+    "",
+    "**Files**",
+    "- packages/daemon/src/api.ts",
+    "",
+    "**Steps**",
+    "1. Add the avatar field.",
+    "",
+    "**Verify**",
+    "- `pnpm test` → the API tests pass",
+    "",
+    "**Out of scope**",
+    "The board UI.",
+    "",
+    "**Decisions**",
+    "- D-014: Sets the part sizes.",
+    "",
+    "**Why**",
+    "People tell agents apart.",
+    "",
+    "**Size**: S",
+  ].join("\n"),
+};
+
 test("budgets are S 30 minutes and M 2 hours; a missing size is M; L has none", () => {
   assert.equal(budgetMs("S", limits), 30 * 60_000);
   assert.equal(budgetMs("M", limits), 120 * 60_000);
@@ -84,6 +118,44 @@ test("the part prompt layers the instructions and the brief; the daemon ships th
   }
   assert.ok(!prompt.includes("Commit your changes"));
   assert.ok(!prompt.includes("gh pr create --title"));
+});
+
+test("a part body with the fixed brief starts with that brief and keeps the rest after (MET-162)", () => {
+  const prompt = buildPartPrompt({ agent, issue: briefIssue, branch: "met-41-serve-avatars" });
+  assert.ok(prompt.startsWith("**Goal**\nServe the avatar field from the API."), prompt);
+  const order = [
+    "**Goal**",
+    "**Done when**",
+    "**Files**",
+    "**Steps**",
+    "**Verify**",
+    "**Out of scope**",
+    "## Your instructions",
+    "## Task MET-41",
+    "**Decisions**",
+    "**Why**",
+  ].map((section) => prompt.indexOf(section));
+  assert.ok(
+    order.every((n) => n >= 0),
+    prompt,
+  );
+  assert.deepEqual(
+    order,
+    [...order].sort((a, b) => a - b),
+    prompt,
+  );
+  assert.equal(prompt.match(/\*\*Goal\*\*/g)?.length, 1, "the brief appears once");
+  assert.ok(prompt.includes("**Decisions**\n- D-014: Sets the part sizes."), prompt);
+});
+
+test("a body without a Goal section keeps the full body as before (MET-162)", () => {
+  const prompt = buildPartPrompt({ agent, issue, branch: "met-41-serve-avatars" });
+  assert.ok(
+    prompt.includes(
+      '## Task MET-41: Serve "avatars"\nURL: https://linear.test/MET-41\nParent: MET-40\nSize: S\n\nharnessd part: backend\n**Brief**\nAdd it.',
+    ),
+    prompt,
+  );
 });
 
 test("a part sent back by QA gets the failing items and is told to update its open PR", () => {

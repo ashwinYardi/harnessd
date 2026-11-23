@@ -210,11 +210,29 @@ test("splitIssue creates the parts and a QA sub-issue that every part blocks", a
   assert.equal(
     formatSplitComment(result, "The UI needs the API first."),
     "**Coordinator split**: 3 sub-issues.\n\n" +
-      "- MET-51 backend (S): Serve avatars\n" +
-      "- MET-52 frontend (M): Show avatars\n" +
+      "- MET-51 backend (S): Serve the avatar field from the API.\n" +
+      "  Files: packages/daemon/src/api.ts\n" +
+      "- MET-52 frontend (M): Render the avatar on each agent card.\n" +
+      "  Files: packages/ui/src/board.tsx\n" +
       "- MET-53 qa (M): blocked by MET-51, MET-52\n" +
-      "\nReason for more than one part: The UI needs the API first.\n",
+      "\nReason: The UI needs the API first.\n",
   );
+});
+
+test("a one-part split note lists its goal and files and ends with the reason (MET-162)", () => {
+  const one = child("MET-51", formatPartDescription(parent, plan[0] as PlanPart, "backend"));
+  const note = formatSplitComment(
+    { parts: [one], qa: child("MET-53", `${partMarker("qa")}`, "QA"), created: [], related: 0 },
+    "One area fits one part.",
+  );
+  assert.ok(
+    note.includes(
+      "- MET-51 backend (S): Serve the avatar field from the API.\n  Files: packages/daemon/src/api.ts",
+    ),
+    note,
+  );
+  assert.ok(note.endsWith("\nReason: One area fits one part.\n"), note);
+  assert.ok(!note.includes("Reason for more than one part"), note);
 });
 
 test("parts that share a file are chained, and the backend part blocks the frontend part (MET-161)", async () => {

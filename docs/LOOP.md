@@ -37,32 +37,43 @@ The coordinator's harness then returns a plan as strict JSON:
   "parts": [{
     "role": "backend",
     "title": "…",
-    "prompt": "…",
     "size": "S",
+    "goal": "one sentence",
+    "doneWhen": [1, 2],
+    "files": ["repo/relative/path.ts"],
+    "steps": ["one action"],
+    "verify": [{ "run": "command", "expect": "what its output must show" }],
+    "outOfScope": "what this part leaves to another part",
     "decisions": [{ "id": "D-NNN", "line": "why it applies" }],
     "calls": [1, "a grill question this part follows"]
   }],
-  "reason": "why the issue cannot ship as one part (required with more than one)"
+  "reason": "why the issue stayed one part, or why it split"
 }
 ```
 
 `role` is `backend` or `frontend`, and `size` is `S` or `M`. Only the parts the plan lists are created.
 
+**Size rule (D-049).** A ticket stays one part only when it is small: one area (backend or UI), about 3 Done-when items or fewer, and about 5 files or fewer. Otherwise it splits. A part is at most size M. `MAX_PLAN_PARTS` (6) is the outer cap.
+
+**Area split (D-049).** Backend work (shared types, API, daemon) comes first, in a backend part, and blocks the frontend part. The frontend part builds against the merged contract and runs on the frontend agent with its design checks. Docs changes go in the part whose code they describe; there is no separate docs part. Parts that list the same file are chained with `blocks`.
+
+**Brief shape (D-049).** Each part has `goal`, `doneWhen`, `files`, `steps`, `verify` and `outOfScope`, all non-empty. The sub-issue body shows them as **Goal**, **Done when**, **Files**, **Steps**, **Verify** and **Out of scope** after the marker. **Decisions**, **Grill calls**, **Why**, **Spec links** and **Size** follow. The part's own Done when replaces the parent's full checklist. There is no free-text **Brief** section.
+
+**Plan check (D-049).** The loop rejects a plan where a part has an empty field, more than about 3 Done-when items or more than 8 files, or where one parent Done-when item is in no part. It also rejects a part that lists a file in the other area, a frontend part before a backend part, and a docs-only part in a multi-part plan. A rejected plan goes back to the coordinator once with every error. A second bad plan moves the parent to Needs input.
+
 **Role-scoped reading (D-044).** Each part names the decision records it depends on in `decisions`, one line each. A malformed entry makes the plan invalid. A well-formed id with no record file is dropped with one log line. The brief names those IDs and does not tell the agent to read the whole spec or every record. The builder reads its brief and the named records only.
 
-**Grill calls (D-044).** Each part names the grill calls that apply to it in `calls`: the call numbers, or their question texts. The one-part fallback carries every call and no decision ids.
-
-**One part by default (D-040).** One part is one PR. The plan may have more only when the issue's Size is L, or when one part cannot fit the M budget. A plan with more than one part and no `reason` is invalid: the loop uses the one-part fallback and the split comment says so. A valid split comment also states the reason.
-
-If the reply is unusable, the fallback is one part: frontend when the issue has the `ui` label, otherwise backend, at the issue's size.
+**Grill calls (D-044).** Each part names the grill calls that apply to it in `calls`: the call numbers, or their question texts. The split writes them after the brief in the sub-issue body.
 
 harnessd always adds a QA sub-issue, "QA: <parent title>". Every part blocks it (a Linear relation of type `blocks`).
 
-**Serial parts (D-040).** When the split has more than one part, part 1 blocks part 2, part 2 blocks part 3, and so on. A part starts only after the part before it is merged (Done), so no two PRs of one parent are open at the same time. An interrupted split adds the missing relations on the next tick.
+**Serial parts (D-040, D-049).** When the split has more than one part, part 1 blocks part 2, part 2 blocks part 3, and so on. A part starts only after the part before it is merged (Done), so no two PRs of one parent are open at the same time. An interrupted split adds the missing relations on the next tick.
 
 Sub-issues are Linear children of the parent, in the same team and project.
 - They start in Ready and carry the parent's area label.
-- Their body copies the parent's Why and Done when, and adds Size, the decision IDs the part depends on, the grill calls it follows, and the part's brief.
+- Their body has the part marker, the fixed brief, Size, the decision IDs the part depends on, the grill calls it follows, Why and Spec links.
+
+**Split note (D-049).** The parent comment lists each part with its key, role, size, goal and files, and the QA sub-issue with its blockers. It always ends with `Reason: <reason>`, for a split and for a one-part plan.
 
 When the split is done, the parent moves to In Progress.
 
@@ -226,7 +237,7 @@ harnessd resume                    # "Resumed."
 - **Restart.** Paused survives a restart. `harnessd run` while paused starts the API and the loop in the paused state and prints `harnessd run: paused since … Run "harnessd resume" to dispatch again.`
 
 ## QA
-QA reviews one PR, when that part reaches In Review (D-040). It checks the PR against the parent's "Done when" list before anything merges (D-013). QA does not read the whole repo.
+QA reviews one PR, when that part reaches In Review (D-040, D-049). It checks the part's own "Done when" and "Verify" sections before anything merges (D-013). A part body from before D-049 has no such sections; QA then falls back to the parent's checklist. QA does not read the whole repo.
 
 Before a review, the loop reads the PR's `headRefOid` and compares it with the part's **reviewed head** in `loop.json`:
 - the same sha as an approved part: QA does not run again;
@@ -237,11 +248,13 @@ For each part:
 1. **Find the PR.** It is the newest open PR with the part's key in its title (`gh pr list --json`). With no PR, the part is sent back.
 2. **Check it out.** The PR's head commit is checked out in a worktree of its own, detached, and removed afterwards even when it has local changes. A QA checkout is never kept (D-041).
 3. **Run the tests.** harnessd runs `qa.setup_command` and then `qa.test_command` (default `pnpm test`) in that worktree.
-4. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the parent's "Done when"; the part brief, including the decision IDs it names and the grill calls it follows; the CI result from `statusCheckRollup`; and the harnessd test result. It reads the part diff, those decision IDs, the parent's "Done when", CI and the tests. It does not read `docs/SPEC.md` or every record. It judges from the diff, the CI result and the tests, and opens a file only to check a line the diff touches. Its last message must be strict JSON, one item per "Done when" item:
+4. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the part's own "Done when" and "Verify" sections; the part brief, including the decision IDs it names and the grill calls it follows; the CI result from `statusCheckRollup`; and the harnessd test result. It reads the part diff, those decision IDs, the part's items and Verify commands, CI and the tests. It does not read `docs/SPEC.md` or every record. It judges from the diff, the CI result and the tests, and opens a file only to check a line the diff touches. Its last message must be strict JSON, one item per part "Done when" item plus one last item, `Verify`:
 
    ```json
    { "items": [{ "text": "…", "pass": true, "evidence": "…" }], "testsPassed": true }
    ```
+
+   In the `Verify` item, QA runs each command of the part's Verify section and quotes its result as the evidence. A part body without the sections uses the parent's checklist, as before.
 
 5. **Review.** harnessd approves only when every item passes and the tests pass, both when harnessd ran them and for the agent. Otherwise it requests changes and lists each failing item with its evidence. GitHub does not let you approve your own PR, so when every agent shares one `gh` login, the verdict is posted as a comment review.
 
@@ -285,7 +298,7 @@ Every run has a turn cap (D-045). A builder part run uses `limits.max_turns` for
 - **Claude Code** gets `--max-turns <n>`. A result with subtype `error_max_turns` ends the run `error` with `turn cap (<n> turns)` and no failure reason.
 - **Codex and OpenCode** count turns in the adapter: OpenCode at `step_start`, Codex at each completed tool item. At the cap the adapter kills the process group the way a cancel does and reports `error` with `turn cap (<n> turns)`, not `cancelled`.
 
-A turn-capped run follows the normal error rule: it counts one attempt, it is not shipped, and the keep guard keeps unshipped work for the next attempt. A turn-capped QA run counts as a QA failure. A turn-capped grill or plan run is an error run, and the plan uses the one-part fallback. The wall-clock budget and the token budget stay; the first limit that a run hits stops it, and a time-budget stop stays `timeout`.
+A turn-capped run follows the normal error rule: it counts one attempt, it is not shipped, and the keep guard keeps unshipped work for the next attempt. A turn-capped QA run counts as a QA failure. A turn-capped grill or plan run is an error run; the plan retries once, and a second bad plan moves the parent to Needs input (D-049). The wall-clock budget and the token budget stay; the first limit that a run hits stops it, and a time-budget stop stays `timeout`.
 
 ## Usage limits
 A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.
