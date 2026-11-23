@@ -924,6 +924,27 @@ test("the QA prompt names the live app's url and kind, and the app stops after t
   assert.equal(stopped, 1, "the app stops after an approval");
 });
 
+test("a pause that lands after the app started still stops the app", async () => {
+  resetQaAppFailures();
+  const abort = new AbortController();
+  const h = harness({ replies: [verdict([true, true])], commands: liveQa });
+  let stopped = 0;
+  const result = await runQa(h.input, {
+    ...h.deps,
+    signal: abort.signal,
+    startApp: async () => {
+      // The pause lands while a passing health probe is in flight, after the app is up.
+      abort.abort();
+      return appStarted(async () => {
+        stopped += 1;
+      });
+    },
+  });
+  assert.equal(result.cancelled, true);
+  assert.equal(stopped, 1, "the app started before the pause, and it is stopped");
+  assert.equal(h.tasks.length, 0, "no agent runs after a pause");
+});
+
 test("the app stops when the QA agent hits a usage limit", async () => {
   resetQaAppFailures();
   const h = harness({

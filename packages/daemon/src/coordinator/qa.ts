@@ -739,6 +739,9 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
             ...(deps.signal === undefined ? {} : { signal: deps.signal }),
             log: (line) => log(`${qa.key}: ${line}`),
           });
+          // Keep the app the moment it exists: a pause that lands right after the health
+          // probe must still stop it in the teardown (D-051).
+          if (started.ok) app = started.app;
           if (cancelled()) return stopped(part, pr);
           if (!started.ok) {
             const reason = `app ${started.step} failed: ${started.detail}`;
@@ -751,7 +754,6 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
             appSetup = reason;
             log(`${qa.key}: ${reason} on this head ${failures} times, running without it`);
           } else {
-            app = started.app;
             clearAppSetupFailures(part.id);
           }
         }
