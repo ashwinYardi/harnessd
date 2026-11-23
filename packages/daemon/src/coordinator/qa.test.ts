@@ -7,6 +7,7 @@ import {
   type HarnessAdapter,
   type Issue,
   type LinkedIssue,
+  type QaConfig,
   type ResolvedAgentConfig,
   type RunResult,
   type Task,
@@ -24,11 +25,13 @@ import {
   type QaRunInput,
   type QaRunResult,
   qaChecklist,
+  resetQaAppFailures,
   runQa,
   runQaTests,
   runShellCommand,
   settleQa,
 } from "./qa.ts";
+import type { QaAppStart, QaAppStep } from "./qa-app.ts";
 import { partMarker } from "./split.ts";
 import { emptyLoopState } from "./state.ts";
 
@@ -152,6 +155,7 @@ interface Options {
   /** Make postReview refuse these events. */
   refuse?: string[];
   checkoutFails?: boolean;
+  commands?: QaConfig;
 }
 
 function harness(options: Options = {}) {
@@ -222,7 +226,7 @@ function harness(options: Options = {}) {
     },
     adapter,
     agent,
-    commands: { setup_command: "", test_command: "pnpm test" },
+    commands: options.commands ?? { setup_command: "", test_command: "pnpm test" },
     runCommand,
     onWorktree: (path: string) => worktreeLog.push(path),
     log: (line: string) => logs.push(line),
@@ -290,6 +294,27 @@ function settleDeps() {
 
 function setupErrorReview(part: LinkedIssue, error: string): PrReview {
   return { part, decision: "error", failing: [], setup: true, error };
+}
+
+/** A repo that declares a live web product (MET-177, D-051). */
+const liveQa: QaConfig = {
+  setup_command: "",
+  test_command: "pnpm test",
+  kind: "web",
+  start: "pnpm dev --port {port}",
+  url: "http://127.0.0.1:{port}",
+  health: "/health",
+};
+
+function appStarted(stop: () => Promise<void> = async () => {}): QaAppStart {
+  return {
+    ok: true,
+    app: { kind: "web", url: "http://127.0.0.1:4321", port: 4321, stop },
+  };
+}
+
+function appFailed(step: QaAppStep = "start", detail = "boom | exit 1"): QaAppStart {
+  return { ok: false, step, detail, error: "exited with code 1" };
 }
 
 test("every item and the tests pass: approve at the PR head, then QA stays Ready", async () => {
@@ -814,4 +839,155 @@ test("a limited QA run stops the round: no review, the worktree is removed, no m
   assert.equal(h.tasks.length, 1, "the next part waits for the harness");
   assert.equal(h.reviews.length, 0);
   assert.deepEqual(h.removed, ["/wt/qa-sha7"]);
+});
+
+test("an app start failure is a setup error: no QA failure, no review, one re-queued line", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, true])], commands: liveQa });
+  const result = await runQa(h.input, { ...h.deps, startApp: async () => appFailed() });
+  assert.equal(result.outcome, "error");
+  assert.equal(result.reviews[0]?.setup, true);
+  assert.equal(result.reviews[0]?.error, "app start failed: boom | exit 1");
+  assert.equal(h.tasks.length, 0, "the QA agent does not run");
+  assert.deepEqual(h.reviews, [], "nothing is posted");
+  assert.equal(h.removed[0], "/wt/qa-sha7", "the checkout is still removed");
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, { [parent.id]: 1 }, "no QA failure is counted");
+  assert.deepEqual(state.qaFeedback, {});
+  assert.deepEqual(s.moves, [{ issueId: qa.id, state: "Ready" }]);
+  assert.deepEqual(s.comments, []);
+  assert.deepEqual(s.pings, []);
+  assert.deepEqual(s.logs, ["MET-53: QA not judged (app start failed: boom | exit 1), re-queued"]);
+});
+
+test("each app step failure keeps its step name in the setup marker", async () => {
+  resetQaAppFailures();
+  for (const step of ["build", "seed", "start", "health"] as const) {
+    resetQaAppFailures();
+    const h = harness({ replies: [verdict([true, true])], commands: liveQa });
+    const result = await runQa(h.input, {
+      ...h.deps,
+      startApp: async () => appFailed(step, `${step} broke`),
+    });
+    assert.equal(result.reviews[0]?.setup, true, step);
+    assert.equal(result.reviews[0]?.error, `app ${step} failed: ${step} broke`, step);
+    assert.equal(h.tasks.length, 0, step);
+  }
+});
+
+test("the third app setup error on one head runs with no app; a new head resets the count", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, true])], commands: liveQa });
+  const startApp = async (): Promise<QaAppStart> => appFailed();
+  assert.equal((await runQa(h.input, { ...h.deps, startApp })).reviews[0]?.setup, true);
+  assert.equal((await runQa(h.input, { ...h.deps, startApp })).reviews[0]?.setup, true);
+  assert.equal(h.tasks.length, 0, "two setup errors run no agent");
+
+  const third = await runQa(h.input, { ...h.deps, startApp });
+  assert.equal(h.tasks.length, 1, "the third runs the agent with no live app");
+  assert.equal(third.outcome, "approved");
+  assert.equal(third.reviews[0]?.appSetup, "app start failed: boom | exit 1");
+  assert.doesNotMatch(h.tasks[0]?.prompt ?? "", /## App/, "no app is named when none runs");
+
+  const newHead = await runQa(h.input, {
+    ...h.deps,
+    github: {
+      ...h.deps.github,
+      findPrForIssue: async () => ({ ...(pr(7, backend.key) as PullRequest), headRefOid: "sha8" }),
+    },
+    startApp,
+  });
+  assert.equal(newHead.reviews[0]?.setup, true, "a new head starts the count again");
+  assert.equal(h.tasks.length, 1, "the agent does not run for the new head's first failure");
+});
+
+test("the QA prompt names the live app's url and kind, and the app stops after the review", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, true])], commands: liveQa });
+  let stopped = 0;
+  const result = await runQa(h.input, {
+    ...h.deps,
+    startApp: async () =>
+      appStarted(async () => {
+        stopped += 1;
+      }),
+  });
+  assert.equal(result.outcome, "approved");
+  assert.match(
+    h.tasks[0]?.prompt ?? "",
+    /## App\nThe product is running at http:\/\/127\.0\.0\.1:4321 \(kind web\)\./,
+  );
+  assert.equal(stopped, 1, "the app stops after an approval");
+});
+
+test("the app stops when the QA agent hits a usage limit", async () => {
+  resetQaAppFailures();
+  const h = harness({
+    replies: [{ status: "limited", error: "usage limit reached" }],
+    commands: liveQa,
+  });
+  let stopped = 0;
+  const result = await runQa(h.input, {
+    ...h.deps,
+    startApp: async () =>
+      appStarted(async () => {
+        stopped += 1;
+      }),
+  });
+  assert.equal(result.limited, true);
+  assert.equal(stopped, 1, "a limited round still stops the app");
+});
+
+test("the app stops when the round errors after it started", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, true])], commands: liveQa });
+  let stopped = 0;
+  const result = await runQa(h.input, {
+    ...h.deps,
+    startApp: async () =>
+      appStarted(async () => {
+        stopped += 1;
+      }),
+    prepare: async () => {
+      throw new Error("bad config.toml");
+    },
+  });
+  assert.equal(result.reviews[0]?.setup, true);
+  assert.equal(stopped, 1, "a setup error after start still stops the app");
+});
+
+test("a failing test command skips the app lifecycle, so a broken build is a test result", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, true])], testExit: 1, commands: liveQa });
+  let called = false;
+  const result = await runQa(h.input, {
+    ...h.deps,
+    startApp: async () => {
+      called = true;
+      return appStarted();
+    },
+  });
+  assert.equal(called, false);
+  assert.equal(result.outcome, "changes_requested");
+  assert.match(result.reviews[0]?.failing[0] ?? "", /Tests: `pnpm test` exited with code 1/);
+});
+
+test("without a [qa] table no app starts and the prompt has no App section", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, true])] });
+  let called = false;
+  const result = await runQa(h.input, {
+    ...h.deps,
+    startApp: async () => {
+      called = true;
+      return appFailed();
+    },
+  });
+  assert.equal(result.outcome, "approved");
+  assert.equal(called, false, "the default [qa] table declares no product");
+  assert.doesNotMatch(h.tasks[0]?.prompt ?? "", /## App/);
 });
