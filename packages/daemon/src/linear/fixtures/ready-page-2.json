@@ -8,6 +8,7 @@
           "title": "Daemon pauses on the kill switch",
           "description": "**Why**\nThe human needs a global stop.\n\n**Done when**\n- [ ] harnessd pause stops new tasks\n\n**Spec links**\n- docs/SPEC.md#linear-filing-rules\n\n**Size**: S",
           "priority": 1,
+          "sortOrder": 2,
           "url": "https://linear.app/meta-harness/issue/met-17",
           "createdAt": "2026-11-03T07:45:00.000Z",
           "state": {
@@ -54,6 +55,7 @@
           "title": "Board shows per-agent activity",
           "description": "**Why**\nVisibility.\n\n**Done when**\n- [ ] Each agent row shows its current task\n\n**Spec links**\n- docs/SPEC.md#linear-filing-rules\n\n**Size**: L",
           "priority": 4,
+          "sortOrder": 4,
           "url": "https://linear.app/meta-harness/issue/met-18",
           "createdAt": "2026-10-28T16:20:00.000Z",
           "state": {

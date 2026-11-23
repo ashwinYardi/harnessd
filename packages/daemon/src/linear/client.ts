@@ -6,7 +6,14 @@ import {
   type SecretReader,
   type WorkflowStateName,
 } from "@harnessd/shared";
-import { compareByPriority, parseIssue, parseLinkedIssue, type RawIssue } from "./parse.ts";
+import {
+  compareByPriority,
+  compareQueueOrder,
+  keyNumber,
+  parseIssue,
+  parseLinkedIssue,
+  type RawIssue,
+} from "./parse.ts";
 
 export const LINEAR_ENDPOINT = "https://api.linear.app/graphql";
 
@@ -94,6 +101,7 @@ const ISSUE_FIELDS = `
   title
   description
   priority
+  sortOrder
   url
   createdAt
   state { name }
@@ -181,16 +189,16 @@ export class LinearClient {
     this.#maxRetryWaitMs = options.maxRetryWaitMs ?? 60_000;
   }
 
-  /** Ready issues that nothing unfinished blocks, urgent first, then oldest first. */
+  /** Ready issues that nothing unfinished blocks, in Linear's queue order. */
   async listReady(options: ListReadyOptions): Promise<Issue[]> {
     const raws = await this.#listIssues(READY_ISSUES_QUERY, readyFilter(options));
     return raws
       .map((raw) => {
         const issue = this.#remember(raw);
-        return { issue, priority: issue.priority, createdAt: raw.createdAt };
+        return { issue, order: { ...issue, createdAt: raw.createdAt } };
       })
       .filter(({ issue }) => issue.blockedBy.length === 0)
-      .sort(compareByPriority)
+      .sort((a, b) => compareQueueOrder(a.order, b.order))
       .map(({ issue }) => issue);
   }
 
@@ -521,8 +529,6 @@ export function boardFilter(options: ListReadyOptions): Record<string, unknown> 
     or: [{ state: { type: { neq: "completed" } } }, { completedAt: { gt: "-P7D" } }],
   };
 }
-
-const keyNumber = (key: string): number => Number(key.slice(key.lastIndexOf("-") + 1)) || 0;
 
 /** Urgent (1) to low (4), then no priority (0); then by key number. */
 function compareBoard(a: BoardIssue, b: BoardIssue): number {

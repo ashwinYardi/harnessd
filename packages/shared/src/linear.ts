@@ -35,6 +35,8 @@ export interface Issue {
   /** Markdown body; empty string when the issue has none. */
   description: string;
   priority: Priority;
+  /** Linear's manual list position; a lower value sits higher in the list. */
+  sortOrder?: number;
   /** Workflow state name as named in Linear; usually a WorkflowStateName. */
   state: string;
   labels: string[];

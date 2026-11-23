@@ -14,6 +14,8 @@ export interface RawIssue {
   title: string;
   description?: string | null;
   priority?: number | null;
+  /** Linear's manual list position. */
+  sortOrder?: number | null;
   url: string;
   createdAt: string;
   /** Selected by the board query only. */
@@ -97,6 +99,7 @@ export function parseIssue(raw: RawIssue): Issue {
     url: raw.url,
     blockedBy: unfinishedBlockers(raw),
   };
+  if (raw.sortOrder !== undefined && raw.sortOrder !== null) issue.sortOrder = raw.sortOrder;
   if (raw.projectMilestone?.name) issue.milestone = raw.projectMilestone.name;
   return issue;
 }
@@ -132,4 +135,30 @@ export function compareByPriority(
 ): number {
   const rank = (p: Priority) => (p === 0 ? 5 : p);
   return rank(a.priority) - rank(b.priority) || Date.parse(a.createdAt) - Date.parse(b.createdAt);
+}
+
+/** The fields the Ready queue orders by. */
+export interface QueueOrderFields {
+  sortOrder?: number;
+  priority: Priority;
+  createdAt: string;
+  key: string;
+}
+
+/** The key's number: "MET-12" gives 12. */
+export const keyNumber = (key: string): number => Number(key.slice(key.lastIndexOf("-") + 1)) || 0;
+
+/**
+ * The Ready queue (D-006): Linear's manual order, then urgent first, no priority last,
+ * then oldest createdAt, then key number. An issue with no sortOrder sorts after the rest.
+ */
+export function compareQueueOrder(a: QueueOrderFields, b: QueueOrderFields): number {
+  const order = (item: QueueOrderFields) => item.sortOrder ?? Number.POSITIVE_INFINITY;
+  const rank = (p: Priority) => (p === 0 ? 5 : p);
+  return (
+    order(a) - order(b) ||
+    rank(a.priority) - rank(b.priority) ||
+    Date.parse(a.createdAt) - Date.parse(b.createdAt) ||
+    keyNumber(a.key) - keyNumber(b.key)
+  );
 }
