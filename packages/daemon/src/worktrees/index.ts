@@ -16,6 +16,9 @@ import { excludesEnv } from "./excludes.ts";
 
 const run = promisify(execFile);
 
+/** A git call that hangs fails instead of stalling the daemon (or a test) forever. */
+export const GIT_TIMEOUT_MS = 60_000;
+
 /** Maximum length of a whole branch name, `met-<n>-<slug>` included. */
 export const MAX_BRANCH_LENGTH = 60;
 
@@ -89,6 +92,7 @@ async function git(cwd: string, args: string[], env?: NodeJS.ProcessEnv): Promis
     const { stdout } = await run("git", ["-C", cwd, ...args], {
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...env },
       maxBuffer: 16 * 1024 * 1024,
+      timeout: GIT_TIMEOUT_MS,
     });
     return stdout;
   } catch (error) {

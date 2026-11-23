@@ -19,6 +19,9 @@ import { excludesEnv } from "../worktrees/excludes.ts";
 
 const run = promisify(execFile);
 
+/** A git call that hangs fails the run instead of stalling the daemon forever. */
+export const SYNC_GIT_TIMEOUT_MS = 60_000;
+
 export interface WorktreeSyncInput {
   /** The main repo: its `.harnessd/` is the workspace layer and holds the workspace vault. */
   repoDir: string;
@@ -49,6 +52,7 @@ async function git(cwd: string, args: string[], env: NodeJS.ProcessEnv): Promise
   const { stdout } = await run("git", ["-C", cwd, "--literal-pathspecs", ...args], {
     env,
     maxBuffer: 16 * 1024 * 1024,
+    timeout: SYNC_GIT_TIMEOUT_MS,
   });
   return stdout;
 }

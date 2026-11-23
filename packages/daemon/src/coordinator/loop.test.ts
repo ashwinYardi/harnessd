@@ -63,6 +63,17 @@ after(async () => {
   for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
+// A harness run exports GIT_CONFIG_* that point at that run's own excludes file. The daemon
+// itself has no such entries, and these tests make their own repos, so drop them: no test
+// may inherit git config from the process that happens to start it. The owner's global
+// config (a credential helper or a hook, say) must not decide whether a test git call ends.
+for (const key of Object.keys(process.env)) {
+  if (key === "GIT_CONFIG_COUNT" || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(key))
+    delete process.env[key];
+}
+process.env.GIT_TERMINAL_PROMPT = "0";
+process.env.GIT_CONFIG_GLOBAL = "/dev/null";
+
 // --- fake Linear -----------------------------------------------------------
 
 interface FakeIssue {
@@ -1717,6 +1728,7 @@ test("a QA send-back resumes the builder's session with only the failures", asyn
   assert.doesNotMatch(fix?.prompt ?? "", /## Task /);
   assert.doesNotMatch(fix?.prompt ?? "", /## When you are done/);
   assert.ok(t.logs.includes(`${backend.key}: resuming Claude Code session`));
+  await t.loop.pause();
 });
 
 test("a send-back with no stored session starts cold and logs why", async () => {
@@ -1731,6 +1743,7 @@ test("a send-back with no stored session starts cold and logs why", async () => 
   assert.match(fix?.prompt ?? "", /## Task /, "the cold run reads the brief again");
   assert.doesNotMatch(fix?.prompt ?? "", /## QA send-back/);
   assert.ok(t.logs.includes(`${backend.key}: cold run (no session)`));
+  await t.loop.pause();
 });
 
 test("a send-back on another harness than the stored session starts cold and logs why", async () => {
@@ -1754,6 +1767,7 @@ test("a send-back on another harness than the stored session starts cold and log
   assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
   assert.equal(t.adapter.runs().at(-1)?.resumeSessionId, undefined);
   assert.ok(t.logs.includes(`${backend.key}: cold run (session on Claude Code, run on Codex)`));
+  await t.loop.pause();
 });
 
 test("a failed resume counts no attempt, drops the session and runs cold next", async () => {
@@ -1777,6 +1791,7 @@ test("a failed resume counts no attempt, drops the session and runs cold next", 
   assert.equal(cold?.resumeSessionId, undefined);
   assert.match(cold?.prompt ?? "", /## QA requested changes/);
   assert.ok(t.logs.includes(`${backend.key}: cold run (no session)`));
+  await t.loop.pause();
 });
 
 // --- merge gate (MET-14) ----------------------------------------------------
@@ -2111,9 +2126,13 @@ test("start ticks now and on every interval; stop cancels the timer", async () =
 
 // --- restart, with real git worktrees and the file store --------------------
 
+/** A git call that hangs fails the test in 30 s instead of stalling the whole file. */
+const TEST_GIT_TIMEOUT_MS = 30_000;
+
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", ["-C", cwd, "-c", "user.name=t", "-c", "user.email=t@t", ...args], {
     encoding: "utf8",
+    timeout: TEST_GIT_TIMEOUT_MS,
   }).trim();
 }
 
@@ -2121,7 +2140,7 @@ test("a restart re-queues runs left in loop.json, cleans their worktrees and cou
   const root = await mkdtemp(join(tmpdir(), "harnessd-loop-"));
   roots.push(root);
   const repo = join(root, "repo");
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -2173,7 +2192,7 @@ test("a restart keeps a dirty worktree instead of removing it, then resumes it",
   const root = await mkdtemp(join(tmpdir(), "harnessd-requeue-keep-"));
   roots.push(root);
   const repo = join(root, "repo");
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -2212,7 +2231,7 @@ test("a worktree with unshipped work is kept, commented on and recorded in inter
   const root = await mkdtemp(join(tmpdir(), "harnessd-keep-"));
   roots.push(root);
   const repo = join(root, "repo");
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -2253,7 +2272,7 @@ test("a failed, cancelled or limited run keeps its worktree when it holds unship
     const root = await mkdtemp(join(tmpdir(), `harnessd-keep-${status}-`));
     roots.push(root);
     const repo = join(root, "repo");
-    execFileSync("git", ["init", "-q", "-b", "main", repo]);
+    execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
     await writeFile(join(repo, "README.md"), "hi\n");
     git(repo, "add", ".");
     git(repo, "commit", "-q", "-m", "init");
@@ -2613,7 +2632,7 @@ test("pause stops a real claude run within 10 s; the paused flag and the worktre
   roots.push(root);
   const repo = join(root, "repo");
   const home = join(root, "home");
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -2788,8 +2807,10 @@ test("a run in a repo with no committed skills sees the pack, the memory vault a
   const origin = join(root, "origin.git");
   const repo = join(root, "repo");
   const home = join(root, "home");
-  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
-  execFileSync("git", ["clone", "-q", origin, repo]);
+  execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin], {
+    timeout: TEST_GIT_TIMEOUT_MS,
+  });
+  execFileSync("git", ["clone", "-q", origin, repo], { timeout: TEST_GIT_TIMEOUT_MS });
   await writeFile(join(repo, "README.md"), "hi\n");
   git(repo, "add", ".");
   git(repo, "commit", "-q", "-m", "init");
@@ -3300,7 +3321,10 @@ test("a merge in a pass the pause flag stops is checked after resume, with its t
 // --- the ship step (MET-109) -------------------------------------------------
 
 function remoteGit(remote: string, ...args: string[]): string {
-  return execFileSync("git", ["--git-dir", remote, ...args], { encoding: "utf8" }).trim();
+  return execFileSync("git", ["--git-dir", remote, ...args], {
+    encoding: "utf8",
+    timeout: TEST_GIT_TIMEOUT_MS,
+  }).trim();
 }
 
 /** A repo with a bare origin, its identity set, and a `.harnessd/` for the sync. */
@@ -3309,8 +3333,8 @@ async function shipRepo() {
   roots.push(root);
   const repo = join(root, "repo");
   const remote = join(root, "remote.git");
-  execFileSync("git", ["init", "-q", "--bare", remote]);
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", ["init", "-q", "--bare", remote], { timeout: TEST_GIT_TIMEOUT_MS });
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
   git(repo, "config", "user.name", "Test Owner");
   git(repo, "config", "user.email", "owner@example.test");
   await writeFile(join(repo, "README.md"), "hi\n");
