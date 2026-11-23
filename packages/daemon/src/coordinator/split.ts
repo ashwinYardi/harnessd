@@ -87,7 +87,20 @@ export function resolvePartCalls(part: PlanPart, calls: readonly Call[]): Call[]
   return out;
 }
 
-/** Body of a backend or frontend sub-issue. */
+/** The parent's Done-when items a part covers, copied as text (MET-160). */
+export function partDoneWhen(parent: Issue, part: PlanPart): string[] {
+  if (parent.doneWhen.length === 0) return [`Matches ${parent.key} as written`];
+  const out: string[] = [];
+  for (const n of part.doneWhen) {
+    const item = parent.doneWhen[n - 1];
+    if (item !== undefined) out.push(item.text);
+  }
+  // The plan check proves that the numbers are in range. A hand-made part may still be
+  // empty: it then carries the issue as written, like QA does.
+  return out.length === 0 ? [`Matches ${parent.key} as written`] : out;
+}
+
+/** Body of a backend or frontend sub-issue: the part's fixed brief (MET-160). */
 export function formatPartDescription(
   parent: Issue,
   part: PlanPart,
@@ -101,16 +114,23 @@ export function formatPartDescription(
     partMarker(id),
     `Part of [${parent.key}](${parent.url}): ${parent.title}. Role: ${part.role}.`,
     "",
-    "**Why**",
-    why,
+    "**Goal**",
+    part.goal,
     "",
     "**Done when**",
-    doneWhenChecklist(parent),
+    ...partDoneWhen(parent, part).map((text) => `- [ ] ${text}`),
     "",
-    "**Spec links**",
-    `- ${parent.key}: ${parent.url}`,
+    "**Files**",
+    ...part.files.map((file) => `- ${file}`),
     "",
-    `**Size**: ${part.size}`,
+    "**Steps**",
+    ...part.steps.map((step, i) => `${i + 1}. ${step}`),
+    "",
+    "**Verify**",
+    ...part.verify.map((check) => `- \`${check.run}\` → ${check.expect}`),
+    "",
+    "**Out of scope**",
+    part.outOfScope,
     "",
   ];
   if (decisions.length > 0) {
@@ -123,7 +143,16 @@ export function formatPartDescription(
     for (const call of partCalls) lines.push(`- ${call.question} → ${call.answer}`);
     lines.push("");
   }
-  lines.push("**Brief**", part.prompt, "");
+  lines.push(
+    "**Why**",
+    why,
+    "",
+    "**Spec links**",
+    `- ${parent.key}: ${parent.url}`,
+    "",
+    `**Size**: ${part.size}`,
+    "",
+  );
   return lines.join("\n");
 }
 
@@ -246,11 +275,7 @@ export async function splitIssue(
 }
 
 /** The parent comment after a split that created something. */
-export function formatSplitComment(
-  result: SplitResult,
-  source: "model" | "fallback",
-  reason?: string,
-): string {
+export function formatSplitComment(result: SplitResult, reason?: string): string {
   const lines = [`**Coordinator split**: ${result.parts.length + 1} sub-issues.`, ""];
   for (const part of result.parts) {
     const role = readPartMarker(part.description)?.role ?? "part";
@@ -260,15 +285,7 @@ export function formatSplitComment(
     `- ${result.qa.key} qa (${result.qa.size ?? "?"}): blocked by ${result.parts.map((p) => p.key).join(", ")}`,
   );
   if (result.parts.length > 1) {
-    lines.push(
-      "",
-      reason
-        ? `Reason for more than one part: ${reason}`
-        : "Reason for more than one part: not given.",
-    );
-  }
-  if (source === "fallback") {
-    lines.push("", "The plan reply was unusable, so this is the one-part fallback.");
+    lines.push("", `Reason for more than one part: ${reason ?? "not given"}`);
   }
   return `${lines.join("\n")}\n`;
 }

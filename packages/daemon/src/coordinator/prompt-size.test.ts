@@ -187,8 +187,13 @@ test("role-scoped reading shrinks the builder's first turn (D-044)", () => {
   const afterPart: PlanPart = {
     role: "backend",
     title: issue.title,
-    prompt: `Implement ${issue.key} as written: every "Done when" item, with tests. Follow D-040 and D-043.`,
     size: issue.size ?? "M",
+    goal: `Implement ${issue.key} as written, with tests.`,
+    doneWhen: [1],
+    files: ["packages/daemon/src/index.ts"],
+    steps: ["Implement the change.", "Run the focused tests."],
+    verify: [{ run: "pnpm test", expect: "passes" }],
+    outOfScope: "Nothing.",
     decisions: [
       { id: "D-040", line: "One part is one PR." },
       { id: "D-043", line: "The token budget is weighted." },
@@ -198,8 +203,13 @@ test("role-scoped reading shrinks the builder's first turn (D-044)", () => {
   const beforePart: PlanPart = {
     role: "backend",
     title: issue.title,
-    prompt: `Implement ${issue.key} as written: every "Done when" item, with tests. ${OLD_READING_RULE}`,
     size: issue.size ?? "M",
+    goal: `Implement ${issue.key} as written, with tests.`,
+    doneWhen: [1],
+    files: ["packages/daemon/src/index.ts"],
+    steps: [`Implement the change. ${OLD_READING_RULE}`, "Run the focused tests."],
+    verify: [{ run: "pnpm test", expect: "passes" }],
+    outOfScope: "Nothing.",
   };
   const beforePrompt = buildPartPrompt({
     agent,
