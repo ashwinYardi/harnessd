@@ -21,6 +21,7 @@ test("no layers gives the defaults", () => {
   const merged = mergeLayers([]);
   assert.deepEqual(merged.limits, {
     max_concurrent: 1,
+    max_parents: 1,
     budget_minutes: { S: 30, M: 120 },
     token_budget: { S: 3_000_000, M: 6_000_000 },
     cached_token_weight: 0.1,
@@ -50,6 +51,7 @@ test("scalars override and tables deep-merge, later layer winning", () => {
   ]);
   assert.deepEqual(merged.limits, {
     max_concurrent: 5,
+    max_parents: 1,
     budget_minutes: { S: 10, M: 60 },
     token_budget: { S: 3_000_000, M: 6_000_000 },
     cached_token_weight: 0.1,
@@ -76,12 +78,22 @@ test("limits merge per key, the cached weight included", () => {
   ]);
   assert.deepEqual(merged.limits, {
     max_concurrent: 1,
+    max_parents: 1,
     budget_minutes: { S: 30, M: 120 },
     token_budget: { S: 1_000, M: 6_000_000 },
     cached_token_weight: 0.05,
     max_turns: { S: 40, M: 90 },
     qa_max_failures: 2,
   });
+});
+
+test("max_parents merges per layer, the workspace winning", () => {
+  const merged = mergeLayers([
+    layer("global", { settings: { limits: { max_parents: 2 } } }),
+    layer("workspace", { settings: { limits: { max_parents: 3 } } }),
+  ]);
+  assert.equal(merged.limits.max_parents, 3);
+  assert.equal(merged.limits.max_concurrent, 1);
 });
 
 test("qa commands default to pnpm and merge per key", () => {

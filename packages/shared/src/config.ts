@@ -23,6 +23,11 @@ export type BudgetSize = (typeof BUDGET_SIZES)[number];
 
 export interface LimitsConfig {
   max_concurrent: number;
+  /**
+   * Parents in flight at once, from a parent's grill until it is Done, Canceled or
+   * Needs input (D-050). Does not replace max_concurrent.
+   */
+  max_parents: number;
   budget_minutes: Record<BudgetSize, number>;
   /** Weighted tokens one parent may spend across its grill, plan, part and QA runs (D-043). */
   token_budget: Record<BudgetSize, number>;
@@ -324,6 +329,7 @@ export interface ResolvedAgentConfig {
 export const DEFAULT_SETTINGS: Settings = {
   limits: {
     max_concurrent: 1,
+    max_parents: 1,
     budget_minutes: { S: 30, M: 120 },
     token_budget: { S: 3_000_000, M: 6_000_000 },
     cached_token_weight: 0.1,
@@ -643,6 +649,7 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
   if (root.limits !== undefined) {
     const t = c.table(root.limits, "limits", [
       "max_concurrent",
+      "max_parents",
       "budget_minutes",
       "token_budget",
       "cached_token_weight",
@@ -652,6 +659,9 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
     const limits: NonNullable<ConfigFile["limits"]> = {};
     if (t.max_concurrent !== undefined) {
       limits.max_concurrent = c.positiveInt(t.max_concurrent, "limits.max_concurrent");
+    }
+    if (t.max_parents !== undefined) {
+      limits.max_parents = c.positiveInt(t.max_parents, "limits.max_parents");
     }
     if (t.budget_minutes !== undefined) {
       const b = c.table(t.budget_minutes, "limits.budget_minutes", BUDGET_SIZES);
