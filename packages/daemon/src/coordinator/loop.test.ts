@@ -33,7 +33,7 @@ import type {
   ReviewInput,
 } from "../github/client.ts";
 import type { CreateSubIssueInput, ListReadyOptions } from "../linear/client.ts";
-import { parseLinkedIssue, type RawIssue } from "../linear/parse.ts";
+import { compareQueueOrder, parseLinkedIssue, type RawIssue } from "../linear/parse.ts";
 import type { SelfUpdateResult, SelfUpdateTarget } from "../selfupdate/index.ts";
 import { createGitWorktrees, type TaskWorktrees, type Worktree } from "../worktrees/index.ts";
 import type { HoldEvent } from "./limits.ts";
@@ -84,6 +84,7 @@ interface FakeIssue {
   state: string;
   labels: string[];
   priority: Priority;
+  sortOrder?: number;
   parentId?: string;
   createdAt: string;
 }
@@ -140,7 +141,7 @@ class FakeLinear implements LoopLinear {
 
   raw(issue: FakeIssue): RawIssue {
     const parent = issue.parentId ? this.#get(issue.parentId) : undefined;
-    return {
+    const raw: RawIssue = {
       id: issue.id,
       identifier: issue.key,
       title: issue.title,
@@ -168,6 +169,8 @@ class FakeLinear implements LoopLinear {
           }),
       },
     };
+    if (issue.sortOrder !== undefined) raw.sortOrder = issue.sortOrder;
+    return raw;
   }
 
   #linked(issue: FakeIssue): LinkedIssue {
@@ -177,8 +180,8 @@ class FakeLinear implements LoopLinear {
   #ready(): LinkedIssue[] {
     return [...this.issues.values()]
       .filter((i) => i.state === "Ready")
-      .map((i) => this.#linked(i))
-      .sort((a, b) => a.priority - b.priority || a.key.localeCompare(b.key));
+      .sort((a, b) => compareQueueOrder(a, b))
+      .map((i) => this.#linked(i));
   }
 
   async listReady(_options: ListReadyOptions) {
@@ -587,6 +590,13 @@ function setup(
   return { loop, linear, adapter, wt, gh, commands, memory, notes, pings, logs };
 }
 
+/** The issue keys the loop grilled, in order, from `grill-MET-100-1` task ids. */
+function grilled(t: ReturnType<typeof setup>): string[] {
+  return t.adapter.tasks
+    .filter((task) => task.id.startsWith("grill-"))
+    .map((task) => task.id.slice("grill-".length).replace(/-\d+$/, ""));
+}
+
 /** Lets every pending promise chain run (the fakes do no I/O). */
 function settle(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -673,7 +683,20 @@ test("a backend-only issue gets no frontend part", async () => {
 });
 
 test("an unusable plan runs once more, then moves the issue to Needs input", async () => {
-  const t = setup();
+  // Two parents in flight, so both grill on the same tick (MET-174).
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 3, max_parents: 2 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const t = setup({ config });
   const ui = t.linear.add({ title: "Board shows agents", labels: ["ui"], description: BODY("S") });
   const api = t.linear.add({ title: "Board API", labels: ["infra"], description: BODY("M") });
 
@@ -894,6 +917,128 @@ test("the sweep drops a split record when the parent is Done", async () => {
   assert.equal(t.memory.state.splits?.[parent.id], undefined, "the record is dropped");
 });
 
+test("two Ready parents give one grill with the default max_parents", async () => {
+  const adapter = fakeAdapter({
+    plans: {
+      "MET-100": plan(["backend", "S", "API"]),
+      "MET-101": plan(["backend", "S", "API too"]),
+    },
+  });
+  const t = setup({ adapter });
+  const first = t.linear.add({ title: "First", labels: ["ui"], description: BODY("S") });
+  const second = t.linear.add({ title: "Second", labels: ["ui"], description: BODY("S") });
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.split, [first.key]);
+  assert.deepEqual(grilled(t), [first.key], "only one grill");
+  assert.equal(first.state, "In Progress");
+  assert.equal(second.state, "Ready", "the other parent stays Ready");
+  assert.deepEqual(t.linear.children(second), [], "and is not split");
+});
+
+test("the second parent grills after the first is Done and repairSplits drops its record", async () => {
+  const adapter = fakeAdapter({
+    plans: {
+      "MET-100": plan(["backend", "S", "API"]),
+      "MET-101": plan(["backend", "S", "API too"]),
+    },
+  });
+  const t = setup({ adapter });
+  const first = t.linear.add({ title: "First", labels: ["ui"], description: BODY("S") });
+  const second = t.linear.add({ title: "Second", labels: ["ui"], description: BODY("S") });
+  await t.loop.tick();
+  assert.deepEqual(grilled(t), [first.key]);
+
+  first.state = "Done";
+  const report = await t.loop.tick();
+
+  assert.equal(t.memory.state.splits?.[first.id], undefined, "the Done parent's record is gone");
+  assert.deepEqual(report.split, [second.key]);
+  assert.deepEqual(grilled(t), [first.key, second.key], "the second parent grills now");
+  assert.equal(second.state, "In Progress");
+});
+
+test("Linear's manual order wins over creation order", async () => {
+  const adapter = fakeAdapter({
+    plans: {
+      "MET-100": plan(["backend", "S", "API"]),
+      "MET-101": plan(["backend", "S", "API too"]),
+    },
+  });
+  const t = setup({ adapter });
+  const older = t.linear.add({
+    title: "Older",
+    labels: ["ui"],
+    description: BODY("S"),
+    sortOrder: 2,
+  });
+  const newer = t.linear.add({
+    title: "Newer",
+    labels: ["ui"],
+    description: BODY("S"),
+    sortOrder: 1,
+  });
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.split, [newer.key]);
+  assert.deepEqual(grilled(t), [newer.key], "the newer issue with the lower sortOrder is first");
+  assert.equal(older.state, "Ready", "the older issue waits");
+});
+
+test("an equal sortOrder falls back to priority", async () => {
+  const adapter = fakeAdapter({
+    plans: {
+      "MET-100": plan(["backend", "S", "API"]),
+      "MET-101": plan(["backend", "S", "API too"]),
+    },
+  });
+  const t = setup({ adapter });
+  const older = t.linear.add({
+    title: "Older, lower priority",
+    labels: ["ui"],
+    description: BODY("S"),
+    priority: 2,
+    sortOrder: 1,
+  });
+  const newer = t.linear.add({
+    title: "Newer, urgent",
+    labels: ["ui"],
+    description: BODY("S"),
+    priority: 1,
+    sortOrder: 1,
+  });
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.split, [newer.key]);
+  assert.deepEqual(grilled(t), [newer.key], "priority breaks the sortOrder tie");
+  assert.equal(older.state, "Ready");
+});
+
+test("a parent in Needs input frees its max_parents slot on the next tick", async () => {
+  const adapter = fakeAdapter({
+    plans: {
+      "MET-100": plan(["backend", "S", "API"]),
+      "MET-101": plan(["backend", "S", "API too"]),
+    },
+  });
+  const t = setup({ adapter });
+  const first = t.linear.add({ title: "First", labels: ["ui"], description: BODY("S") });
+  const second = t.linear.add({ title: "Second", labels: ["ui"], description: BODY("S") });
+  await t.loop.tick();
+  assert.deepEqual(grilled(t), [first.key]);
+
+  first.state = "Needs input";
+  const report = await t.loop.tick();
+
+  assert.ok(t.memory.state.splits?.[first.id], "the parked parent keeps its record");
+  assert.deepEqual(report.split, [second.key]);
+  assert.deepEqual(grilled(t), [first.key, second.key], "the free slot goes to the next parent");
+  assert.equal(second.state, "In Progress");
+});
+
 test("at most 3 agents run at once; a finished run frees a slot", async () => {
   const config = mergeLayers([
     {
@@ -973,13 +1118,26 @@ test("max_concurrent and budget_minutes come from the config", async () => {
 });
 
 test("an L issue is never run: L parts or a rejected plan go to Needs input", async () => {
+  // Three parents in flight, so all three grill on the same tick (MET-174).
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 3, max_parents: 3 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
   const adapter = fakeAdapter({
     plans: {
       "MET-100": plan(["backend", "L", "Everything"]),
       "MET-102": plan(["backend", "M", "Half"], ["backend", "S", "Other half"]),
     },
   });
-  const t = setup({ adapter });
+  const t = setup({ config, adapter });
   const stillL = t.linear.add({ title: "Huge", description: BODY("L") });
   const invalid = t.linear.add({ title: "Huge too", description: BODY("L") });
   const splits = t.linear.add({ title: "Huge but splits", description: BODY("L") });

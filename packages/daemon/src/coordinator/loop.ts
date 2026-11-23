@@ -1718,42 +1718,103 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     );
   }
 
+  /** True when a parent in this state no longer holds a max_parents slot (MET-174). */
+  function endsParentSlot(state: string): boolean {
+    const current = state.toLowerCase();
+    return current === "done" || current === "needs input" || isCanceledState(state);
+  }
+
+  /**
+   * Parents in flight: those with a split record whose Linear state is not Done, Canceled or
+   * Needs input (MET-174). A Ready parent with a record counts. repairSplits drops a record at
+   * Done or Canceled, and splitReady drops one whose recorded parts were all canceled.
+   */
+  async function inFlightParents(s: LoopState | undefined, ready: Set<string>): Promise<number> {
+    if (s?.splits === undefined) return 0;
+    let count = 0;
+    for (const id of Object.keys(s.splits)) {
+      // A Ready parent is in flight while its record stands; splitReady dropped an all-canceled
+      // record before this count.
+      if (ready.has(id)) {
+        count++;
+        continue;
+      }
+      let issue: Issue;
+      try {
+        issue = await linear.getIssue(id);
+      } catch {
+        // Its state is unknown: count it, so a grill never overfills the limit.
+        count++;
+        continue;
+      }
+      if (!endsParentSlot(issue.state)) count++;
+    }
+    return count;
+  }
+
   async function splitReady(report: TickReport): Promise<void> {
     const issues = (await linear.listReady(team)).filter(
       (i) => readPartMarker(i.description) === undefined,
     );
     if (issues.length === 0) return;
     const context = await loadContext();
+
+    // Settle the records on Ready parents first: a stale read keeps the parent in flight, an
+    // interrupted split is finished without a grill, and every recorded part canceled frees the
+    // parent for a new grill (MET-154).
+    const work: Array<{ issue: Issue; grill: boolean }> = [];
     for (const issue of issues) {
       if (pausedNow) break;
       const record = state?.splits?.[issue.id];
-      if (record !== undefined) {
-        let children: LinkedIssue[];
-        try {
-          children = await linear.listChildren(issue.id);
-        } catch (error) {
-          log(`${issue.key}: could not read the children, retrying next tick: ${message(error)}`);
-          continue;
-        }
-        const ids = new Set(children.map((child) => child.id));
-        if (![...record.parts, record.qa].every((id) => ids.has(id))) {
-          // The read lags the split: grilling again would split the parent twice (MET-154).
-          log(`${issue.key}: already split at ${record.at}, Linear read is stale; skipped`);
-          continue;
-        }
-        const recorded = children.filter((child) => record.parts.includes(child.id));
-        if (recorded.every((child) => isCanceledState(child.state))) {
-          // The owner canceled every part and moved the parent back to Ready on purpose.
-          if (state?.splits !== undefined) {
-            delete state.splits[issue.id];
-            await save();
-          }
-        }
+      if (record === undefined) {
+        work.push({ issue, grill: true });
+        continue;
+      }
+      let children: LinkedIssue[];
+      try {
+        children = await linear.listChildren(issue.id);
+      } catch (error) {
+        log(`${issue.key}: could not read the children, retrying next tick: ${message(error)}`);
+        continue;
+      }
+      const ids = new Set(children.map((child) => child.id));
+      if (![...record.parts, record.qa].every((id) => ids.has(id))) {
+        // The read lags the split: grilling again would split the parent twice (MET-154).
+        log(`${issue.key}: already split at ${record.at}, Linear read is stale; skipped`);
+        continue;
+      }
+      const recorded = children.filter((child) => record.parts.includes(child.id));
+      if (!recorded.every((child) => isCanceledState(child.state))) {
+        // An interrupted split: finish it, but do not grill or plan it again.
+        work.push({ issue, grill: false });
+        continue;
+      }
+      // The owner canceled every part and moved the parent back to Ready on purpose.
+      if (state?.splits !== undefined) {
+        delete state.splits[issue.id];
+        await save();
+      }
+      work.push({ issue, grill: true });
+    }
+    if (pausedNow) return;
+
+    // Grill only the top Ready parents, one per free max_parents slot (MET-174). An escalated,
+    // failed or limited grill uses its slot for this tick and leaves the parent Ready for the
+    // next one. Finishing an interrupted split starts no grill, so it is not limited.
+    const ready = new Set(issues.map((issue) => issue.id));
+    const limit = config.limits.max_parents;
+    const inFlight = await inFlightParents(state, ready);
+    let started = 0;
+    for (const item of work) {
+      if (pausedNow) break;
+      if (item.grill) {
+        if (inFlight + started >= limit) continue;
+        started++;
       }
       try {
-        await splitOne(issue, context, report);
+        await splitOne(item.issue, context, report);
       } catch (error) {
-        log(`${issue.key}: split failed, retrying next tick: ${message(error)}`);
+        log(`${item.issue.key}: split failed, retrying next tick: ${message(error)}`);
       }
     }
   }
