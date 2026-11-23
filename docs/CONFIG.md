@@ -57,6 +57,8 @@ method = "squash"           # squash | merge | rebase
 # Run in a fresh worktree at the PR head before the QA agent starts (docs/LOOP.md "QA").
 setup_command = "pnpm install --frozen-lockfile --prefer-offline"   # "" skips it
 test_command = "pnpm test"   # a failure means changes requested, whatever the agent says
+# Optional: how QA runs the product. Unset means QA judges the tests and the diff only.
+# kind, start, url, health, seed, build and env are described under "Live QA".
 
 [agents.backend]
 role = "backend"            # coordinator | backend | frontend | qa
@@ -132,6 +134,58 @@ A Codex `exec` prompt sends one `turn.completed`. The Codex adapter therefore co
 - **QA:** a fast, low-cost model at medium effort. QA reads one PR diff against a checklist, and harnessd runs the tests itself, so it needs little reasoning. Example: an OpenCode flash model.
 - **Builders:** a capable model, because a builder run is a long agent loop and tool turns resend the context. Use a top model only for an M part or after a QA failure. Examples: a top Codex or Claude model as the fallback.
 - Set these per agent in `[agents.<name>]` with `harness` and `model`; docs/CONFIG.md "OpenCode agents" and "Codex agents" show the ids. A hold on the main harness uses `fallback_harness` and `fallback_model`.
+
+## Live QA
+Live QA is off by default. `qa.kind` turns it on: harnessd starts the product the PR builds, and QA checks each Done-when item against it (D-013, MET-169). With no `kind`, QA reads the diff, the CI result and the test output, as before. Any run key below set without `kind` is a config error, so a stray `start` never starts an app.
+
+| Key | Type | Meaning |
+|---|---|---|
+| `kind` | `web`, `api` or `cli` | How QA runs the product. Required to turn live QA on. |
+| `start` | command | Required. Starts the product. `{port}` is replaced with a free port for `web` and `api`. For `cli` it is the command QA calls; harnessd does not run it as a server. |
+| `url` | string | Required for `web` and `api`; must contain `{port}`. Not allowed for `cli`. Where the product answers. |
+| `health` | path or command | Required for `web` and `api`: a path resolved against `url` that must answer before QA starts. Optional for `cli`: one command run after `build` and `seed`. |
+| `seed` | command | Optional. Runs once after `build` and before health checks. |
+| `build` | command | Optional. Runs before `start`, e.g. to build the product. |
+| `env` | array of names | Optional. Names of variables passed from the daemon's environment to the product's commands. Names only, never values; each matches `^[A-Z_][A-Z0-9_]*$`. |
+
+Every kind requires `start`. `web` and `api` also require `url` and `health`. `cli` forbids `url`. Optional commands are non-empty strings when set.
+
+harnessd reads this table from the **main checkout's** workspace layer, never from the PR head's `.harnessd/config.toml`. QA runs before the merge gate, so a PR must not be able to change the commands harnessd runs. The PR's code still builds and runs, through `setup_command`, `build`, `start` and `test_command`.
+
+A web app:
+```toml
+[qa]
+kind = "web"
+setup_command = "pnpm install --frozen-lockfile"
+test_command = "pnpm test"
+build = "pnpm build"
+seed = "pnpm db:seed"
+start = "pnpm preview --port {port}"
+url = "http://127.0.0.1:{port}"
+health = "/"
+env = ["DATABASE_URL"]
+```
+
+An API:
+```toml
+[qa]
+kind = "api"
+test_command = "go test ./..."
+start = "go run ./cmd/server -addr 127.0.0.1:{port}"
+url = "http://127.0.0.1:{port}"
+health = "/healthz"
+env = ["DATABASE_URL", "REDIS_URL"]
+```
+
+A CLI. It has no URL: QA calls `start` for each check, and `health` is one command that must exit 0 after the build.
+```toml
+[qa]
+kind = "cli"
+test_command = "pnpm test"
+build = "pnpm build"
+start = "node dist/cli.js"
+health = "node dist/cli.js --version"
+```
 
 ## Secrets
 The Linear key and the Slack webhook url are secrets (D-030). Settings, Connections saves them; docs/INSTALL.md "Secrets" has the steps.
