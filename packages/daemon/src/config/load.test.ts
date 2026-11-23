@@ -117,6 +117,7 @@ test("global and workspace folders load and merge", async () => {
 
   assert.deepEqual(merged.limits, {
     max_concurrent: 4,
+    max_parents: 1,
     budget_minutes: { S: 20, M: 60 },
     token_budget: { S: 3_000_000, M: 6_000_000 },
     cached_token_weight: 0.1,

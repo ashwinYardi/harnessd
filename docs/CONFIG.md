@@ -16,6 +16,7 @@ harnessd reads two folders with the same shape (D-004): `~/.harnessd/` (global, 
 ```toml
 [limits]
 max_concurrent = 1
+max_parents = 1   # parents in flight from grill to Done, Canceled or Needs input (D-050)
 budget_minutes = { S = 30, M = 120 }   # L has no budget: split it (D-014)
 token_budget = { S = 3000000, M = 6000000 }   # weighted; an unknown size counts as M (D-043)
 cached_token_weight = 0.1   # a cached token counts this much of a new input token (D-043)
@@ -88,6 +89,8 @@ Setting `protected_paths` replaces the whole list, so copy the defaults you want
 
 ## Limits and token spend
 `limits.max_concurrent` defaults to **1** (D-040). A user may set 1 to 3 (D-014 cap). Parallel parts of one parent touched the same files, and each merge sent the next PR back for another build and QA round. With 1, a ticket's parts run one after another: one part, one PR, one QA pass at a time.
+
+`limits.max_parents` defaults to **1** and caps the parents in flight (D-050). A parent is in flight from its grill until it is Done, Canceled or Needs input. It is a positive integer that merges per layer like the other `limits` keys, so a workspace layer overrides the global one. Zero, a negative number or a non-integer is a config error. It sits next to `max_concurrent` and does not replace it: `max_concurrent` still caps agent runs at the same time, and both limits hold.
 
 `limits.token_budget` is the **weighted** tokens one parent may spend across its grill, plan, part and QA runs, keyed by size like `budget_minutes`: `S = 3000000`, `M = 6000000`. An unknown size counts as M, and so does L, which never runs.
 

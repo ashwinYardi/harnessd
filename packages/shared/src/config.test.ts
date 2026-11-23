@@ -21,6 +21,7 @@ test("parseConfigFile accepts a full config", () => {
   const input = {
     limits: {
       max_concurrent: 5,
+      max_parents: 2,
       budget_minutes: { S: 20, M: 90 },
       token_budget: { S: 1_000_000, M: 2_000_000 },
       cached_token_weight: 0.25,
@@ -92,7 +93,7 @@ test("an unknown fallback_harness names the file and key", () => {
 test("unknown keys are rejected with their path", () => {
   rejects(
     { limits: { max_concurent: 2 } },
-    `${FILE}: limits.max_concurent: unknown key, expected one of max_concurrent, budget_minutes, token_budget, cached_token_weight, max_turns, qa_max_failures`,
+    `${FILE}: limits.max_concurent: unknown key, expected one of max_concurrent, max_parents, budget_minutes, token_budget, cached_token_weight, max_turns, qa_max_failures`,
   );
   rejects(
     { colour: "red" },
@@ -134,6 +135,25 @@ test("limits.max_turns defaults to S 80 and M 160, and rejects a bad value", () 
   rejects(
     { limits: { max_turns: { M: 1.5 } } },
     `${FILE}: limits.max_turns.M: expected an integer >= 1, got 1.5`,
+  );
+});
+
+test("limits.max_parents defaults to 1 and rejects a non-positive or fractional value", () => {
+  assert.equal(DEFAULT_SETTINGS.limits.max_parents, 1);
+  assert.deepEqual(parseConfigFile({ limits: { max_parents: 3 } }, FILE), {
+    limits: { max_parents: 3 },
+  });
+  rejects(
+    { limits: { max_parents: 0 } },
+    `${FILE}: limits.max_parents: expected an integer >= 1, got 0`,
+  );
+  rejects(
+    { limits: { max_parents: -1 } },
+    `${FILE}: limits.max_parents: expected an integer >= 1, got -1`,
+  );
+  rejects(
+    { limits: { max_parents: 1.5 } },
+    `${FILE}: limits.max_parents: expected an integer >= 1, got 1.5`,
   );
 });
 

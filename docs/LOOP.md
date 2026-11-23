@@ -26,7 +26,7 @@ harnessd run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
 7. **Save** `loop.json`.
 
 ## Split
-Every Ready issue without a part marker is first grilled (docs/COORDINATOR.md).
+Every Ready issue without a part marker that the queue admits is first grilled (docs/COORDINATOR.md). The Ready column is the queue: `limits.max_parents` (default 1, D-050) caps the parents in flight, from a parent's grill until it is Done, Canceled or Needs input, and the loop takes the top Ready parent in Linear's manual order (`sortOrder`, then priority, then oldest). The other parents stay untouched in Ready. `max_parents` sits next to `limits.max_concurrent` and does not replace it: `max_concurrent` still caps agent runs at once (Dispatch). The loop reads the key with the queue, wait log and dispatch filter in the rest of MET-171.
 - If the grill escalates, the issue goes to Needs input.
 - If the grill errors, the issue is retried on the next tick.
 
@@ -98,6 +98,7 @@ When the split is done, the parent moves to In Progress.
 
 ## Dispatch
 - `limits.max_concurrent` runs at once (default 1, D-040). Parallel parts of one parent touched the same files, and each merge sent the next PR back for another build and QA round, so the default is serial. A user may still set up to 3 (D-014 cap).
+- At most `limits.max_parents` parents are in flight, so only their parts and QA dispatch (see Split, D-050).
 - A part is eligible when it is in Ready and nothing unfinished blocks it. With serial parts, part 2's blocker is part 1 until part 1 is Done (merged).
 - A QA sub-issue is eligible when a part of its parent is In Review at a head QA has not approved (see QA).
 - Each run:
