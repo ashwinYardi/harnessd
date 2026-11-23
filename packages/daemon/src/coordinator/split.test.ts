@@ -217,6 +217,31 @@ test("splitIssue creates the parts and a QA sub-issue that every part blocks", a
   );
 });
 
+test("parts that share a file are chained, and the backend part blocks the frontend part (MET-161)", async () => {
+  const shared = "docs/LOOP.md";
+  const parts: PlanPart[] = [
+    { ...(plan[0] as PlanPart), files: ["packages/daemon/src/api.ts", shared] },
+    { ...(plan[1] as PlanPart), files: ["packages/ui/app/src/board.tsx", shared] },
+  ];
+  const { linear, relations } = fakeLinear();
+  const result = await splitIssue(parent, parts, linear);
+
+  assert.deepEqual(
+    relations,
+    [
+      ["id-MET-51", "id-MET-53"],
+      ["id-MET-52", "id-MET-53"],
+      ["id-MET-51", "id-MET-52"],
+    ],
+    "the backend part blocks the frontend part that lists the same file",
+  );
+  assert.deepEqual(
+    result.parts.map((part) => part.key),
+    ["MET-51", "MET-52"],
+    "the backend part comes first",
+  );
+});
+
 test("a part with no parsed parent item says 'as written'", () => {
   const body = formatPartDescription({ ...parent, doneWhen: [] }, plan[0] as PlanPart, "backend");
   assert.match(body, /\*\*Done when\*\*\n- \[ \] Matches MET-40 as written/);

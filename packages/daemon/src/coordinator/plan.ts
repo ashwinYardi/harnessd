@@ -32,6 +32,52 @@ export const MAX_PART_DONE_WHEN = 3;
 /** A part changes at most this many files (MET-160). */
 export const MAX_PART_FILES = 8;
 
+/** Paths of the frontend area: the UI app (MET-161). */
+export const FRONTEND_AREA_PREFIX = "packages/ui/app/";
+
+/**
+ * Paths of the backend area: daemon, shared types, CLI and the daemon-side UI serving
+ * (MET-161).
+ */
+export const BACKEND_AREA_PREFIXES = [
+  "packages/daemon/",
+  "packages/shared/",
+  "packages/cli/",
+  "packages/ui/src/",
+] as const;
+
+/**
+ * Paths a frontend part must not list. The daemon-side UI serving sits in the backend area
+ * but is not on this list, so a frontend part may still change it (MET-161).
+ */
+export const FRONTEND_FORBIDDEN_PREFIXES = [
+  "packages/daemon/",
+  "packages/shared/",
+  "packages/cli/",
+] as const;
+
+/** The area a repo path belongs to. Docs may sit in a part of either area (MET-161). */
+export type FileArea = "frontend" | "backend" | "docs" | "other";
+
+function repoPath(file: string): string {
+  return file.trim().replace(/^\.\//, "");
+}
+
+/** A path's area, from its prefix. A `.md` file or a `docs/` path is docs (MET-161). */
+export function fileArea(file: string): FileArea {
+  const path = repoPath(file);
+  if (path.endsWith(".md") || path.startsWith("docs/")) return "docs";
+  if (path.startsWith(FRONTEND_AREA_PREFIX)) return "frontend";
+  if (BACKEND_AREA_PREFIXES.some((prefix) => path.startsWith(prefix))) return "backend";
+  return "other";
+}
+
+/** True when a frontend part may not change this path (MET-161). */
+export function isFrontendForbidden(file: string): boolean {
+  const path = repoPath(file);
+  return FRONTEND_FORBIDDEN_PREFIXES.some((prefix) => path.startsWith(prefix));
+}
+
 /** One command a part runs to prove it works, and what the output must show. */
 export interface PlanVerify {
   run: string;
@@ -112,7 +158,7 @@ export const PLAN_REPLY_SHAPE = `{
     "decisions": [{ "id": "D-NNN", "line": "why it applies to this part" }],
     "calls": [1, "a grill question this part follows"]
   }],
-  "reason": "why the issue is one part, or why it splits"
+  "reason": "why the issue stayed one part, or why it split"
 }`;
 
 /** A decision id: D- and three digits, as in a `docs/decisions/` file name. */
@@ -344,10 +390,12 @@ function parsePartCalls(
 }
 
 /**
- * The content checks that follow a successful parse (MET-160). Returns every error, not
- * only the first, so one retry can fix them all:
+ * The content checks that follow a successful parse (MET-160, MET-161). Returns every
+ * error, not only the first, so one retry can fix them all:
  * - every brief field is non-empty, and the arrays hold at least one entry;
  * - a part covers at most 3 Done-when items and changes at most 8 files;
+ * - a part lists no file in the other area, and no docs-only part joins a multi-part plan;
+ * - no frontend part comes before a backend part;
  * - every Done-when number points into the parent's parsed list;
  * - every parent Done-when item is in at least one part. The check is skipped when the
  *   parent has no parsed items: the part body then says "as written", like QA does.
@@ -365,8 +413,25 @@ export function checkPlan(parts: readonly PlanPart[], parent: Issue): string[] {
         `${path}.files: expected at most ${MAX_PART_FILES} files, got ${part.files.length}`,
       );
     }
+    const areas = part.files.map(fileArea);
     for (const [j, file] of part.files.entries()) {
       if (file.trim() === "") errors.push(`${path}.files[${j}]: expected a repo-relative path`);
+      if (part.role === "backend" && areas[j] === "frontend") {
+        errors.push(
+          `${path}.files[${j}]: a backend part lists the frontend file "${file}"; move it to a frontend part (MET-161)`,
+        );
+      }
+      if (part.role === "frontend" && isFrontendForbidden(file)) {
+        errors.push(
+          `${path}.files[${j}]: a frontend part lists the backend file "${file}"; move it to a backend part (MET-161)`,
+        );
+      }
+    }
+    // Docs changes go in the part whose code they describe, never in a docs part.
+    if (parts.length > 1 && part.files.length > 0 && areas.every((area) => area === "docs")) {
+      errors.push(
+        `${path}.files: a part in a multi-part plan needs code; docs go in the part whose code they describe (MET-161)`,
+      );
     }
     if (part.steps.length === 0) errors.push(`${path}.steps: expected at least one step`);
     for (const [j, step] of part.steps.entries()) {
@@ -394,6 +459,16 @@ export function checkPlan(parts: readonly PlanPart[], parent: Issue): string[] {
         errors.push(`${path}.doneWhen[${j}]: expected a number from 1 to ${total}, got ${n}`);
       }
       covered.add(n);
+    }
+  }
+  // The backend part lands the contract first; the loop does not reorder the parts (MET-161).
+  let frontendAt = -1;
+  for (const [i, part] of parts.entries()) {
+    if (part.role === "frontend" && frontendAt === -1) frontendAt = i;
+    if (part.role === "backend" && frontendAt !== -1) {
+      errors.push(
+        `parts[${i}]: a backend part comes after the frontend part at parts[${frontendAt}]; plan the backend part first (MET-161)`,
+      );
     }
   }
   if (total > 0) {
@@ -438,11 +513,14 @@ export function buildPlanPrompt({
     "You are the harnessd coordinator. Split this Linear issue into parts for the Backend and Frontend agents.",
     [
       "Rules:",
-      '- A part has role "backend" (daemon, CLI, adapters, integrations, shared types, docs) or "frontend" (the UI).',
-      "- Plan ONE part by default: one part is one PR. Split only when the issue's Size is L, or one part cannot fit the M budget (about 2 hours).",
+      '- A part has role "backend" (daemon, CLI, adapters, integrations, shared types, docs) or "frontend" (the UI in packages/ui/app/).',
+      "- Size rule: keep the issue as ONE part only when it is small: one area (backend or UI), about 3 Done-when items or fewer, and about 5 files or fewer. Otherwise split it. Every part is at most size M.",
+      "- Area split: backend and UI work go in separate parts. The backend part (shared types, API, daemon) comes first and blocks the frontend part, which builds against the merged contract.",
+      '- A part lists the repo paths it changes. A backend part lists no file under "packages/ui/app/". A frontend part lists no file in "packages/daemon/", "packages/shared/" or "packages/cli/". Docs, DESIGN.md and decision records may sit in either part.',
+      "- Docs changes go in the part whose code they describe, never in a separate docs part.",
       "- Only plan parts with real work. An issue with no UI work gets no frontend part; one with only UI work gets no backend part.",
       "- Each part is size S (about 30 minutes) or M (about 2 hours). L is not allowed: split larger work into more parts (D-014).",
-      '- "reason" must say why the issue is one part or why it splits. A plan with no reason is invalid.',
+      '- "reason" must say why the issue stayed one part or why it split, also for a one-part plan. A plan with no reason is invalid.',
       "- Do not plan QA; harnessd adds the QA part itself.",
       '- Each part lists the decision records it depends on in "decisions": [{ "id": "D-NNN", "line": "why it applies" }]. The builder reads only its brief and these records (D-044).',
       '- Each part lists the grill calls that apply to it in "calls": the call numbers below, or their question texts.',
