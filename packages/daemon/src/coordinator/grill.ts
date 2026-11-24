@@ -258,7 +258,7 @@ export function noteTitle(question: string): string {
 
 /** A run's reply. `limited` is set when the harness hit a usage limit (MET-70). */
 export type RunReply =
-  | { ok: true; text: string; tokens: TokenUsage; turns?: number }
+  | { ok: true; text: string; tokens: TokenUsage; turns?: number; usageUnknown?: true }
   | {
       ok: false;
       error: string;
@@ -267,6 +267,7 @@ export type RunReply =
       switchReason?: string;
       tokens: TokenUsage;
       turns?: number;
+      usageUnknown?: true;
     };
 
 /** Runs one task to the end and returns the final assistant text, or why there is none. */
@@ -282,6 +283,7 @@ export async function runForReply(
   let switchReason: string | undefined;
   let tokens: TokenUsage = emptyTokenUsage();
   let turns: number | undefined;
+  let usageUnknown: true | undefined;
   try {
     const run = adapter.start(task, cwd);
     for await (const event of run.events) {
@@ -294,6 +296,7 @@ export async function runForReply(
         switchReason = switchWhy(event.result);
         tokens = event.result.tokens;
         turns = event.result.turns;
+        usageUnknown = event.result.usageUnknown;
       }
     }
   } catch (error) {
@@ -308,13 +311,26 @@ export async function runForReply(
       ...(switchReason === undefined ? {} : { switchReason }),
       tokens,
       ...(turns === undefined ? {} : { turns }),
+      ...(usageUnknown === undefined ? {} : { usageUnknown }),
     };
   }
   const text = finalText ?? lastText;
   if (text === undefined || text.trim() === "") {
-    return { ok: false, error: "empty reply", tokens, ...(turns === undefined ? {} : { turns }) };
+    return {
+      ok: false,
+      error: "empty reply",
+      tokens,
+      ...(turns === undefined ? {} : { turns }),
+      ...(usageUnknown === undefined ? {} : { usageUnknown }),
+    };
   }
-  return { ok: true, text, tokens, ...(turns === undefined ? {} : { turns }) };
+  return {
+    ok: true,
+    text,
+    tokens,
+    ...(turns === undefined ? {} : { turns }),
+    ...(usageUnknown === undefined ? {} : { usageUnknown }),
+  };
 }
 
 /**
@@ -354,18 +370,30 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
   let spent: TokenUsage = emptyTokenUsage();
   let turns: number | undefined;
   let switchReason: string | undefined;
+  /** Replies that did and did not report usage; a sum of only unknown replies is unknown. */
+  let knownReplies = 0;
+  let unknownReplies = 0;
+  const usage = () => ({
+    tokens: spent,
+    ...(turns === undefined ? {} : { turns }),
+    ...(unknownReplies > 0 && knownReplies === 0 ? { usageUnknown: true as const } : {}),
+  });
   for (let attempt = 1; attempt <= 2; attempt++) {
     const text =
       attempt === 1
         ? prompt
         : `${prompt}\nYour previous reply was rejected (${parsed.ok ? "" : parsed.error}). Reply again with only the JSON object.\n`;
     const reply = await runForReply(deps.adapter, task(attempt, text), deps.cwd);
-    spent = {
-      input: spent.input + reply.tokens.input,
-      output: spent.output + reply.tokens.output,
-      cacheRead: spent.cacheRead + reply.tokens.cacheRead,
-      cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
-    };
+    if (reply.usageUnknown === true) unknownReplies += 1;
+    else {
+      knownReplies += 1;
+      spent = {
+        input: spent.input + reply.tokens.input,
+        output: spent.output + reply.tokens.output,
+        cacheRead: spent.cacheRead + reply.tokens.cacheRead,
+        cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
+      };
+    }
     if (reply.turns !== undefined) turns = (turns ?? 0) + reply.turns;
     switchReason = reply.ok ? undefined : reply.switchReason;
     if (!reply.ok && reply.limited) {
@@ -376,8 +404,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
         outcome: "limited",
         error: reply.error,
         ...(switchReason === undefined ? {} : { switchReason }),
-        tokens: spent,
-        ...(turns === undefined ? {} : { turns }),
+        ...usage(),
       };
     }
     parsed = reply.ok ? parseGrillReply(reply.text) : reply;
@@ -397,8 +424,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       outcome: "error",
       error: parsed.error,
       ...(switchReason === undefined ? {} : { switchReason }),
-      tokens: spent,
-      ...(turns === undefined ? {} : { turns }),
+      ...usage(),
     };
   }
 
@@ -460,8 +486,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       error: `could not ${step}: ${(error as Error).message}`,
       terms,
       precedents,
-      tokens: spent,
-      ...(turns === undefined ? {} : { turns }),
+      ...usage(),
     };
   }
   return {
@@ -470,7 +495,6 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     outcome: escalation ? "needs_input" : "proceed",
     terms,
     precedents,
-    tokens: spent,
-    ...(turns === undefined ? {} : { turns }),
+    ...usage(),
   };
 }
