@@ -116,7 +116,17 @@ function pr(number: number, key: string): PullRequest {
   };
 }
 
-type Reply = string | { status: RunResult["status"]; error: string };
+type Reply =
+  | string
+  | {
+      status: RunResult["status"];
+      error?: string;
+      /** The final assistant text for an `ok` run, e.g. a verdict. */
+      text?: string;
+      tokens?: RunResult["tokens"];
+      turns?: number;
+      usageUnknown?: true;
+    };
 
 function fakeAdapter(replies: Reply[]) {
   const tasks: Task[] = [];
@@ -130,12 +140,17 @@ function fakeAdapter(replies: Reply[]) {
       const reply = queue.shift() ?? "";
       const result: RunResult = {
         status: typeof reply === "string" ? "ok" : reply.status,
-        exitCode: typeof reply === "string" ? 0 : 1,
+        exitCode: typeof reply === "string" || reply.status === "ok" ? 0 : 1,
         durationMs: 5,
-        tokens: emptyTokenUsage(),
+        tokens: typeof reply === "string" ? emptyTokenUsage() : (reply.tokens ?? emptyTokenUsage()),
       };
       if (typeof reply === "string") result.finalText = reply;
-      else result.error = reply.error;
+      else {
+        if (reply.text !== undefined) result.finalText = reply.text;
+        if (reply.error !== undefined) result.error = reply.error;
+        if (reply.turns !== undefined) result.turns = reply.turns;
+        if (reply.usageUnknown === true) result.usageUnknown = true;
+      }
       const events: AdapterEvent[] = [{ type: "end", result }];
       return {
         events: (async function* () {
@@ -404,6 +419,47 @@ test("the QA agent run gets the role turn cap", async () => {
   const h = harness({ replies: [verdict([true, true])] });
   await runQa({ ...h.input, maxTurns: 40 }, h.deps);
   assert.equal(h.tasks[0]?.maxTurns, 40);
+});
+
+test("a QA round whose replies all report unknown usage sums nothing and says unknown", async () => {
+  const h = harness({
+    replies: [
+      { status: "error", error: "no usage", usageUnknown: true, turns: 3 },
+      { status: "error", error: "no usage", usageUnknown: true, turns: 4 },
+    ],
+    prs: { [backend.key]: pr(7, backend.key), [frontend.key]: pr(8, frontend.key) },
+  });
+  h.input.parts = [backend, frontend];
+
+  const result = await runQa(h.input, h.deps);
+
+  assert.equal(result.usageUnknown, true);
+  assert.deepEqual(result.tokens, emptyTokenUsage());
+  assert.equal(result.turns, 7);
+});
+
+test("a mixed QA round adds only the replies with known usage and keeps the normal sum", async () => {
+  const known = { input: 100, output: 20, cacheRead: 30, cacheWrite: 5 };
+  const h = harness({
+    replies: [
+      {
+        status: "error",
+        error: "no usage",
+        usageUnknown: true,
+        tokens: { input: 999, output: 999, cacheRead: 999, cacheWrite: 999 },
+        turns: 3,
+      },
+      { status: "error", error: "boom", tokens: known, turns: 4 },
+    ],
+    prs: { [backend.key]: pr(7, backend.key), [frontend.key]: pr(8, frontend.key) },
+  });
+  h.input.parts = [backend, frontend];
+
+  const result = await runQa(h.input, h.deps);
+
+  assert.equal(result.usageUnknown, undefined);
+  assert.deepEqual(result.tokens, known);
+  assert.equal(result.turns, 7);
 });
 
 test("the worktree is checked out at the PR head, used as the agent's cwd and force-removed", async () => {

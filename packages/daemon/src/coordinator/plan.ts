@@ -137,6 +137,8 @@ export interface SplitPlan {
   tokens?: TokenUsage;
   /** Turns the plan runs took, when the harness reports them. */
   turns?: number;
+  /** True when every plan reply had unknown usage, so `tokens` counts nothing (MET-188). */
+  usageUnknown?: true;
 }
 
 export type ParsedPlanReply =
@@ -607,6 +609,14 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
   let spent: TokenUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
   let turns: number | undefined;
   let errors: string[] = [];
+  /** Replies that did and did not report usage; a sum of only unknown replies is unknown. */
+  let knownReplies = 0;
+  let unknownReplies = 0;
+  const usage = () => ({
+    tokens: spent,
+    ...(turns === undefined ? {} : { turns }),
+    ...(unknownReplies > 0 && knownReplies === 0 ? { usageUnknown: true as const } : {}),
+  });
 
   for (let attempt = 1; attempt <= 2; attempt++) {
     const input: PlanPromptInput = {
@@ -626,15 +636,15 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
     if (deps.agent.model !== undefined) task.model = deps.agent.model;
 
     const reply: RunReply = await runForReply(deps.adapter, task, deps.cwd);
-    spent = addTokens(spent, reply.tokens);
+    if (reply.usageUnknown === true) unknownReplies += 1;
+    else {
+      knownReplies += 1;
+      spent = addTokens(spent, reply.tokens);
+    }
     if (reply.turns !== undefined) turns = (turns ?? 0) + reply.turns;
-    const usage = {
-      tokens: spent,
-      ...(turns === undefined ? {} : { turns }),
-    };
 
     if (!reply.ok && reply.limited) {
-      return { parts: [], source: "limited", error: reply.error, ...usage };
+      return { parts: [], source: "limited", error: reply.error, ...usage() };
     }
     if (!reply.ok && reply.switchReason !== undefined) {
       // The harness run itself failed (timeout, stall, crash): retry on the next harness (D-048).
@@ -643,14 +653,14 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
         source: "harness",
         error: reply.error,
         switchReason: reply.switchReason,
-        ...usage,
+        ...usage(),
       };
     }
     if (!reply.ok) {
       const cap = turnCapOf(reply.error);
       // A cancelled run is no plan at all: the loop sees the pause and retries next tick.
       if (cap === undefined && /cancel/i.test(reply.error)) {
-        return { parts: [], source: "harness", error: reply.error, ...usage };
+        return { parts: [], source: "harness", error: reply.error, ...usage() };
       }
       // A turn cap and an empty or unusable reply are a bad plan: retry once (D-045, MET-160).
       errors = [cap ?? reply.error];
@@ -671,7 +681,7 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
         parts: parsed.parts,
         source: "model",
         reason: parsed.reason,
-        ...usage,
+        ...usage(),
       };
     }
     errors = problems;
@@ -682,7 +692,6 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
     source: "bad",
     error: errors.join("; "),
     errors,
-    tokens: spent,
-    ...(turns === undefined ? {} : { turns }),
+    ...usage(),
   };
 }

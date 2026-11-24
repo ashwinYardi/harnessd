@@ -80,6 +80,8 @@ export interface GrillResult {
   tokens?: TokenUsage;
   /** Turns the grill runs took, when the harness reports them. */
   turns?: number;
+  /** True when every grill reply had unknown usage, so `tokens` counts nothing (MET-188). */
+  usageUnknown?: true;
 }
 
 /** A decision note as written to the vault (same shape as the memory vault's notes). */

@@ -656,6 +656,8 @@ export interface QaRunResult {
   tokens?: TokenUsage;
   /** Model turns the QA agent runs reported (D-043). */
   turns?: number;
+  /** True when every QA agent reply had unknown usage, so `tokens` counts nothing (MET-188). */
+  usageUnknown?: true;
 }
 
 /** Reviews every part's PR. Never throws: a broken step is an `error` review. */
@@ -668,6 +670,11 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
   let limited = false;
   let spent: TokenUsage = emptyTokenUsage();
   let spentTurns: number | undefined;
+  /** Replies that did and did not report usage; a sum of only unknown replies is unknown. */
+  let knownReplies = 0;
+  let unknownReplies = 0;
+  const usageUnknown = (): { usageUnknown?: true } =>
+    unknownReplies > 0 && knownReplies === 0 ? { usageUnknown: true } : {};
   const stopped = (part: LinkedIssue, pr?: PullRequest): PrReview => ({
     part,
     ...(pr ? { pr } : {}),
@@ -850,12 +857,16 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
           if (env !== undefined) task.env = env;
           inSetup = false;
           const reply = await runForReply(deps.adapter, task, path);
-          spent = {
-            input: spent.input + reply.tokens.input,
-            output: spent.output + reply.tokens.output,
-            cacheRead: spent.cacheRead + reply.tokens.cacheRead,
-            cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
-          };
+          if (reply.usageUnknown === true) unknownReplies += 1;
+          else {
+            knownReplies += 1;
+            spent = {
+              input: spent.input + reply.tokens.input,
+              output: spent.output + reply.tokens.output,
+              cacheRead: spent.cacheRead + reply.tokens.cacheRead,
+              cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
+            };
+          }
           if (reply.turns !== undefined) spentTurns = (spentTurns ?? 0) + reply.turns;
           if (!reply.ok && reply.limited) limited = true;
           verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
@@ -964,6 +975,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       reviews,
       cancelled: true,
       tokens: spent,
+      ...usageUnknown(),
       ...(spentTurns === undefined ? {} : { turns: spentTurns }),
     };
   if (limited)
@@ -972,6 +984,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       reviews,
       limited: true,
       tokens: spent,
+      ...usageUnknown(),
       ...(spentTurns === undefined ? {} : { turns: spentTurns }),
     };
   const outcome = reviews.some((r) => r.decision === "request_changes")
@@ -983,6 +996,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
     outcome,
     reviews,
     tokens: spent,
+    ...usageUnknown(),
     ...(spentTurns === undefined ? {} : { turns: spentTurns }),
   };
 }

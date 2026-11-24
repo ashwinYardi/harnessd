@@ -405,7 +405,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     agent: string,
     tokens: TokenUsage,
     turns?: number,
+    usageUnknown?: boolean,
   ): void {
+    if (usageUnknown === true) {
+      // A killed Codex run sends no usage event: count nothing and say so (MET-188, D-043).
+      const unknown = `${key}: ${agent} usage unknown`;
+      log(turns === undefined ? unknown : `${unknown} in ${turns} turns`);
+      return;
+    }
     const sum = tokenSumOf(tokens);
     if (parentId !== undefined) {
       const previous = s.usage?.[parentId] ?? { input: 0, cached: 0, output: 0 };
@@ -994,6 +1001,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         entry.agent,
         result.tokens,
         result.turns,
+        result.usageUnknown === true,
       );
       // A part run that reported a session keeps it for a QA send-back (MET-156).
       const harness = runHarnesses.get(entry.issueId);
@@ -1444,6 +1452,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         agent.name,
         result.tokens ?? emptyTokenUsage(),
         result.turns,
+        result.usageUnknown === true,
       );
       if (result.cancelled === true) {
         await save();
@@ -1611,6 +1620,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           agent.name,
           grill.tokens ?? emptyTokenUsage(),
           grill.turns,
+          grill.usageUnknown === true,
         );
       }
       if (pausedNow) {
@@ -1654,6 +1664,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           agent.name,
           plan.tokens ?? emptyTokenUsage(),
           plan.turns,
+          plan.usageUnknown === true,
         );
       }
       if (pausedNow) {

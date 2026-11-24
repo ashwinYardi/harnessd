@@ -246,6 +246,7 @@ interface PendingRun {
     turns?: number,
     sessionId?: string,
     reason?: RunResult["reason"],
+    usageUnknown?: true,
   ): void;
 }
 
@@ -286,6 +287,7 @@ function fakeAdapter(
         turns?: number,
         sessionId?: string,
         reason?: RunResult["reason"],
+        usageUnknown?: true,
       ): RunResult => {
         const r: RunResult = {
           status,
@@ -299,6 +301,7 @@ function fakeAdapter(
         if (turns !== undefined) r.turns = turns;
         if (sessionId !== undefined) r.sessionId = sessionId;
         if (reason !== undefined) r.reason = reason;
+        if (usageUnknown === true) r.usageUnknown = true;
         return r;
       };
       let resolve: (r: RunResult) => void = () => {};
@@ -338,8 +341,20 @@ function fakeAdapter(
         pending.push({
           task,
           cwd,
-          finish: (status = "ok", error, text, resetAt, tokens, turns, sessionId, reason) =>
-            resolve(result(status, text, error, resetAt, tokens, turns, sessionId, reason)),
+          finish: (
+            status = "ok",
+            error,
+            text,
+            resetAt,
+            tokens,
+            turns,
+            sessionId,
+            reason,
+            usageUnknown,
+          ) =>
+            resolve(
+              result(status, text, error, resetAt, tokens, turns, sessionId, reason, usageUnknown),
+            ),
         });
       }
       // Like a real adapter, each iteration replays the run from the start.
@@ -1416,6 +1431,20 @@ const BACKEND_ON_OPENCODE = mergeLayers([
     dir: "/repo/.harnessd",
     settings: { limits: { max_concurrent: 3 } },
     agents: { backend: { harness: "opencode", label: "backend", keyPrefix: "agents.backend" } },
+    rules: [],
+    skills: [],
+    mcp: {},
+    skillSettings: {},
+  },
+]);
+
+/** The backend agent runs on Codex; every other agent on Claude Code. */
+const BACKEND_ON_CODEX = mergeLayers([
+  {
+    scope: "workspace",
+    dir: "/repo/.harnessd",
+    settings: { limits: { max_concurrent: 3 } },
+    agents: { backend: { harness: "codex", label: "backend", keyPrefix: "agents.backend" } },
     rules: [],
     skills: [],
     mcp: {},
@@ -4464,6 +4493,65 @@ test("the run log line keeps its old form when the harness reports no turns", as
   const line = t.logs.find((l) => l.includes("used 0 input, 0 cached, 0 output tokens"));
   assert.ok(line, t.logs.join("\n"));
   assert.doesNotMatch(line ?? "", /turns/);
+});
+
+test("a run with unknown usage logs it and adds nothing to the parent sum", async () => {
+  const t = setup();
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const part = t.linear.add({
+    title: "API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    "Done.",
+    undefined,
+    emptyTokenUsage(),
+    8,
+    undefined,
+    undefined,
+    true,
+  );
+  await t.loop.idle();
+
+  assert.equal(t.memory.state.usage?.[parent.id], undefined, "unknown usage adds nothing");
+  assert.ok(t.logs.includes(`${part.key}: backend usage unknown in 8 turns`), t.logs.join("\n"));
+});
+
+test("a Codex run with real usage logs it and grows the parent's weighted budget", async () => {
+  const adapter = fakeAdapter({ id: "codex" });
+  const t = setup({ adapter, config: BACKEND_ON_CODEX });
+  const parent = t.linear.add({ title: "P", state: "In Progress" });
+  const part = t.linear.add({
+    title: "API",
+    parentId: parent.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    "Done.",
+    undefined,
+    { input: 11_591, output: 39, cacheRead: 27_904, cacheWrite: 0 },
+    8,
+  );
+  await t.loop.idle();
+
+  const sum = t.memory.state.usage?.[parent.id];
+  assert.deepEqual(sum, { input: 11_591, cached: 27_904, output: 39 });
+  assert.equal(weightedTokens(sum ?? { input: 0, cached: 0, output: 0 }, 0.1), 14_420);
+  assert.ok(
+    t.logs.includes(
+      `${part.key}: backend used 11591 input, 27904 cached, 39 output tokens in 8 turns`,
+    ),
+    t.logs.join("\n"),
+  );
 });
 
 test("at or over the token budget nothing starts and the parent goes to Needs input", async () => {
