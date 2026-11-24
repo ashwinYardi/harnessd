@@ -205,6 +205,8 @@ class CodexJsonParser implements LineParser {
   outcome(exitCode: number | null): ParsedOutcome {
     const ok = this.#turnCompleted > 0 && this.#failure === undefined;
     const out: ParsedOutcome = { ok, tokens: { ...this.#tokens } };
+    // A killed run never sends turn.completed, so its zeros mean "unknown", not "none" (MET-187).
+    if (this.#turnCompleted === 0) out.usageUnknown = true;
     if (this.#turns > 0) out.turns = this.#turns;
     if (this.#sessionId !== undefined) out.sessionId = this.#sessionId;
     if (this.#finalText !== undefined) out.finalText = this.#finalText;

@@ -225,6 +225,43 @@ test("tool calls, file edits and usage totals map to tool and usage events", asy
   assert.equal(result.turns, 4);
 });
 
+test("a recorded 0.171.0 stream reports its exact usage totals", async () => {
+  const { run: r } = run({ fixture: "recorded-0.171.0" });
+  const events = await collect(r);
+  const result = await r.result;
+  // D-032: input excludes cached tokens, cached tokens are reported apart, cacheWrite is 0.
+  assert.deepEqual(
+    events.filter((e) => e.type === "usage"),
+    [{ type: "usage", tokens: { input: 11_591, output: 39, cacheRead: 27_904, cacheWrite: 0 } }],
+  );
+  assert.deepEqual(result.tokens, {
+    input: 11_591,
+    output: 39,
+    cacheRead: 27_904,
+    cacheWrite: 0,
+  });
+  assert.equal(result.status, "ok");
+  // One completed command item is one turn (D-045).
+  assert.equal(result.turns, 1);
+  assert.equal(result.usageUnknown, undefined);
+});
+
+test("a stream cut before turn.completed marks usage unknown and keeps the tool turns", async () => {
+  const { run: r } = run({ fixture: "recorded-0.171.0-cut" });
+  const events = await collect(r);
+  const result = await r.result;
+  assert.deepEqual(
+    events.filter((e) => e.type === "usage"),
+    [],
+    "a killed run sends no usage event",
+  );
+  assert.deepEqual(result.tokens, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  assert.equal(result.usageUnknown, true);
+  assert.equal(result.turns, 1);
+  assert.equal(result.status, "error");
+  assert.equal(result.error, "no turn.completed event");
+});
+
 test("a run over the turn cap is killed and reports turn cap", async () => {
   const started = Date.now();
   const { run: r } = run({ fixture: "tools", hang: true }, task({ maxTurns: 2 }));

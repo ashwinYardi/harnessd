@@ -40,6 +40,8 @@ export interface RunResult {
   tokens: TokenUsage;
   /** Model turns the harness reported, when it did. In memory only, never in loop.json. */
   turns?: number;
+  /** True when the harness sent no usage event. In memory only, never in loop.json. */
+  usageUnknown?: true;
   costUsd?: number;
   sessionId?: string;
   /** Final assistant text reported by the harness. */
