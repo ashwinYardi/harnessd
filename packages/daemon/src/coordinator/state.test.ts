@@ -220,6 +220,31 @@ test("sessions are optional, and a malformed one is dropped", () => {
   assert.equal(parsed.qaFeedback.a?.testTail, "not ok");
 });
 
+test("qaLiveWarned is optional and survives a restart (MET-180)", async () => {
+  assert.equal(parseLoopState('{"inFlight":[]}').qaLiveWarned, undefined, "old files still load");
+  assert.equal(
+    parseLoopState(JSON.stringify({ inFlight: [], qaLiveWarned: 7 })).qaLiveWarned,
+    undefined,
+    "a non-string is dropped",
+  );
+  assert.equal(
+    parseLoopState(JSON.stringify({ inFlight: [], qaLiveWarned: "" })).qaLiveWarned,
+    undefined,
+    "an empty string is dropped",
+  );
+  const time = "2026-11-24T10:00:00.000Z";
+  assert.equal(
+    parseLoopState(JSON.stringify({ inFlight: [], qaLiveWarned: time })).qaLiveWarned,
+    time,
+  );
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.qaLiveWarned = time;
+  await store.save(state);
+  assert.equal((await store.load()).qaLiveWarned, time);
+});
+
 test("harnessSwitch is optional and drops a malformed entry (D-048)", () => {
   assert.equal(parseLoopState('{"inFlight":[]}').harnessSwitch, undefined, "old files still load");
   const parsed = parseLoopState(

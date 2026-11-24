@@ -5,6 +5,7 @@ import {
   type Issue,
   isAreaLabel,
   type LinkedIssue,
+  type QaConfig,
 } from "@harnessd/shared";
 import type { LinearClient } from "../linear/client.ts";
 import type { PartRole, PlanPart } from "./plan.ts";
@@ -318,11 +319,36 @@ export async function splitIssue(
 }
 
 /**
+ * The once-per-repo warning the first split note carries while the repo runs no live app
+ * (MET-180). It points at the config key that turns live QA on.
+ */
+export const NO_LIVE_QA_NOTE =
+  "QA runs no live app: .harnessd/config.toml has no [qa] kind (docs/CONFIG.md).";
+
+/**
+ * The line a split note adds when `qa.kind` is missing and the repo never warned, with the
+ * time to record as `qaLiveWarned`. Undefined once kind is set or the warning went out.
+ */
+export function noLiveQaWarning(
+  qa: Pick<QaConfig, "kind">,
+  warnedAt: string | undefined,
+  now: string,
+): { line: string; warnedAt: string } | undefined {
+  if (qa.kind !== undefined || warnedAt !== undefined) return undefined;
+  return { line: NO_LIVE_QA_NOTE, warnedAt: now };
+}
+
+/**
  * The parent comment after a split that created something (MET-162). Each part names its
  * goal and files; the QA line names the parts that block it. The note always ends with
- * `Reason: <reason>`, for a split and for a one-part plan.
+ * `Reason: <reason>`, for a split and for a one-part plan. `noLiveQa` is the warning line
+ * that goes just before the reason (MET-180).
  */
-export function formatSplitComment(result: SplitResult, reason?: string): string {
+export function formatSplitComment(
+  result: SplitResult,
+  reason?: string,
+  noLiveQa?: string,
+): string {
   const lines = [`**Coordinator split**: ${result.parts.length + 1} sub-issues.`, ""];
   for (const part of result.parts) {
     const role = readPartMarker(part.description)?.role ?? "part";
@@ -334,6 +360,7 @@ export function formatSplitComment(result: SplitResult, reason?: string): string
   lines.push(
     `- ${result.qa.key} qa (${result.qa.size ?? "?"}): blocked by ${result.parts.map((p) => p.key).join(", ")}`,
     "",
+    ...(noLiveQa === undefined ? [] : [noLiveQa]),
     `Reason: ${reason?.trim() ? oneLine(reason) : "not given"}`,
   );
   return `${lines.join("\n")}\n`;
