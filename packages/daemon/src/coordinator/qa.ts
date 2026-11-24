@@ -5,11 +5,15 @@
 // For each part: find its PR (the part key is in the title), check the PR head out in a
 // worktree of its own, run the repo's tests in harnessd, then run the QA agent for a
 // strict JSON verdict. When the repo declares a product in `[qa]`, harnessd starts it first
-// and stops its whole tree afterwards (MET-178, D-051). harnessd approves only when every
-// item passes and the tests pass, whatever the model says; anything else requests changes.
+// and, for a web app, a headless browser, then stops their trees afterwards (MET-178,
+// MET-179, D-051). harnessd approves only when every item passes and the tests pass,
+// whatever the model says; anything else requests changes.
 // `settleQa` then moves the sub-issues, and the second failed round goes to the human instead
 // of looping.
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { delimiter, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   emptyTokenUsage,
   type HarnessAdapter,
@@ -77,6 +81,46 @@ export const MAX_COMMAND_OUTPUT = 64 * 1024;
 
 /** The failing test tail the review comment and the resume prompt share (MET-156). */
 export const MAX_TEST_TAIL = 3000;
+
+/**
+ * The folder holding the `qa-browser` bin: a PATH entry that already has it, the nearest
+ * `node_modules/.bin`, then the built folder beside this module (MET-179). Only a QA run
+ * gets this folder first on its PATH.
+ */
+export function qaBrowserBinDir(
+  env: NodeJS.ProcessEnv = process.env,
+  moduleUrl: string = import.meta.url,
+): string {
+  const has = (dir: string) =>
+    existsSync(join(dir, "qa-browser")) || existsSync(join(dir, "qa-browser.cmd"));
+  const dirs: string[] = [];
+  const moduleDir = dirname(fileURLToPath(moduleUrl));
+  for (let dir = moduleDir; ; dir = dirname(dir)) {
+    dirs.push(join(dir, "node_modules", ".bin"));
+    if (dirname(dir) === dir) break;
+  }
+  // pnpm links a dependency's bin beside the CLI entry, not only in an ancestor folder.
+  const entry = process.argv[1];
+  if (entry !== undefined) dirs.push(join(dirname(entry), "..", "node_modules", ".bin"));
+  for (const dir of (env.PATH ?? "").split(delimiter)) if (dir !== "") dirs.push(dir);
+  for (const dir of dirs) if (has(dir)) return dir;
+  // Not installed yet: the folder the build writes qa-browser.js to.
+  return fileURLToPath(new URL("../qa-browser", moduleUrl));
+}
+
+/** The extra environment only a QA run gets: qa-browser first on PATH, and its run id. */
+export function qaBrowserEnvironment(
+  runId: string,
+  browser: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const bin = qaBrowserBinDir(env);
+  return {
+    HARNESSD_QA_RUN: runId,
+    PATH: [bin, env.PATH ?? ""].filter((part) => part !== "").join(delimiter),
+    ...(browser === undefined ? {} : { HARNESSD_QA_BROWSER: browser }),
+  };
+}
 
 /**
  * `sh -c <command>` in its own process group with CI=1; the group is killed on timeout or
@@ -771,6 +815,9 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
               throw new Error(`harnessd sync into the worktree failed: ${message(error)}`);
             }
           }
+          // Only a QA run gets qa-browser: the bin first on PATH, and a live web review's
+          // CDP endpoint. Builder and coordinator runs never go through this path (MET-179).
+          env = { ...(env ?? {}), ...qaBrowserEnvironment(id, app?.browser) };
           const task: Task = {
             id,
             title: `QA ${part.key}: PR #${pr.number}`,

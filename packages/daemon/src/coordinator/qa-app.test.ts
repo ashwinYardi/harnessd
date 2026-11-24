@@ -1,10 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { parseConfigFile, type QaConfig } from "@harnessd/shared";
-import { appEnvironment, freePort, lastOutputLines, startQaApp } from "./qa-app.ts";
+import {
+  appEnvironment,
+  findBrowserExecutable,
+  freePort,
+  lastOutputLines,
+  launchQaBrowser,
+  scanPlaywrightCache,
+  startQaApp,
+} from "./qa-app.ts";
 
 const FILE = "config.toml";
 
@@ -365,6 +374,210 @@ test("a cli runs build and seed but no server, and one health command if set", a
       assert.equal(result.app.url, undefined);
       assert.equal(result.app.port, undefined);
       await result.app.stop();
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a browser is installed Google Chrome first, then a Playwright Chromium", async () => {
+  const chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+  const found = await findBrowserExecutable({
+    platform: "darwin",
+    env: { PATH: "/nowhere" },
+    home: "/home/test",
+    isExecutable: async (path) => path === chrome,
+    playwright: async () => "/playwright/chromium",
+  });
+  assert.equal(found, chrome);
+
+  const fallback = await findBrowserExecutable({
+    platform: "darwin",
+    env: { PATH: "/nowhere" },
+    home: "/home/test",
+    isExecutable: async () => false,
+    playwright: async () => "/playwright/chromium",
+  });
+  assert.equal(fallback, "/playwright/chromium");
+});
+
+test("the Playwright cache scan finds any installed Chromium, newest first", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-qa-browser-cache-"));
+  try {
+    const older = join(dir, "chromium-100", "chrome-mac-arm64");
+    const newer = join(dir, "chromium-200", "chrome-mac-arm64");
+    for (const base of [older, newer]) {
+      const app = join(base, "Google Chrome for Testing.app", "Contents", "MacOS");
+      await mkdir(app, { recursive: true });
+      await writeFile(join(app, "Google Chrome for Testing"), "");
+    }
+    const found = await scanPlaywrightCache(dir, "darwin");
+    assert.equal(
+      found,
+      join(
+        newer,
+        "Google Chrome for Testing.app",
+        "Contents",
+        "MacOS",
+        "Google Chrome for Testing",
+      ),
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a missing browser is a browser setup error naming the fix", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-qa-app-"));
+  try {
+    const result = await startQaApp({
+      qa: qaApp(),
+      cwd: dir,
+      area: "backend",
+      env: baseEnv(),
+      healthTimeoutMs: 5_000,
+      pollMs: 50,
+      probeTimeoutMs: 1_000,
+      graceMs: 100,
+      findBrowser: async () => undefined,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.step, "browser");
+      assert.match(result.detail, /no browser found/);
+      assert.match(result.detail, /install Google Chrome/);
+      assert.equal(result.error, "no browser found");
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a browser that does not launch is a browser setup error", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-qa-app-"));
+  try {
+    const result = await startQaApp({
+      qa: qaApp(),
+      cwd: dir,
+      area: "backend",
+      env: baseEnv(),
+      healthTimeoutMs: 5_000,
+      pollMs: 50,
+      probeTimeoutMs: 1_000,
+      graceMs: 100,
+      findBrowser: async () => "/fake/chrome",
+      launchBrowser: async () => ({
+        ok: false,
+        detail: "could not start the browser: ENOENT; install Google Chrome",
+        error: "browser did not start",
+      }),
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.step, "browser");
+      assert.match(result.detail, /install Google Chrome/);
+      assert.equal(result.error, "browser did not start");
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a web review gets the browser endpoint, and stop kills the browser then the app", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-qa-app-"));
+  try {
+    let browserStops = 0;
+    const result = await startQaApp({
+      qa: qaApp(),
+      cwd: dir,
+      area: "frontend",
+      env: baseEnv(),
+      healthTimeoutMs: 5_000,
+      pollMs: 50,
+      probeTimeoutMs: 1_000,
+      graceMs: 100,
+      findBrowser: async () => "/fake/chrome",
+      launchBrowser: async (options) => ({
+        ok: true,
+        browser: {
+          endpoint: `http://127.0.0.1:${options.port}`,
+          stop: async () => {
+            browserStops += 1;
+          },
+        },
+      }),
+    });
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.match(result.app.browser ?? "", /^http:\/\/127\.0\.0\.1:\d+$/);
+    await result.app.stop();
+    assert.equal(browserStops, 1, "the browser stops with the app");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("launchQaBrowser waits for the debug port and kills its tree on stop", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-qa-browser-"));
+  const pidFile = join(dir, "browser.pid");
+  const profileDir = join(dir, "profile");
+  try {
+    const port = await freePort();
+    const script = join(dir, "fake-chrome");
+    const server = `require("node:http").createServer((req,res)=>{res.statusCode=200;res.end("{}")}).listen(Number(process.argv[1]),"127.0.0.1")`;
+    await writeFile(
+      script,
+      [
+        "#!/bin/sh",
+        'for arg in "$@"; do',
+        '  case "$arg" in',
+        "    --remote-debugging-port=*) port=$(printf '%s' \"$arg\" | sed 's/.*=//') ;;",
+        "  esac",
+        "done",
+        `echo $$ > "${pidFile}"`,
+        `exec ${JSON.stringify(process.execPath)} -e ${JSON.stringify(server)} "$port"`,
+        "",
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const started = await launchQaBrowser({
+      executable: script,
+      port,
+      profileDir,
+      timeoutMs: 5_000,
+      pollMs: 50,
+      graceMs: 100,
+      env: baseEnv(),
+    });
+    assert.equal(started.ok, true);
+    if (!started.ok) return;
+    assert.equal(started.browser.endpoint, `http://127.0.0.1:${port}`);
+    const pid = Number(await readFile(pidFile, "utf8"));
+    process.kill(pid, 0);
+    await started.browser.stop();
+    assert.equal(await gone(pid), true, "the browser tree is killed");
+    assert.equal(existsSync(profileDir), false, "the temporary profile is removed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("launchQaBrowser names the fix when the executable is missing", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-qa-browser-"));
+  try {
+    const result = await launchQaBrowser({
+      executable: join(dir, "no-such-browser"),
+      port: await freePort(),
+      profileDir: join(dir, "profile"),
+      timeoutMs: 1_000,
+      pollMs: 50,
+      graceMs: 50,
+      env: baseEnv(),
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.match(result.detail, /install Google Chrome/);
+      assert.equal(result.error, "browser did not start");
     }
   } finally {
     await rm(dir, { recursive: true, force: true });

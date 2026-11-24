@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { delimiter } from "node:path";
 import { test } from "node:test";
 import {
   type AdapterEvent,
@@ -24,6 +25,7 @@ import {
   parseQaVerdict,
   type QaRunInput,
   type QaRunResult,
+  qaBrowserBinDir,
   qaChecklist,
   resetQaAppFailures,
   runQa,
@@ -309,7 +311,13 @@ const liveQa: QaConfig = {
 function appStarted(stop: () => Promise<void> = async () => {}): QaAppStart {
   return {
     ok: true,
-    app: { kind: "web", url: "http://127.0.0.1:4321", port: 4321, stop },
+    app: {
+      kind: "web",
+      url: "http://127.0.0.1:4321",
+      port: 4321,
+      browser: "http://127.0.0.1:9222",
+      stop,
+    },
   };
 }
 
@@ -789,7 +797,13 @@ test("prepare runs after the tests and before the agent; its env and the memory 
   });
   assert.equal(result.outcome, "approved");
   assert.deepEqual(order, ["test /wt/qa-sha7", "prepare /wt/qa-sha7 MET-53-qa-1-pr7"]);
-  assert.deepEqual(h.tasks[0]?.env, { GIT_CONFIG_COUNT: "1" });
+  assert.equal(h.tasks[0]?.env?.GIT_CONFIG_COUNT, "1");
+  assert.equal(h.tasks[0]?.env?.HARNESSD_QA_RUN, "MET-53-qa-1-pr7");
+  assert.equal(
+    (h.tasks[0]?.env?.PATH ?? "").split(delimiter)[0],
+    qaBrowserBinDir(process.env),
+    "the prepare env keeps qa-browser first on PATH",
+  );
   assert.match(h.tasks[0]?.prompt ?? "", /## Memory\n/);
   assert.match(h.tasks[0]?.prompt ?? "", /\/repo\/\.harnessd\/vault/);
 });
@@ -866,7 +880,7 @@ test("an app start failure is a setup error: no QA failure, no review, one re-qu
 
 test("each app step failure keeps its step name in the setup marker", async () => {
   resetQaAppFailures();
-  for (const step of ["build", "seed", "start", "health"] as const) {
+  for (const step of ["build", "seed", "start", "health", "browser"] as const) {
     resetQaAppFailures();
     const h = harness({ replies: [verdict([true, true])], commands: liveQa });
     const result = await runQa(h.input, {
@@ -877,6 +891,25 @@ test("each app step failure keeps its step name in the setup marker", async () =
     assert.equal(result.reviews[0]?.error, `app ${step} failed: ${step} broke`, step);
     assert.equal(h.tasks.length, 0, step);
   }
+});
+
+test("a browser setup error re-queues QA and its log line names the fix", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, true])], commands: liveQa });
+  const result = await runQa(h.input, {
+    ...h.deps,
+    startApp: async () =>
+      appFailed(
+        "browser",
+        "no browser found; install Google Chrome, or a Playwright Chromium with `pnpm exec playwright install chromium`",
+      ),
+  });
+  assert.equal(result.reviews[0]?.setup, true);
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, {}, "no QA failure is counted");
+  assert.match(s.logs[0] ?? "", /app browser failed: no browser found; install Google Chrome/);
 });
 
 test("the third app setup error on one head runs with no app; a new head resets the count", async () => {
@@ -922,6 +955,29 @@ test("the QA prompt names the live app's url and kind, and the app stops after t
     /## App\nThe product is running at http:\/\/127\.0\.0\.1:4321 \(kind web\)\./,
   );
   assert.equal(stopped, 1, "the app stops after an approval");
+});
+
+test("only the QA run gets qa-browser first on PATH, with the live browser endpoint", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, true])], commands: liveQa });
+  const result = await runQa(h.input, { ...h.deps, startApp: async () => appStarted() });
+  assert.equal(result.outcome, "approved");
+  const env = h.tasks[0]?.env ?? {};
+  assert.equal(env.HARNESSD_QA_BROWSER, "http://127.0.0.1:9222");
+  assert.equal(env.HARNESSD_QA_RUN, "MET-53-qa-1-pr7");
+  const dirs = (env.PATH ?? "").split(delimiter);
+  assert.equal(dirs[0], qaBrowserBinDir(process.env), "qa-browser's folder is first on PATH");
+  assert.equal(dirs.slice(1).join(delimiter), process.env.PATH ?? "");
+});
+
+test("a QA run without a live app gets qa-browser but no endpoint", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "approved");
+  const env = h.tasks[0]?.env ?? {};
+  assert.equal(env.HARNESSD_QA_BROWSER, undefined);
+  assert.equal(env.HARNESSD_QA_RUN, "MET-53-qa-1-pr7");
+  assert.equal((env.PATH ?? "").split(delimiter)[0], qaBrowserBinDir(process.env));
 });
 
 test("a pause that lands after the app started still stops the app", async () => {

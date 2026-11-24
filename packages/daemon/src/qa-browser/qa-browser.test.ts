@@ -1,0 +1,114 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { parseQaBrowserArgs, runQaBrowser, screenshotPath } from "./qa-browser.ts";
+
+/** Captures the one stdout line the CLI writes. */
+function capture(): { lines: string[]; io: { out: (line: string) => void } } {
+  const lines: string[] = [];
+  return { lines, io: { out: (line: string) => lines.push(line) } };
+}
+
+/** The single JSON object a command printed. */
+function one(lines: string[]): Record<string, unknown> {
+  assert.equal(lines.length, 1, "one JSON line");
+  const value: unknown = JSON.parse(lines[0] ?? "");
+  assert.ok(typeof value === "object" && value !== null && !Array.isArray(value));
+  return value as Record<string, unknown>;
+}
+
+test("an unknown command prints one JSON error and exits 1", async () => {
+  const { lines, io } = capture();
+  const code = await runQaBrowser(["nope"], io, {
+    env: { HARNESSD_QA_BROWSER: "http://127.0.0.1:1" },
+  });
+  assert.equal(code, 1);
+  const payload = one(lines);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.command, "nope");
+  assert.match(String(payload.error), /unknown command "nope"/);
+  assert.equal("result" in payload, false);
+});
+
+test("a missing argument prints one JSON error and exits 1", async () => {
+  const { lines, io } = capture();
+  const code = await runQaBrowser(["click"], io, {
+    env: { HARNESSD_QA_BROWSER: "http://127.0.0.1:1" },
+  });
+  assert.equal(code, 1);
+  const payload = one(lines);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.command, "click");
+  assert.match(String(payload.error), /missing selector/);
+});
+
+test("no HARNESSD_QA_BROWSER names the variable in one JSON error", async () => {
+  const { lines, io } = capture();
+  const code = await runQaBrowser(["open", "http://127.0.0.1:3000"], io, { env: {} });
+  assert.equal(code, 1);
+  const payload = one(lines);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.command, "open");
+  assert.match(String(payload.error), /HARNESSD_QA_BROWSER is not set/);
+});
+
+test("the script itself exits 1 with one JSON line for an unknown command", () => {
+  const script = fileURLToPath(new URL("./qa-browser.ts", import.meta.url));
+  const result = spawnSync(process.execPath, [script, "nope"], {
+    encoding: "utf8",
+    env: { ...process.env, HARNESSD_QA_BROWSER: "" },
+  });
+  assert.equal(result.status, 1);
+  const lines = result.stdout
+    .trim()
+    .split("\n")
+    .filter((line) => line !== "");
+  const payload = one(lines);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.command, "nope");
+});
+
+test("open takes a url, a width and a height, and defaults to 1280x800", () => {
+  assert.deepEqual(parseQaBrowserArgs("open", ["http://127.0.0.1:3000"]), {
+    kind: "open",
+    url: "http://127.0.0.1:3000",
+    width: 1280,
+    height: 800,
+  });
+  assert.deepEqual(
+    parseQaBrowserArgs("open", ["http://x.test", "--width", "390", "--height", "844"]),
+    { kind: "open", url: "http://x.test", width: 390, height: 844 },
+  );
+  assert.throws(() => parseQaBrowserArgs("open", ["--width", "0", "http://x"]), /--width/);
+  assert.throws(() => parseQaBrowserArgs("open", ["--depth", "1", "http://x"]), /unknown option/);
+  assert.throws(() => parseQaBrowserArgs("open", ["not a url"]), /not a url/);
+});
+
+test("click, type, text, check and screenshot take their arguments", () => {
+  assert.deepEqual(parseQaBrowserArgs("click", ["#go"]), { kind: "click", selector: "#go" });
+  assert.deepEqual(parseQaBrowserArgs("type", ["#name", "Ada Lovelace"]), {
+    kind: "type",
+    selector: "#name",
+    text: "Ada Lovelace",
+  });
+  assert.deepEqual(parseQaBrowserArgs("text", ["h1"]), { kind: "text", selector: "h1" });
+  assert.deepEqual(parseQaBrowserArgs("check", ["checks/title.js"]), {
+    kind: "check",
+    file: "checks/title.js",
+  });
+  assert.deepEqual(parseQaBrowserArgs("screenshot", ["home"]), {
+    kind: "screenshot",
+    name: "home",
+  });
+  assert.throws(() => parseQaBrowserArgs("type", ["#name"]), /missing text/);
+});
+
+test("a screenshot path is relative to HARNESSD_HOME and safe", () => {
+  const target = screenshotPath("Home page", "MET-53-qa-1-pr7", { HARNESSD_HOME: "/tmp/home" });
+  assert.equal(target.relative, "qa/MET-53-qa-1-pr7/Home_page.png");
+  assert.equal(target.absolute, "/tmp/home/qa/MET-53-qa-1-pr7/Home_page.png");
+  const png = screenshotPath("done.png", "../run");
+  assert.equal(png.relative.endsWith("/done.png"), true);
+  assert.doesNotMatch(png.relative, /\.\./);
+});

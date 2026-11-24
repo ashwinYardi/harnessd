@@ -13,13 +13,17 @@
   "files": [
     "dist"
   ],
+  "bin": {
+    "qa-browser": "./dist/qa-browser/qa-browser.js"
+  },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-qa-browser-bin.ts",
     "typecheck": "tsc --noEmit",
     "test": "node --test 'src/**/*.test.ts'"
   },
   "dependencies": {
     "@harnessd/shared": "workspace:*",
+    "playwright-core": "^1.49.0",
     "smol-toml": "^1.9.1"
   }
 }
