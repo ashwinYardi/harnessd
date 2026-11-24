@@ -124,12 +124,30 @@ test("parsePlanReply accepts a part with the fixed brief fields and a reason", (
         steps: ["Add the field."],
         verify: [{ run: "pnpm test", expect: "passes" }],
         outOfScope: "The UI.",
+        qa: "agent",
       },
     ],
     reason: "The UI and the API are separate parts.",
   });
   assert.equal(parsePlanReply(reply([brief()])).ok, true);
   assert.equal(parsePlanReply(`Here:\n\`\`\`json\n${reply([brief()])}\n\`\`\``).ok, true);
+});
+
+test("parsePlanReply parses qa, and a missing qa means agent", () => {
+  for (const qa of ["tests", "agent"] as const) {
+    const parsed = parsePlanReply(reply([brief({ qa })]));
+    assert.equal(parsed.ok, true, qa);
+    if (parsed.ok) assert.equal(parsed.parts[0]?.qa, qa);
+  }
+  const missing = parsePlanReply(reply([brief()]));
+  assert.equal(missing.ok, true);
+  if (missing.ok) assert.equal(missing.parts[0]?.qa, "agent");
+
+  for (const qa of ["test", "human", "", 5, null, true]) {
+    const parsed = parsePlanReply(reply([brief({ qa })]));
+    assert.equal(parsed.ok, false, JSON.stringify(qa));
+    if (!parsed.ok) assert.match(parsed.error, /parts\[0\]\.qa: expected tests or agent/);
+  }
 });
 
 test("reason is required for every plan, one part or more", () => {
@@ -279,6 +297,47 @@ test("checkPlan rejects an empty or blank brief field", () => {
   ];
   for (const [fields, error] of cases) {
     assert.match(checkPlan([part(fields)], issue()).join("\n"), error);
+  }
+});
+
+test("checkPlan rejects qa tests on a frontend part or a part with no Verify command", () => {
+  const frontend = parsePlanReply(
+    reply([brief({ role: "frontend", qa: "tests", files: ["packages/ui/app/src/x.tsx"] })]),
+  );
+  assert.equal(frontend.ok, true);
+  if (frontend.ok) {
+    assert.match(
+      checkPlan(frontend.parts, issue()).join("\n"),
+      /parts\[0\]\.qa: a frontend part needs agent QA/,
+    );
+  }
+
+  for (const verify of [[], [{ run: " ", expect: "passes" }]]) {
+    const noVerify = parsePlanReply(reply([brief({ qa: "tests", verify })]));
+    assert.equal(noVerify.ok, true);
+    if (noVerify.ok) {
+      assert.match(
+        checkPlan(noVerify.parts, issue()).join("\n"),
+        /parts\[0\]\.qa: a part with no Verify command needs agent QA/,
+      );
+    }
+  }
+
+  // Tests QA passes on a backend part whose Verify command proves it.
+  const ok = parsePlanReply(reply([brief({ qa: "tests" })]));
+  assert.equal(ok.ok, true);
+  if (ok.ok) assert.deepEqual(checkPlan(ok.parts, issue()), []);
+  // Agent QA is allowed on a frontend part and on a part with no Verify command.
+  const agent = parsePlanReply(
+    reply([
+      brief({ role: "frontend", qa: "agent", files: ["packages/ui/app/src/x.tsx"] }),
+      brief({ role: "backend", qa: "agent", verify: [], files: ["packages/daemon/src/a.ts"] }),
+    ]),
+  );
+  assert.equal(agent.ok, true);
+  if (agent.ok) {
+    const errors = checkPlan(agent.parts, issue()).join("\n");
+    assert.doesNotMatch(errors, /\.qa:/);
   }
 });
 
@@ -550,6 +609,7 @@ test("buildPlanPrompt carries the brief fields, the rules, the issue and the con
   assert.ok(prompt.includes('"goal": "one sentence"'), prompt);
   assert.ok(prompt.includes('"doneWhen": [1, 2]'), prompt);
   assert.ok(prompt.includes('"verify": [{ "run"'), prompt);
+  assert.ok(prompt.includes('"qa": "tests" | "agent"'), prompt);
   assert.ok(prompt.includes('"outOfScope"'), prompt);
 });
 
@@ -565,6 +625,12 @@ test("the plan prompt states the size rule, the area split and the docs rule (ME
   assert.match(prompt, /A backend part lists no file under "packages\/ui\/app\/"/);
   assert.match(prompt, /A frontend part lists no file in "packages\/daemon\/"/);
   assert.match(prompt, /also for a one-part plan/i);
+  assert.match(
+    prompt,
+    /Set "qa" to "tests" only when every Done-when item names a Verify command that proves it by exit code/,
+  );
+  assert.match(prompt, /no UI work and no item that needs a running app, a browser or a viewport/);
+  assert.match(prompt, /In all other cases set "agent"/);
 });
 
 test("the plan prompt asks for decision IDs and forbids the read-everything line (D-044)", () => {

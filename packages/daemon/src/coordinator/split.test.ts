@@ -189,6 +189,7 @@ test("splitIssue creates the parts and a QA sub-issue that every part blocks", a
     "**Files**",
     "**Steps**",
     "**Verify**",
+    "**QA**",
     "**Out of scope**",
     "**Why**",
     "**Spec links**",
@@ -290,6 +291,28 @@ test("parts that share a file are chained, and the backend part blocks the front
 test("a part with no parsed parent item says 'as written'", () => {
   const body = formatPartDescription({ ...parent, doneWhen: [] }, plan[0] as PlanPart, "backend");
   assert.match(body, /\*\*Done when\*\*\n- \[ \] Matches MET-40 as written/);
+});
+
+test("the part body carries its QA line right after the Verify section", () => {
+  const backend = plan[0] as PlanPart;
+  const expected =
+    "**Verify**\n- `pnpm test` → the API tests pass\n\n" +
+    "**QA**: tests\n\n**Out of scope**\nThe board UI.";
+
+  const tests = formatPartDescription(parent, { ...backend, qa: "tests" }, "backend");
+  assert.ok(tests.includes(expected), tests);
+
+  const agent = formatPartDescription(parent, { ...backend, qa: "agent" }, "backend");
+  assert.ok(agent.includes("**QA**: agent"), agent);
+
+  // A part from a plan before the field existed, or from a hand-made plan, gets agent QA.
+  const missing = formatPartDescription(parent, backend, "backend");
+  assert.ok(missing.includes("**QA**: agent"), missing);
+
+  for (const body of [tests, agent, missing]) {
+    assert.ok(body.indexOf("**Verify**") < body.indexOf("**QA**"), body);
+    assert.ok(body.indexOf("**QA**") < body.indexOf("**Out of scope**"), body);
+  }
 });
 
 test("splitIssue reuses children by marker and only adds what is missing", async () => {

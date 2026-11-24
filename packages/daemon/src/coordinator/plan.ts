@@ -21,6 +21,10 @@ export function isPartRole(value: string): value is PartRole {
   return (PART_ROLES as readonly string[]).includes(value);
 }
 
+/** How QA judges a part: its Verify commands, or a QA agent (D-053). */
+export const PART_QA = ["tests", "agent"] as const;
+export type PartQa = (typeof PART_QA)[number];
+
 const SIZES: readonly Size[] = ["S", "M", "L"];
 
 /** At most this many parts per issue; more means the issue itself is wrong. */
@@ -108,6 +112,8 @@ export interface PlanPart {
   steps: string[];
   /** The commands that prove the part, and what each must show. */
   verify: PlanVerify[];
+  /** How QA judges the part; absent means agent QA (D-053). */
+  qa?: PartQa;
   /** What this part leaves to another part or to a later ticket. */
   outOfScope: string;
   /** The records this part reads; the builder reads only these and its brief (D-044). */
@@ -156,6 +162,7 @@ export const PLAN_REPLY_SHAPE = `{
     "files": ["repo/relative/path.ts"],
     "steps": ["one action"],
     "verify": [{ "run": "command", "expect": "what its output must show" }],
+    "qa": "tests" | "agent",
     "outOfScope": "what this part leaves to another part",
     "decisions": [{ "id": "D-NNN", "line": "why it applies to this part" }],
     "calls": [1, "a grill question this part follows"]
@@ -191,6 +198,7 @@ const PART_KEYS = [
   "files",
   "steps",
   "verify",
+  "qa",
   "outOfScope",
   "decisions",
   "calls",
@@ -265,6 +273,8 @@ export function parsePlanReply(text: string, options: ParsePlanOptions = {}): Pa
     if ("error" in steps) return { ok: false, error: steps.error };
     const verify = parseVerify(raw.verify, `${path}.verify`);
     if ("error" in verify) return { ok: false, error: verify.error };
+    const qa = parsePartQa(raw.qa, `${path}.qa`);
+    if ("error" in qa) return { ok: false, error: qa.error };
     const decisions = parseDecisions(raw.decisions, `${path}.decisions`, options);
     if ("error" in decisions) return { ok: false, error: decisions.error };
     const calls = parsePartCalls(raw.calls, `${path}.calls`);
@@ -279,6 +289,7 @@ export function parsePlanReply(text: string, options: ParsePlanOptions = {}): Pa
       steps: steps.value,
       verify: verify.value,
       outOfScope: (raw.outOfScope as string).trim(),
+      qa: qa.value,
     };
     if (decisions.value.length > 0) part.decisions = decisions.value;
     if (calls.value.length > 0) part.calls = calls.value;
@@ -327,6 +338,16 @@ function parseVerify(raw: unknown, path: string): { value: PlanVerify[] } | { er
     value.push({ run: entry.run.trim(), expect: entry.expect.trim() });
   }
   return { value };
+}
+
+/** How QA judges a part: tests or agent. A missing value means agent (D-053). */
+function parsePartQa(raw: unknown, path: string): { value: PartQa } | { error: string } {
+  if (raw === undefined) return { value: "agent" };
+  const qa = typeof raw === "string" ? raw.trim() : "";
+  if (!(PART_QA as readonly string[]).includes(qa)) {
+    return { error: `${path}: expected tests or agent, got ${JSON.stringify(raw)}` };
+  }
+  return { value: qa as PartQa };
 }
 
 /**
@@ -445,6 +466,15 @@ export function checkPlan(parts: readonly PlanPart[], parent: Issue): string[] {
         errors.push(`${path}.verify[${j}]: expected run and expect`);
       }
     }
+    // QA from tests needs a runnable proof and no UI or live-app check (D-053).
+    if (part.qa === "tests") {
+      if (part.role === "frontend") {
+        errors.push(`${path}.qa: a frontend part needs agent QA`);
+      }
+      if (!part.verify.some((check) => check.run.trim() !== "")) {
+        errors.push(`${path}.qa: a part with no Verify command needs agent QA`);
+      }
+    }
     if (part.outOfScope.trim() === "") {
       errors.push(`${path}.outOfScope: expected what the part leaves out`);
     }
@@ -527,6 +557,7 @@ export function buildPlanPrompt({
       '- Each part lists the decision records it depends on in "decisions": [{ "id": "D-NNN", "line": "why it applies" }]. The builder reads only its brief and these records (D-044).',
       '- Each part lists the grill calls that apply to it in "calls": the call numbers below, or their question texts.',
       '- Each part carries its brief: "goal" (one sentence), "doneWhen" (the 1-based numbers of the parent "Done when" items it covers), "files" (the repo-relative paths it changes), "steps" (one action each), "verify" (each command and what its output must show) and "outOfScope". A part covers at most 3 Done-when items and changes at most 8 files.',
+      '- Set "qa" to "tests" only when every Done-when item names a Verify command that proves it by exit code, and the part has no UI work and no item that needs a running app, a browser or a viewport. In all other cases set "agent".',
       'Never write "Read docs/SPEC.md and docs/decisions/" or tell the agent to read every record.',
       "You may read files in this repo; do not edit anything.",
     ].join("\n"),
