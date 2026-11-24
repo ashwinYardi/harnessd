@@ -121,6 +121,8 @@ type Reply =
   | {
       status: RunResult["status"];
       error?: string;
+      /** The harness's own failure reason, e.g. turn_cap or stalled. */
+      reason?: RunResult["reason"];
       /** The final assistant text for an `ok` run, e.g. a verdict. */
       text?: string;
       tokens?: RunResult["tokens"];
@@ -148,6 +150,7 @@ function fakeAdapter(replies: Reply[]) {
       else {
         if (reply.text !== undefined) result.finalText = reply.text;
         if (reply.error !== undefined) result.error = reply.error;
+        if (reply.reason !== undefined) result.reason = reply.reason;
         if (reply.turns !== undefined) result.turns = reply.turns;
         if (reply.usageUnknown === true) result.usageUnknown = true;
       }
@@ -311,6 +314,32 @@ function settleDeps() {
 
 function setupErrorReview(part: LinkedIssue, error: string): PrReview {
   return { part, decision: "error", failing: [], setup: true, error };
+}
+
+/** A review that gave no usable verdict, on a PR head (MET-196, D-052). */
+function notJudgedReview(
+  part: LinkedIssue,
+  notJudged: NonNullable<PrReview["notJudged"]>,
+  error: string,
+  head = "sha7",
+): PrReview {
+  return {
+    part,
+    pr: { ...pr(7, part.key), headRefOid: head },
+    decision: "error",
+    failing: [],
+    notJudged,
+    error,
+  };
+}
+
+/** A one-part QA round with a single not-judged review. */
+function notJudgedRound(
+  notJudged: NonNullable<PrReview["notJudged"]>,
+  error: string,
+  head = "sha7",
+): QaRunResult {
+  return { outcome: "error", reviews: [notJudgedReview(backend, notJudged, error, head)] };
 }
 
 /** A repo that declares a live web product (MET-177, D-051). */
@@ -570,21 +599,24 @@ test("the model reporting failing tests also blocks approval", async () => {
   assert.match(result.reviews[0]?.failing[0] ?? "", /QA agent saw failing tests/);
 });
 
-test("an invalid verdict is a failed QA run: no review, counted, nothing sent back", async () => {
+test("an invalid verdict is not judged: no review, no failure, QA re-queued", async () => {
   const h = harness({ replies: ["Looks good to me!"] });
   const result = await runQa(h.input, h.deps);
   assert.equal(result.outcome, "error");
   assert.equal(h.reviews.length, 0);
+  assert.equal(result.reviews[0]?.notJudged, "not_json");
   assert.match(result.reviews[0]?.error ?? "", /QA verdict was unusable: not JSON/);
 
   const s = settleDeps();
   const state = emptyLoopState();
-  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "sent_back");
-  assert.equal(state.qaFailures[parent.id], 1);
+  state.qaFailures[parent.id] = 1;
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, { [parent.id]: 1 }, "no QA failure is counted");
   assert.deepEqual(state.qaFeedback, {});
   assert.deepEqual(s.moves, [{ issueId: qa.id, state: "Ready" }], "only QA runs again");
-  assert.match(s.comments[0]?.body ?? "", /QA could not judge every PR, so MET-53 runs again/);
-  assert.match(s.comments[0]?.body ?? "", /not judged: the QA verdict was unusable/);
+  assert.deepEqual(s.comments, [], "no comment is posted");
+  assert.deepEqual(s.pings, [], "no notice is sent");
+  assert.match(s.logs[0] ?? "", /QA not judged \(verdict not JSON: /);
 });
 
 test("an invalid verdict with failing tests still requests changes", async () => {
@@ -594,6 +626,195 @@ test("an invalid verdict with failing tests still requests changes", async () =>
   assert.match(
     h.reviews[0]?.body ?? "",
     /Also, the QA verdict was unusable: items: expected an array/,
+  );
+});
+
+test("a turn-capped QA run is not judged, re-queued and counts no failure (D-052)", async () => {
+  resetQaAppFailures();
+  const h = harness({
+    replies: [{ status: "error", error: "turn cap (80 turns)", reason: "turn_cap" }],
+  });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "error");
+  assert.equal(h.reviews.length, 0, "no review is posted");
+  assert.equal(result.reviews[0]?.notJudged, "turn_cap");
+  assert.equal(result.reviews[0]?.setup, undefined);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, { [parent.id]: 1 }, "no QA failure is counted");
+  assert.deepEqual(state.qaFeedback, {});
+  assert.deepEqual(s.moves, [{ issueId: qa.id, state: "Ready" }]);
+  assert.deepEqual(s.comments, []);
+  assert.deepEqual(s.pings, []);
+  assert.deepEqual(s.logs, ["MET-53: QA not judged (turn cap (80 turns)), re-queued"]);
+});
+
+test("a timed-out QA run is not judged and logs timed out (D-052)", async () => {
+  resetQaAppFailures();
+  const h = harness({
+    replies: [{ status: "timeout", error: "budget of 7168741ms exceeded" }],
+  });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.reviews[0]?.notJudged, "timeout");
+  assert.equal(h.reviews.length, 0);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, {});
+  assert.deepEqual(s.logs, ["MET-53: QA not judged (timed out), re-queued"]);
+});
+
+test("a stalled QA run is not judged and logs stalled (D-052)", async () => {
+  resetQaAppFailures();
+  const h = harness({
+    replies: [{ status: "error", error: "stalled (no output for 10 min)", reason: "stalled" }],
+  });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.reviews[0]?.notJudged, "stalled");
+  assert.equal(h.reviews.length, 0);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, {});
+  assert.deepEqual(s.logs, ["MET-53: QA not judged (stalled), re-queued"]);
+});
+
+test("a second not-judged run in a row on the same head escalates with the reason", async () => {
+  resetQaAppFailures();
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+  state.sessions = {
+    [backend.id]: {
+      harness: "claude-code",
+      sessionId: "session-1",
+      worktree: "/wt/backend",
+      branch: "met-51-work",
+      at: "2026-11-24T10:00:00Z",
+    },
+  };
+
+  const first = notJudgedRound(
+    "turn_cap",
+    "the QA verdict was unusable: harness run error: turn cap (80 turns)",
+  );
+  assert.equal(await settleQa(state, { qa, parent }, first, s.deps), "requeued");
+  assert.equal(s.comments.length, 0, "the first run posts nothing");
+  assert.equal(s.pings.length, 0);
+
+  const second = notJudgedRound(
+    "timeout",
+    "the QA verdict was unusable: harness run timeout: budget of 7168741ms exceeded",
+  );
+  assert.equal(await settleQa(state, { qa, parent }, second, s.deps), "escalated");
+
+  assert.deepEqual(state.qaFailures, { [parent.id]: 1 }, "no QA failure is counted");
+  assert.deepEqual(state.qaFeedback, {}, "no feedback is stored");
+  assert.equal(state.sessions[backend.id]?.sessionId, "session-1", "the part session is kept");
+  assert.deepEqual(s.moves, [
+    { issueId: qa.id, state: "Ready" },
+    { issueId: qa.id, state: "Needs input" },
+    { issueId: parent.id, state: "Needs input" },
+  ]);
+  assert.equal(s.comments.length, 1, "one comment on the parent");
+  assert.equal(s.comments[0]?.issueId, parent.id);
+  const body = s.comments[0]?.body ?? "";
+  assert.match(body, /QA was not judged twice on MET-51 PR #7 at sha7: /);
+  assert.match(body, /turn cap \(80 turns\); timed out\. No QA failure counted\./);
+  assert.equal(s.pings.length, 1);
+  assert.match(s.pings[0] ?? "", /MET-50 needs input \(QA not judged twice\): /);
+
+  // The escalation clears the count, so the next not-judged run re-queues again.
+  assert.equal(await settleQa(state, { qa, parent }, second, s.deps), "requeued");
+});
+
+test("a new head between two not-judged runs re-queues again (D-052)", async () => {
+  resetQaAppFailures();
+  const s = settleDeps();
+  const state = emptyLoopState();
+  const first = notJudgedRound("turn_cap", "harness run error: turn cap (80 turns)", "sha7");
+  assert.equal(await settleQa(state, { qa, parent }, first, s.deps), "requeued");
+  const newHead = notJudgedRound("stalled", "harness run error: stalled", "sha8");
+  assert.equal(await settleQa(state, { qa, parent }, newHead, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, {});
+  assert.deepEqual(s.comments, []);
+  assert.deepEqual(s.pings, []);
+});
+
+test("a judged verdict clears the not-judged count (D-052)", async () => {
+  resetQaAppFailures();
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(
+    await settleQa(
+      state,
+      { qa, parent },
+      notJudgedRound("turn_cap", "harness run error: turn cap (80 turns)"),
+      s.deps,
+    ),
+    "requeued",
+  );
+
+  const judged: QaRunResult = {
+    outcome: "changes_requested",
+    reviews: [
+      {
+        part: backend,
+        pr: pr(7, backend.key),
+        decision: "request_changes",
+        failing: ["It has tests: nothing covers item 2"],
+      },
+    ],
+  };
+  assert.equal(await settleQa(state, { qa, parent }, judged, s.deps), "sent_back");
+  assert.equal(state.qaFailures[parent.id], 1);
+
+  assert.equal(
+    await settleQa(
+      state,
+      { qa, parent },
+      notJudgedRound("turn_cap", "harness run error: turn cap (80 turns)"),
+      s.deps,
+    ),
+    "requeued",
+    "the judged verdict cleared the count",
+  );
+});
+
+test("a D-041 setup error neither adds to nor clears the not-judged count (D-052)", async () => {
+  resetQaAppFailures();
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(
+    await settleQa(
+      state,
+      { qa, parent },
+      notJudgedRound("turn_cap", "harness run error: turn cap (80 turns)"),
+      s.deps,
+    ),
+    "requeued",
+  );
+
+  const setup: QaRunResult = {
+    outcome: "error",
+    reviews: [setupErrorReview(backend, "could not check out PR #7: fetch failed")],
+  };
+  assert.equal(await settleQa(state, { qa, parent }, setup, s.deps), "requeued");
+
+  assert.equal(
+    await settleQa(
+      state,
+      { qa, parent },
+      notJudgedRound("timeout", "harness run timeout: budget exceeded"),
+      s.deps,
+    ),
+    "escalated",
+    "the setup error left the earlier not-judged run counted",
   );
 });
 
@@ -740,6 +961,55 @@ test("a setup error mixed with requested changes counts one failure", async () =
   assert.deepEqual(s.pings, []);
 });
 
+test("a second not-judged run on one head escalates even when another part asks for changes", async () => {
+  resetQaAppFailures();
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+
+  assert.equal(
+    await settleQa(
+      state,
+      { qa, parent },
+      notJudgedRound("timeout", "harness run timeout: budget exceeded"),
+      s.deps,
+    ),
+    "requeued",
+  );
+
+  // The frontend part asks for changes, so this round counts a failure anyway; the
+  // backend part's second timeout on the same head must still escalate (D-052).
+  const mixed: QaRunResult = {
+    outcome: "changes_requested",
+    reviews: [
+      {
+        part: frontend,
+        pr: pr(8, frontend.key),
+        decision: "request_changes",
+        failing: ["It has tests: nothing covers item 2"],
+      },
+      notJudgedReview(backend, "timeout", "harness run timeout: budget exceeded"),
+    ],
+  };
+  assert.equal(await settleQa(state, { qa, parent }, mixed, s.deps), "escalated");
+
+  assert.deepEqual(state.qaFailures, { [parent.id]: 1 }, "no QA failure is counted");
+  assert.deepEqual(state.qaFeedback, {}, "no feedback is stored");
+  assert.deepEqual(s.moves, [
+    { issueId: qa.id, state: "Ready" },
+    { issueId: qa.id, state: "Needs input" },
+    { issueId: parent.id, state: "Needs input" },
+  ]);
+  assert.equal(s.comments.length, 1, "one comment on the parent");
+  assert.equal(s.comments[0]?.issueId, parent.id);
+  assert.match(
+    s.comments[0]?.body ?? "",
+    /QA was not judged twice on MET-51 PR #7 at sha7: timed out; timed out\. No QA failure counted\./,
+  );
+  assert.equal(s.pings.length, 1);
+  assert.match(s.pings[0] ?? "", /MET-50 needs input \(QA not judged twice\): /);
+});
+
 test("parseQaVerdict is strict", () => {
   const good = verdict([true, false]);
   const parsed = parseQaVerdict(`Here it is:\n\`\`\`json\n${good}\n\`\`\``, 2);
@@ -773,6 +1043,36 @@ test("parseQaVerdict is strict", () => {
     bad(JSON.stringify({ items: [{ ...item, note: "x" }], testsPassed: true })),
     /items\[0\]: unknown key "note"/,
   );
+});
+
+test("parseQaVerdict repairs a stray backslash before a backtick or dollar (MET-196)", () => {
+  // b is one real backslash; a bare backtick would be invalid JSON after it.
+  const b = "\\";
+  const item = (evidence: string) =>
+    `{"items":[{"text":"a","pass":true,"evidence":"${evidence}"}],"testsPassed":true}`;
+
+  const repaired = parseQaVerdict(item(`ran ${b}\`pnpm test${b}\` and ${b}$HOME`), 1);
+  assert.equal(repaired.ok, true);
+  assert.equal(
+    repaired.ok && repaired.verdict.items[0]?.evidence,
+    `ran ${b}\`pnpm test${b}\` and ${b}$HOME`,
+    "a stray backslash is kept as an escaped backslash",
+  );
+
+  const valid = parseQaVerdict(item(`${b}${b}\`x\``), 1);
+  assert.equal(valid.ok, true, "a valid escaped backslash before a backtick is kept");
+  assert.equal(valid.ok && valid.verdict.items[0]?.evidence, `${b}\`x\``);
+
+  const prose = parseQaVerdict(`Here it is:\n${item(`${b}\`x\``)}`, 1);
+  assert.equal(prose.ok, true, "a verdict in prose is found after the repair");
+
+  const badHex = parseQaVerdict(item(`${b}u12`), 1);
+  assert.equal(badHex.ok, false);
+  assert.equal(!badHex.ok && badHex.kind, "not_json", "bad \\u hex is not repaired");
+
+  const notJson = parseQaVerdict("no json", 1);
+  assert.equal(!notJson.ok && notJson.kind, "not_json");
+  assert.match(!notJson.ok ? notJson.error : "", /^not JSON: /);
 });
 
 test("qaChecklist uses the part's own items plus Verify, else the parent's list", () => {
