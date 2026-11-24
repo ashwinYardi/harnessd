@@ -67,7 +67,11 @@ test("a missing argument prints one JSON error and exits 1", async () => {
 
 test("no HARNESSD_QA_BROWSER names the variable in one JSON error", async () => {
   const { lines, io } = capture();
-  const code = await runQaBrowser(["open", "http://127.0.0.1:3000"], io, { env: {} });
+  // An empty value overrides an ambient HARNESSD_QA_BROWSER, so the test is independent
+  // of the process the suite runs in (a QA run sets the variable).
+  const code = await runQaBrowser(["open", "http://127.0.0.1:3000"], io, {
+    env: { HARNESSD_QA_BROWSER: "" },
+  });
   assert.equal(code, 1);
   const payload = one(lines);
   assert.equal(payload.ok, false);

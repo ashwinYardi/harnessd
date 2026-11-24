@@ -961,6 +961,55 @@ test("a setup error mixed with requested changes counts one failure", async () =
   assert.deepEqual(s.pings, []);
 });
 
+test("a second not-judged run on one head escalates even when another part asks for changes", async () => {
+  resetQaAppFailures();
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+
+  assert.equal(
+    await settleQa(
+      state,
+      { qa, parent },
+      notJudgedRound("timeout", "harness run timeout: budget exceeded"),
+      s.deps,
+    ),
+    "requeued",
+  );
+
+  // The frontend part asks for changes, so this round counts a failure anyway; the
+  // backend part's second timeout on the same head must still escalate (D-052).
+  const mixed: QaRunResult = {
+    outcome: "changes_requested",
+    reviews: [
+      {
+        part: frontend,
+        pr: pr(8, frontend.key),
+        decision: "request_changes",
+        failing: ["It has tests: nothing covers item 2"],
+      },
+      notJudgedReview(backend, "timeout", "harness run timeout: budget exceeded"),
+    ],
+  };
+  assert.equal(await settleQa(state, { qa, parent }, mixed, s.deps), "escalated");
+
+  assert.deepEqual(state.qaFailures, { [parent.id]: 1 }, "no QA failure is counted");
+  assert.deepEqual(state.qaFeedback, {}, "no feedback is stored");
+  assert.deepEqual(s.moves, [
+    { issueId: qa.id, state: "Ready" },
+    { issueId: qa.id, state: "Needs input" },
+    { issueId: parent.id, state: "Needs input" },
+  ]);
+  assert.equal(s.comments.length, 1, "one comment on the parent");
+  assert.equal(s.comments[0]?.issueId, parent.id);
+  assert.match(
+    s.comments[0]?.body ?? "",
+    /QA was not judged twice on MET-51 PR #7 at sha7: timed out; timed out\. No QA failure counted\./,
+  );
+  assert.equal(s.pings.length, 1);
+  assert.match(s.pings[0] ?? "", /MET-50 needs input \(QA not judged twice\): /);
+});
+
 test("parseQaVerdict is strict", () => {
   const good = verdict([true, false]);
   const parsed = parseQaVerdict(`Here it is:\n\`\`\`json\n${good}\n\`\`\``, 2);

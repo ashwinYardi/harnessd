@@ -1279,63 +1279,62 @@ export async function settleQa(
   for (const r of result.reviews) {
     if (r.decision === "approve" || r.decision === "request_changes") clearNotJudged(r.part.id);
   }
+  // Count every not-judged run, even when another part in the round asks for changes, so
+  // that a second timeout on one head still reaches a human (D-052).
+  const countedParts: string[] = [];
+  let twice:
+    | {
+        part: LinkedIssue;
+        pr?: PullRequest;
+        counted: { head: string; count: number; reasons: string[] };
+      }
+    | undefined;
+  for (const r of result.reviews) {
+    if (r.notJudged === undefined) continue;
+    const counted = countNotJudged(r.part.id, r.pr?.headRefOid ?? "", notJudgedReason(r));
+    countedParts.push(r.part.id);
+    if (counted.count >= 2) {
+      twice = { part: r.part, ...(r.pr === undefined ? {} : { pr: r.pr }), counted };
+    }
+  }
+  if (twice !== undefined) {
+    // Two runs in a row gave no verdict: a human decides, and no QA failure is counted.
+    const head = twice.counted.head.slice(0, 7);
+    const where =
+      twice.pr === undefined
+        ? "no PR"
+        : `PR #${twice.pr.number}${head === "" ? "" : ` at ${head}`}`;
+    const detail =
+      `QA was not judged twice on ${twice.part.key} ${where}: ` +
+      `${twice.counted.reasons.join("; ")}. No QA failure counted.`;
+    await safely(`comment on ${parent.key}`, () =>
+      deps.linear.comment(parent.id, `**harnessd QA**: ${detail}\n`),
+    );
+    await safely(`move ${qa.key} to Needs input`, () => deps.linear.moveTo(qa.id, "Needs input"));
+    await safely(`move ${parent.key} to Needs input`, () =>
+      deps.linear.moveTo(parent.id, "Needs input"),
+    );
+    await safely("send the notice", () =>
+      deps.notifier.notify({
+        kind: "needs_input",
+        issue: { key: parent.key, url: parent.url },
+        prs: twice.pr === undefined ? [] : [{ number: twice.pr.number, url: twice.pr.url }],
+        reason: "QA not judged twice",
+        detail,
+      }),
+    );
+    for (const partId of countedParts) clearNotJudged(partId);
+    return "escalated";
+  }
   const notApproved = result.reviews.filter((r) => r.decision !== "approve");
   const noVerdictOnly =
     notApproved.length > 0 &&
     notApproved.every((r) => r.setup === true || r.notJudged !== undefined) &&
     !result.reviews.some((r) => r.decision === "request_changes");
   if (noVerdictOnly) {
-    const reasons: string[] = [];
-    const countedParts: string[] = [];
-    let twice:
-      | {
-          part: LinkedIssue;
-          pr?: PullRequest;
-          counted: { head: string; count: number; reasons: string[] };
-        }
-      | undefined;
-    for (const r of notApproved) {
-      if (r.notJudged === undefined) {
-        reasons.push(oneLine(r.error ?? "unknown"));
-        continue;
-      }
-      const reason = notJudgedReason(r);
-      reasons.push(reason);
-      const counted = countNotJudged(r.part.id, r.pr?.headRefOid ?? "", reason);
-      countedParts.push(r.part.id);
-      if (counted.count >= 2) {
-        twice = { part: r.part, ...(r.pr === undefined ? {} : { pr: r.pr }), counted };
-      }
-    }
-    if (twice !== undefined) {
-      // Two runs in a row gave no verdict: a human decides, and no QA failure is counted.
-      const head = twice.counted.head.slice(0, 7);
-      const where =
-        twice.pr === undefined
-          ? "no PR"
-          : `PR #${twice.pr.number}${head === "" ? "" : ` at ${head}`}`;
-      const detail =
-        `QA was not judged twice on ${twice.part.key} ${where}: ` +
-        `${twice.counted.reasons.join("; ")}. No QA failure counted.`;
-      await safely(`comment on ${parent.key}`, () =>
-        deps.linear.comment(parent.id, `**harnessd QA**: ${detail}\n`),
-      );
-      await safely(`move ${qa.key} to Needs input`, () => deps.linear.moveTo(qa.id, "Needs input"));
-      await safely(`move ${parent.key} to Needs input`, () =>
-        deps.linear.moveTo(parent.id, "Needs input"),
-      );
-      await safely("send the notice", () =>
-        deps.notifier.notify({
-          kind: "needs_input",
-          issue: { key: parent.key, url: parent.url },
-          prs: twice.pr === undefined ? [] : [{ number: twice.pr.number, url: twice.pr.url }],
-          reason: "QA not judged twice",
-          detail,
-        }),
-      );
-      for (const partId of countedParts) clearNotJudged(partId);
-      return "escalated";
-    }
+    const reasons = notApproved.map((r) =>
+      r.notJudged === undefined ? oneLine(r.error ?? "unknown") : notJudgedReason(r),
+    );
     log(`${qa.key}: QA not judged (${reasons.join("; ")}), re-queued`);
     await safely(`re-queue ${qa.key}`, () => deps.linear.moveTo(qa.id, "Ready"));
     return "requeued";
@@ -1346,6 +1345,7 @@ export async function settleQa(
     for (const r of result.reviews) {
       delete state.qaFeedback[r.part.id];
       if (state.sessions !== undefined) delete state.sessions[r.part.id];
+      clearNotJudged(r.part.id);
     }
     const body = [
       `**harnessd QA**: QA failed ${times(failures)} for ${parent.key}, so this needs a human (D-014). ` +
