@@ -12,6 +12,7 @@ import {
   isEscalationTrigger,
   type Precedent,
   type ResolvedAgentConfig,
+  type RunResult,
   type Task,
   type TokenUsage,
 } from "@harnessd/shared";
@@ -265,6 +266,10 @@ export type RunReply =
       limited?: true;
       /** Why the next run must use the next harness (D-048). */
       switchReason?: string;
+      /** The harness's own reason, when the run was capped or stalled (MET-196, D-052). */
+      reason?: "turn_cap" | "stalled";
+      /** True when the run ended on its wall-clock budget (MET-196, D-052). */
+      timeout?: true;
       tokens: TokenUsage;
       turns?: number;
       usageUnknown?: true;
@@ -280,6 +285,7 @@ export async function runForReply(
   let finalText: string | undefined;
   let status: string | undefined;
   let runError: string | undefined;
+  let runReason: RunResult["reason"];
   let switchReason: string | undefined;
   let tokens: TokenUsage = emptyTokenUsage();
   let turns: number | undefined;
@@ -293,6 +299,7 @@ export async function runForReply(
         status = event.result.status;
         finalText = event.result.finalText;
         runError = event.result.error;
+        runReason = event.result.reason;
         switchReason = switchWhy(event.result);
         tokens = event.result.tokens;
         turns = event.result.turns;
@@ -308,6 +315,8 @@ export async function runForReply(
       ok: false,
       error,
       ...(status === "limited" ? { limited: true as const } : {}),
+      ...(status === "timeout" ? { timeout: true as const } : {}),
+      ...(runReason === "turn_cap" || runReason === "stalled" ? { reason: runReason } : {}),
       ...(switchReason === undefined ? {} : { switchReason }),
       tokens,
       ...(turns === undefined ? {} : { turns }),

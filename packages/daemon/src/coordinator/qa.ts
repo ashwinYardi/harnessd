@@ -246,7 +246,92 @@ export interface QaVerdict {
   testsPassed: boolean;
 }
 
-export type ParsedQaVerdict = { ok: true; verdict: QaVerdict } | { ok: false; error: string };
+export type ParsedQaVerdict =
+  | { ok: true; verdict: QaVerdict }
+  | {
+      ok: false;
+      error: string;
+      /** Set when the reply was not valid JSON, even after the backslash repair (D-052). */
+      kind?: "not_json";
+    };
+
+/** The characters JSON allows right after a backslash inside a string. */
+const JSON_ESCAPES = '"\\/bfnrtu';
+
+/**
+ * Repairs a stray backslash inside a JSON string (MET-196, D-052): a backslash before a
+ * character JSON does not allow after it becomes `\\` plus that character. A valid pair,
+ * such as `\\` or `\"`, is kept as it is, and `\u` is left for JSON.parse to judge.
+ */
+export function repairJsonBackslashes(text: string): string {
+  let out = "";
+  let inString = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i] as string;
+    if (!inString) {
+      if (ch === '"') inString = true;
+      out += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inString = false;
+      out += ch;
+      continue;
+    }
+    if (ch !== "\\") {
+      out += ch;
+      continue;
+    }
+    const next = text[i + 1];
+    if (next !== undefined && JSON_ESCAPES.includes(next)) {
+      out += ch + next;
+      i += 1;
+      continue;
+    }
+    out += "\\\\";
+    if (next !== undefined) {
+      out += next;
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/** Every line-start "{" candidate that runs to the last "}", newest first. */
+function trailingJsonObjects(text: string): string[] {
+  const end = text.lastIndexOf("}");
+  if (end === -1) return [];
+  const candidates: string[] = [];
+  let start = text.lastIndexOf("\n{", end);
+  while (start > 0) {
+    candidates.push(text.slice(start + 1, end + 1));
+    start = text.lastIndexOf("\n{", start - 1);
+  }
+  return candidates;
+}
+
+/**
+ * Parses the reply's JSON, repairing stray backslashes only after the first parse fails
+ * (MET-196). The repair runs on the extracted text and on each trailing-object candidate,
+ * so a verdict in prose is still found.
+ */
+function parseQaJson(text: string): { value: unknown } | { error: Error } {
+  const extracted = extractJson(text);
+  let first: Error | undefined;
+  try {
+    return { value: JSON.parse(extracted) };
+  } catch (error) {
+    first = error as Error;
+  }
+  for (const candidate of [extracted, ...trailingJsonObjects(text.trim())]) {
+    try {
+      return { value: JSON.parse(repairJsonBackslashes(candidate)) };
+    } catch {
+      // Try the next candidate; the first error stays for the message.
+    }
+  }
+  return { error: first as Error };
+}
 
 /** The JSON shape the QA agent must end with. */
 export const QA_VERDICT_SHAPE = `{
@@ -268,12 +353,11 @@ const ITEM_KEYS = ["text", "pass", "evidence"];
  * which is `Verify` (MET-162).
  */
 export function parseQaVerdict(text: string, expectedItems: number): ParsedQaVerdict {
-  let value: unknown;
-  try {
-    value = JSON.parse(extractJson(text));
-  } catch (error) {
-    return { ok: false, error: `not JSON: ${(error as Error).message}` };
+  const parsed = parseQaJson(text);
+  if ("error" in parsed) {
+    return { ok: false, error: `not JSON: ${parsed.error.message}`, kind: "not_json" };
   }
+  const value = parsed.value;
   if (!isObj(value)) return { ok: false, error: "expected a JSON object" };
   for (const key of Object.keys(value)) {
     if (key !== "items" && key !== "testsPassed") {
@@ -502,6 +586,12 @@ export interface PrReview {
    * before the agent). Such a round is re-queued without counting a QA failure (D-041).
    */
   setup?: boolean;
+  /**
+   * Why the QA agent gave no usable verdict: turn cap, time limit, stall or a reply that is
+   * not JSON even after the backslash repair. Such a round counts no QA failure, and two in
+   * a row on one PR head go to the human (MET-196, D-052).
+   */
+  notJudged?: "turn_cap" | "timeout" | "stalled" | "not_json";
   /** One line per failing item: the item and its evidence. */
   failing: string[];
   /** The last lines of the tests when they failed, for the send-back prompt (MET-156). */
@@ -611,9 +701,16 @@ export const MAX_APP_SETUP_FAILURES = 3;
 /** In-memory app setup errors per part, with the head they happened on (D-051). */
 const appSetupFailures = new Map<string, { head: string; count: number }>();
 
-/** Forgets every counted app setup error; tests start clean with it. */
+/**
+ * In-memory not-judged runs per part, with the head they happened on and why (D-052).
+ * A restart resets it, which costs at most one extra QA run.
+ */
+const notJudgedRuns = new Map<string, { head: string; count: number; reasons: string[] }>();
+
+/** Forgets every counted app setup error and not-judged run; tests start clean with it. */
 export function resetQaAppFailures(): void {
   appSetupFailures.clear();
+  notJudgedRuns.clear();
 }
 
 /** Counts one app setup error for this part and head; a new head starts at one. */
@@ -627,6 +724,49 @@ function countAppSetupFailure(partId: string, head: string): number {
 /** The app started on this head, so its earlier setup errors no longer count. */
 function clearAppSetupFailures(partId: string): void {
   appSetupFailures.delete(partId);
+}
+
+/** Counts one not-judged run for this part and head; a new head starts at one (D-052). */
+function countNotJudged(
+  partId: string,
+  head: string,
+  reason: string,
+): { head: string; count: number; reasons: string[] } {
+  const previous = notJudgedRuns.get(partId);
+  const sameHead = previous?.head === head;
+  const counted = {
+    head,
+    count: sameHead ? (previous?.count ?? 0) + 1 : 1,
+    reasons: sameHead ? [...(previous?.reasons ?? []), reason] : [reason],
+  };
+  notJudgedRuns.set(partId, counted);
+  return counted;
+}
+
+/** A judged verdict (or a new head) drops the earlier not-judged runs for this part. */
+function clearNotJudged(partId: string): void {
+  notJudgedRuns.delete(partId);
+}
+
+/** The reason a not-judged review adds to the log line and the escalation (D-052). */
+function notJudgedReason(r: PrReview): string {
+  switch (r.notJudged) {
+    case "timeout":
+      return "timed out";
+    case "stalled":
+      return "stalled";
+    case "turn_cap": {
+      const cap = /turn cap \(\d+ turns\)/.exec(r.error ?? "");
+      return cap?.[0] ?? "turn cap";
+    }
+    case "not_json": {
+      const error = r.error ?? "unknown";
+      const at = error.indexOf("not JSON: ");
+      return `verdict not JSON: ${at === -1 ? oneLine(error) : error.slice(at + 10)}`;
+    }
+    default:
+      return oneLine(r.error ?? "unknown");
+  }
 }
 
 export interface QaRunInput {
@@ -776,6 +916,8 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
 
     let tests: TestRun;
     let verdict: ParsedQaVerdict;
+    // Why the agent gave no usable verdict; such a review counts no QA failure (D-052).
+    let notJudged: PrReview["notJudged"];
     // A throw while this is true is a setup error: it counts no QA failure (D-041).
     let inSetup = true;
     let setupError = false;
@@ -906,7 +1048,18 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
           }
           if (reply.turns !== undefined) spentTurns = (spentTurns ?? 0) + reply.turns;
           if (!reply.ok && reply.limited) limited = true;
+          if (!reply.ok) {
+            notJudged =
+              reply.timeout === true
+                ? "timeout"
+                : reply.reason === "stalled"
+                  ? "stalled"
+                  : reply.reason === "turn_cap"
+                    ? "turn_cap"
+                    : undefined;
+          }
           verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
+          if (!verdict.ok && verdict.kind === "not_json") notJudged = "not_json";
         }
       }
     } catch (error) {
@@ -955,6 +1108,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         decision: "error",
         failing: [],
         ...(setupError ? { setup: true } : {}),
+        ...(notJudged === undefined ? {} : { notJudged }),
         ...(appSetup === undefined ? {} : { appSetup }),
         error: decision.error ?? "unknown",
       };
@@ -1079,11 +1233,14 @@ function times(n: number): string {
 
 /**
  * Applies a QA round. Approved: QA moves to In Review (MET-14 merges). A round where no
- * part was judged and every failed review is a setup error is re-queued with no failure
- * counted (D-041). Otherwise the round counts as a failure for the parent: parts with
- * requested changes go back to Ready with a comment pointing at the review, and QA waits
- * in Ready for them. The `maxFailures`-th failure moves QA and the parent to Needs input
- * with one comment and one ping, and nothing is sent back again (D-014).
+ * part was judged and every failed review is a setup error, or gave no usable verdict
+ * (turn cap, time limit, stall or invalid JSON), is re-queued with no failure counted
+ * (D-041, D-052). Two not-judged runs in a row on one PR head go to the human instead,
+ * with the reason and no QA failure (D-052). Otherwise the round counts as a failure for
+ * the parent: parts with requested changes go back to Ready with a comment pointing at
+ * the review, and QA waits in Ready for them. The `maxFailures`-th failure moves QA and
+ * the parent to Needs input with one comment and one ping, and nothing is sent back again
+ * (D-014).
  */
 export async function settleQa(
   state: Pick<LoopState, "qaFailures" | "qaFeedback" | "sessions">,
@@ -1104,6 +1261,7 @@ export async function settleQa(
 
   if (result.outcome === "approved") {
     delete state.qaFailures[parent.id];
+    for (const r of result.reviews) clearNotJudged(r.part.id);
     const body = [
       `**harnessd QA**: approved. Every "Done when" item of ${parent.key} passes and the tests pass.`,
       "",
@@ -1117,14 +1275,68 @@ export async function settleQa(
   }
 
   const failures = (state.qaFailures[parent.id] ?? 0) + 1;
+  // A judged verdict clears the not-judged count; a setup error leaves it as it is (D-052).
+  for (const r of result.reviews) {
+    if (r.decision === "approve" || r.decision === "request_changes") clearNotJudged(r.part.id);
+  }
   const notApproved = result.reviews.filter((r) => r.decision !== "approve");
-  const setupOnly =
+  const noVerdictOnly =
     notApproved.length > 0 &&
-    notApproved.every((r) => r.setup === true) &&
+    notApproved.every((r) => r.setup === true || r.notJudged !== undefined) &&
     !result.reviews.some((r) => r.decision === "request_changes");
-  if (setupOnly) {
-    const reason = notApproved.map((r) => oneLine(r.error ?? "unknown")).join("; ");
-    log(`${qa.key}: QA not judged (${reason}), re-queued`);
+  if (noVerdictOnly) {
+    const reasons: string[] = [];
+    const countedParts: string[] = [];
+    let twice:
+      | {
+          part: LinkedIssue;
+          pr?: PullRequest;
+          counted: { head: string; count: number; reasons: string[] };
+        }
+      | undefined;
+    for (const r of notApproved) {
+      if (r.notJudged === undefined) {
+        reasons.push(oneLine(r.error ?? "unknown"));
+        continue;
+      }
+      const reason = notJudgedReason(r);
+      reasons.push(reason);
+      const counted = countNotJudged(r.part.id, r.pr?.headRefOid ?? "", reason);
+      countedParts.push(r.part.id);
+      if (counted.count >= 2) {
+        twice = { part: r.part, ...(r.pr === undefined ? {} : { pr: r.pr }), counted };
+      }
+    }
+    if (twice !== undefined) {
+      // Two runs in a row gave no verdict: a human decides, and no QA failure is counted.
+      const head = twice.counted.head.slice(0, 7);
+      const where =
+        twice.pr === undefined
+          ? "no PR"
+          : `PR #${twice.pr.number}${head === "" ? "" : ` at ${head}`}`;
+      const detail =
+        `QA was not judged twice on ${twice.part.key} ${where}: ` +
+        `${twice.counted.reasons.join("; ")}. No QA failure counted.`;
+      await safely(`comment on ${parent.key}`, () =>
+        deps.linear.comment(parent.id, `**harnessd QA**: ${detail}\n`),
+      );
+      await safely(`move ${qa.key} to Needs input`, () => deps.linear.moveTo(qa.id, "Needs input"));
+      await safely(`move ${parent.key} to Needs input`, () =>
+        deps.linear.moveTo(parent.id, "Needs input"),
+      );
+      await safely("send the notice", () =>
+        deps.notifier.notify({
+          kind: "needs_input",
+          issue: { key: parent.key, url: parent.url },
+          prs: twice.pr === undefined ? [] : [{ number: twice.pr.number, url: twice.pr.url }],
+          reason: "QA not judged twice",
+          detail,
+        }),
+      );
+      for (const partId of countedParts) clearNotJudged(partId);
+      return "escalated";
+    }
+    log(`${qa.key}: QA not judged (${reasons.join("; ")}), re-queued`);
     await safely(`re-queue ${qa.key}`, () => deps.linear.moveTo(qa.id, "Ready"));
     return "requeued";
   }

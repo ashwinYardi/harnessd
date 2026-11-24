@@ -275,7 +275,9 @@ For each part:
 
 6. **Review.** harnessd approves only when every item passes and the tests pass, both when harnessd ran them and for the agent. Otherwise it requests changes and lists each failing item with its evidence. GitHub does not let you approve your own PR, so when every agent shares one `gh` login, the verdict is posted as a comment review.
 
-Output that is not valid JSON, or that has the wrong number of items, is a failed QA run: it counts a failure. No review is posted for it.
+Output that is not valid JSON after the backslash repair is **not judged** (D-052). A reply with the wrong number of items, an unknown key or missing evidence is a schema error and still a failed QA run: it counts a failure. No review is posted for either.
+
+**Backslash repair (D-052).** A model reply sometimes holds a stray backslash inside a JSON string, for example before a backtick or a dollar sign. Only after the first `JSON.parse` fails, `parseQaVerdict` scans the text left to right inside strings and turns a backslash before a character JSON does not allow after it into an escaped backslash plus that character. A valid pair such as `\\` or `\"` is kept as it is, and `\u` with bad hex is not repaired. The repair runs on the extracted text and on each trailing-object candidate, so a verdict in prose is still found.
 
 After the round:
 
@@ -284,6 +286,8 @@ After the round:
 | approved | The part's PR goes to `merges` in `loop.json` as one entry with one PR, pinned to the reviewed head, and the merge gate takes it. QA stays Ready for the next part. |
 | changes requested, first failure | The part goes back to Ready with a comment that links its review. The reviewed head records `changes_requested`; QA runs again only on a new head. Its next run resumes the part's own session on the same harness and worktree when it can, with only the failures; otherwise it starts cold (D-046). |
 | QA could not set up the review | QA goes back to Ready and runs again. No QA failure is counted and no comment is posted: the PR lookup, checkout, worktree sync, the budget before the agent, an app build, seed, start or health step, or the browser step failed (D-041, D-051). |
+| QA not judged | QA goes back to Ready and runs again. No QA failure is counted, no review is posted, nothing goes to `reviewedHeads` and the same head runs again: the QA agent run ended on its turn cap, its time limit or a stall, or its verdict was not valid JSON after the backslash repair. The log line is `<QA key>: QA not judged (<reason>), re-queued`, with `turn cap (<n> turns)`, `timed out`, `stalled` or `verdict not JSON: <error>`. A round that mixes setup errors and not-judged reviews is re-queued the same way; any `request_changes` in it still counts one failure (D-052). |
+| QA not judged twice in a row on one head | QA and the parent move to Needs input. One comment on the parent states the reason and one notice says `QA not judged twice`. `qaFailures`, `qaFeedback` and the part's session do not change, and the in-memory count clears. A judged verdict or a new head clears the count; a setup error leaves it as it is (D-052). |
 | app setup failed three times on one head | The review runs with no live app, counts no QA failure and keeps `app <step> failed` as the reason; its body starts with `not run live: app <step> failed` (D-051, MET-180). A new head resets the count. |
 | second failure | QA and the parent move to Needs input. One comment goes on the parent and one notice is sent. Nothing is sent back again (D-014). |
 
@@ -297,7 +301,7 @@ The QA sub-issue moves to Done after the last part of the parent merges. The fin
 
 A QA agent run that ends `limited` stops the round. No review is posted, no QA failure is counted and QA goes back to Ready.
 
-A QA agent run that ends at its turn cap (S 40, M 80) is a failed QA run: it counts one QA failure, as an agent error does.
+A QA agent run that ends at its turn cap (S 40, M 80) is not judged: it re-queues with no QA failure and the same head runs again (D-052). A timeout, a stall and a verdict that is not JSON after the repair follow the same rule. The second not-judged run in a row on that head goes to the human.
 
 The whole round runs within the QA sub-issue's size budget. Failures are counted per parent, up to `limits.qa_max_failures` (default 2).
 
@@ -318,7 +322,7 @@ Every run has a turn cap (D-045). A builder part run uses `limits.max_turns` for
 - **Claude Code** gets `--max-turns <n>`. A result with subtype `error_max_turns` ends the run `error` with `turn cap (<n> turns)` and no failure reason.
 - **Codex and OpenCode** count turns in the adapter: OpenCode at `step_start`, Codex at each completed tool item. At the cap the adapter kills the process group the way a cancel does and reports `error` with `turn cap (<n> turns)`, not `cancelled`.
 
-A turn-capped run follows the normal error rule: it counts one attempt, it is not shipped, and the keep guard keeps unshipped work for the next attempt. A turn-capped QA run counts as a QA failure. A turn-capped grill or plan run is an error run; the plan retries once, and a second bad plan moves the parent to Needs input (D-049). The wall-clock budget and the token budget stay; the first limit that a run hits stops it, and a time-budget stop stays `timeout`.
+A turn-capped run follows the normal error rule: it counts one attempt, it is not shipped, and the keep guard keeps unshipped work for the next attempt. A turn-capped QA run is not judged and counts no QA failure (D-052). A turn-capped grill or plan run is an error run; the plan retries once, and a second bad plan moves the parent to Needs input (D-049). The wall-clock budget and the token budget stay; the first limit that a run hits stops it, and a time-budget stop stays `timeout`.
 
 ## Usage limits
 A run that ends `limited` hit the harness's usage or rate limit. It is no task failure (MET-70). Claude Code says it in the result text or the last stderr line. Codex says it as a spent usage limit or quota; that run ends `limited` with reason `usage_limit` and no reset time, so the hold uses the backoff. OpenCode says it as a `provider.quota` or `provider.rate-limit` error; the reset time comes from the error's retry time when it gives one.
