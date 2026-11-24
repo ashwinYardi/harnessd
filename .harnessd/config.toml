@@ -7,6 +7,17 @@ project = "harnessd"
 # Owner 2026-11-22: one ticket at a time (one PR, one QA, merge, next).
 max_concurrent = 1
 
+# QA runs harnessd itself (MET-181, D-051). A frontend part gets the demo app with synthetic
+# data; a backend part gets a sandbox daemon that stays in setup (D-026).
+[qa]
+kind = "web"
+build = "pnpm build"
+start = "scripts/qa/start.sh"
+url = "http://127.0.0.1:{port}"
+health = "/api/status"
+seed = "scripts/qa/seed.sh"
+env = []
+
 # Models per agent. Effort per harness is MET-89; until then Codex runs at the model's
 # default effort and Claude at its default.
 [agents.coordinator]
