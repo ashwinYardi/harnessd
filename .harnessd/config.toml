@@ -43,8 +43,9 @@ fallback_model = "gpt-6.2-sol"
 
 [agents.qa]
 role = "qa"
-harness = "opencode"
-model = "opencode-go/deepseek-v4.1-flash#high"
-# Owner 2026-11-22: only the coordinator on Claude; the rest on OpenCode. Codex only as a fallback on a limit.
-fallback_harness = "codex"
-fallback_model = "gpt-6.2-sol"
+# Owner 2026-11-24: QA runs on Codex first. On OpenCode, QA hit the 30 min limit twice
+# (100 to 150 s per turn); Codex finished the same QA in about 2 min. OpenCode is the fallback.
+harness = "codex"
+model = "gpt-6.2-sol"
+fallback_harness = "opencode"
+fallback_model = "opencode-go/deepseek-v4.1-flash#high"
