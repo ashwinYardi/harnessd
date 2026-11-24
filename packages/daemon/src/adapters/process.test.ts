@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseProcessTree } from "./process.ts";
+import { emptyTokenUsage, type Task } from "@harnessd/shared";
+import { parseProcessTree, startProcessRun } from "./process.ts";
 
 // pid ppid pgid. 500 is the daemon (group 500). 600 is a run that leads group 600.
 // 601 is its child. 700 is a nested run, detached into group 700. 702 slipped into
@@ -34,4 +35,27 @@ test("parseProcessTree skips malformed lines and never returns group 1 or 0", ()
   const tree = parseProcessTree(`${PS}\nnot a row\n  42`, 1, 500);
   assert.ok(!tree.groups.includes(1));
   assert.ok(!tree.groups.includes(0));
+});
+
+function parsedRun(usageUnknown: true | undefined) {
+  const task: Task = { id: "MET-187", title: "usage unknown", prompt: "p", budgetMs: 10_000 };
+  return startProcessRun({
+    task,
+    worktree: process.cwd(),
+    bin: process.execPath,
+    argv: ["-e", "process.exit(0)"],
+    parser: () => ({
+      line: () => {},
+      outcome: () => ({
+        ok: true,
+        tokens: emptyTokenUsage(),
+        ...(usageUnknown === undefined ? {} : { usageUnknown }),
+      }),
+    }),
+  });
+}
+
+test("startProcessRun copies usageUnknown to the run result like the tokens", async () => {
+  assert.equal((await parsedRun(true).result).usageUnknown, true);
+  assert.equal((await parsedRun(undefined).result).usageUnknown, undefined);
 });
