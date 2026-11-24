@@ -4,16 +4,20 @@
 //
 // For each part: find its PR (the part key is in the title), check the PR head out in a
 // worktree of its own, run the repo's tests in harnessd, then run the QA agent for a
-// strict JSON verdict. harnessd approves only when every item passes and the tests pass,
-// whatever the model says; anything else requests changes. `settleQa` then moves the
-// sub-issues, and the second failed round goes to the human instead of looping.
+// strict JSON verdict. When the repo declares a product in `[qa]`, harnessd starts it first
+// and stops its whole tree afterwards (MET-178, D-051). harnessd approves only when every
+// item passes and the tests pass, whatever the model says; anything else requests changes.
+// `settleQa` then moves the sub-issues, and the second failed round goes to the human instead
+// of looping.
 import { spawn } from "node:child_process";
 import {
   emptyTokenUsage,
   type HarnessAdapter,
   type Issue,
+  isLiveQa,
   type LinkedIssue,
   type QaConfig,
+  type QaKind,
   type ResolvedAgentConfig,
   type Task,
   type TokenUsage,
@@ -32,6 +36,7 @@ import { agentPromptHeader } from "./dispatch.ts";
 import { extractJson, runForReply } from "./grill.ts";
 import type { Notifier } from "./notifier.ts";
 import { type AgentMemory, memorySection } from "./prompt.ts";
+import { type QaApp, type QaAppInput, type QaAppStart, startQaApp } from "./qa-app.ts";
 import { extractSection, readPartMarker, sectionChecklist, sectionList } from "./split.ts";
 import type { LoopState } from "./state.ts";
 
@@ -57,13 +62,15 @@ export interface CommandResult {
 
 /**
  * Runs one shell command in `cwd`. Injectable so tests need no real toolchain. Aborting
- * `signal` (a pause) stops the command.
+ * `signal` (a pause) stops the command. `env` replaces the daemon's environment; the QA app's
+ * commands get only its own small one (MET-178).
  */
 export type CommandRunner = (
   command: string,
   cwd: string,
   timeoutMs: number,
   signal?: AbortSignal,
+  env?: NodeJS.ProcessEnv,
 ) => Promise<CommandResult>;
 
 export const MAX_COMMAND_OUTPUT = 64 * 1024;
@@ -71,8 +78,11 @@ export const MAX_COMMAND_OUTPUT = 64 * 1024;
 /** The failing test tail the review comment and the resume prompt share (MET-156). */
 export const MAX_TEST_TAIL = 3000;
 
-/** `sh -c <command>` in its own process group with CI=1; the group is killed on timeout or abort. */
-export const runShellCommand: CommandRunner = (command, cwd, timeoutMs, signal) =>
+/**
+ * `sh -c <command>` in its own process group with CI=1; the group is killed on timeout or
+ * abort. With `env`, the child gets exactly that environment, not the daemon's (MET-178).
+ */
+export const runShellCommand: CommandRunner = (command, cwd, timeoutMs, signal, env) =>
   new Promise((resolve) => {
     let output = "";
     let timedOut = false;
@@ -102,7 +112,7 @@ export const runShellCommand: CommandRunner = (command, cwd, timeoutMs, signal) 
       child = spawn("sh", ["-c", command], {
         cwd,
         detached: true,
-        env: { ...process.env, CI: "1" },
+        env: env === undefined ? { ...process.env, CI: "1" } : env,
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error) {
@@ -319,6 +329,8 @@ export interface QaPromptInput {
   tests: TestRun;
   /** The vaults, when the loop synced the harness files into the checkout (MET-55). */
   memory?: AgentMemory;
+  /** The running app, when the repo declares one (MET-177, D-051). */
+  app?: { kind: QaKind; url?: string };
 }
 
 /** The diff, cut to `MAX_PROMPT_DIFF`, and how much was left out. */
@@ -335,7 +347,8 @@ function describeCi(checks: PullRequestCheck[] | undefined): string {
 
 /** The QA agent's prompt for one PR. */
 export function buildQaPrompt(input: QaPromptInput): string {
-  const { agent, qa, parent, part, pr, diff, ci, files, checklist, verify, tests, memory } = input;
+  const { agent, qa, parent, part, pr, diff, ci, files, checklist, verify, tests, memory, app } =
+    input;
   const out = agentPromptHeader(agent, qa);
   const ownItems = partHasItems(part);
   const doneWhen = ownItems ? `${part.key}: ${part.title}` : `${parent.key}: ${parent.title}`;
@@ -372,6 +385,13 @@ export function buildQaPrompt(input: QaPromptInput): string {
     `## CI\n${describeCi(ci)}`,
     `## Tests\nharnessd ran the repo's tests in this worktree before you started: ${describeTests(tests)}.\n` +
       `\`\`\`text\n${tail(tests.output, MAX_TEST_TAIL) || "(no output)"}\n\`\`\``,
+    ...(app === undefined
+      ? []
+      : [
+          app.url === undefined
+            ? `## App\nThe repo declares a ${app.kind} product. \`qa.start\` is the command that runs it; harnessd starts no server.`
+            : `## App\nThe product is running at ${app.url} (kind ${app.kind}). Check the items against it.`,
+        ]),
     `## Part brief\n${part.description.trim() || "(none)"}`,
     `## Done when (${doneWhen})\n${checklist.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
     ...(verify !== undefined && verify.length > 0
@@ -421,6 +441,11 @@ export interface PrReview {
   reviewUrl?: string;
   /** COMMENT when GitHub refused the real review event (e.g. on your own PR). */
   postedAs?: ReviewEvent;
+  /**
+   * Why this review ran without a live app: the third consecutive app setup error on this
+   * head (D-051). It counts no QA failure; a later prompt part shows it.
+   */
+  appSetup?: string;
   error?: string;
 }
 
@@ -505,6 +530,30 @@ export function formatReviewBody(input: ReviewBodyInput): string {
 
 // --- a QA round ---------------------------------------------------------------
 
+/** The third app setup error on one head runs the review with no live app (D-051). */
+export const MAX_APP_SETUP_FAILURES = 3;
+
+/** In-memory app setup errors per part, with the head they happened on (D-051). */
+const appSetupFailures = new Map<string, { head: string; count: number }>();
+
+/** Forgets every counted app setup error; tests start clean with it. */
+export function resetQaAppFailures(): void {
+  appSetupFailures.clear();
+}
+
+/** Counts one app setup error for this part and head; a new head starts at one. */
+function countAppSetupFailure(partId: string, head: string): number {
+  const previous = appSetupFailures.get(partId);
+  const count = previous?.head === head ? previous.count + 1 : 1;
+  appSetupFailures.set(partId, { head, count });
+  return count;
+}
+
+/** The app started on this head, so its earlier setup errors no longer count. */
+function clearAppSetupFailures(partId: string): void {
+  appSetupFailures.delete(partId);
+}
+
 export interface QaRunInput {
   qa: LinkedIssue;
   parent: Issue;
@@ -528,6 +577,8 @@ export interface QaRunDeps {
   agent: ResolvedAgentConfig;
   commands: QaConfig;
   runCommand?: CommandRunner;
+  /** Starts the product for a live review (MET-178); a test injects one. */
+  startApp?: (input: QaAppInput) => Promise<QaAppStart>;
   now?: () => number;
   /** Told the worktree in use ("" once removed), so a crash can clean it up. */
   onWorktree?: (path: string) => void;
@@ -646,6 +697,10 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
     // A throw while this is true is a setup error: it counts no QA failure (D-041).
     let inSetup = true;
     let setupError = false;
+    // The live app for this review, stopped in the teardown whatever path leaves the round.
+    let app: QaApp | undefined;
+    // Why this review runs without an app: the third setup error on this head (D-051).
+    let appSetup: string | undefined;
     try {
       const files = await deps.github.prFiles(pr.number).catch((error) => {
         log(`${qa.key}: could not list the files of PR #${pr.number}: ${message(error)}`);
@@ -667,55 +722,97 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         now,
         deps.signal,
       );
-      const left = deadline - now();
       if (cancelled()) {
         verdict = { ok: false, error: "cancelled by harnessd pause" };
-      } else if (left <= 0) {
-        setupError = true;
-        verdict = { ok: false, error: "the QA budget ran out before the agent ran" };
       } else {
-        const id = `${qa.key}-qa-${input.round}-pr${pr.number}`;
-        let env: Record<string, string> | undefined;
-        if (deps.prepare) {
-          try {
-            env = await deps.prepare(path, id);
-          } catch (error) {
-            throw new Error(`harnessd sync into the worktree failed: ${message(error)}`);
+        // The app starts only once the tests pass: a build broken by the PR is a test result,
+        // not a setup error (D-051).
+        if (tests.passed && isLiveQa(deps.commands)) {
+          const role = readPartMarker(part.description)?.role;
+          const area = role === "frontend" ? "frontend" : "backend";
+          const started = await (deps.startApp ?? startQaApp)({
+            qa: deps.commands,
+            cwd: path,
+            area,
+            budgetMs: Math.max(deadline - now(), 1),
+            ...(deps.runCommand === undefined ? {} : { run: deps.runCommand }),
+            ...(deps.signal === undefined ? {} : { signal: deps.signal }),
+            log: (line) => log(`${qa.key}: ${line}`),
+          });
+          // Keep the app the moment it exists: a pause that lands right after the health
+          // probe must still stop it in the teardown (D-051).
+          if (started.ok) app = started.app;
+          if (cancelled()) return stopped(part, pr);
+          if (!started.ok) {
+            const reason = `app ${started.step} failed: ${started.detail}`;
+            const failures = countAppSetupFailure(part.id, pr.headRefOid);
+            if (failures < MAX_APP_SETUP_FAILURES) {
+              // D-041, D-051: no QA failure, no review; settleQa logs and re-queues.
+              return { part, pr, decision: "error", failing: [], setup: true, error: reason };
+            }
+            // The same head failed three times: review it with no live app, keeping the reason.
+            appSetup = reason;
+            log(`${qa.key}: ${reason} on this head ${failures} times, running without it`);
+          } else {
+            clearAppSetupFailures(part.id);
           }
         }
-        const task: Task = {
-          id,
-          title: `QA ${part.key}: PR #${pr.number}`,
-          prompt: buildQaPrompt({
-            agent: deps.agent,
-            qa,
-            parent,
-            part,
-            pr,
-            ...(diff === undefined ? {} : { diff }),
-            ...(status === undefined ? {} : { ci: status.checks }),
-            files,
-            checklist,
-            verify: partVerify(part),
-            tests,
-            ...(deps.memory ? { memory: deps.memory } : {}),
-          }),
-          budgetMs: left,
-        };
-        if (input.maxTurns !== undefined) task.maxTurns = input.maxTurns;
-        if (deps.agent.model !== undefined) task.model = deps.agent.model;
-        if (env !== undefined) task.env = env;
-        inSetup = false;
-        const reply = await runForReply(deps.adapter, task, path);
-        spent = {
-          input: spent.input + reply.tokens.input,
-          output: spent.output + reply.tokens.output,
-          cacheRead: spent.cacheRead + reply.tokens.cacheRead,
-          cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
-        };
-        if (reply.turns !== undefined) spentTurns = (spentTurns ?? 0) + reply.turns;
-        if (!reply.ok && reply.limited) limited = true;
-        verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
+        const left = deadline - now();
+        if (left <= 0) {
+          setupError = true;
+          verdict = { ok: false, error: "the QA budget ran out before the agent ran" };
+        } else {
+          const id = `${qa.key}-qa-${input.round}-pr${pr.number}`;
+          let env: Record<string, string> | undefined;
+          if (deps.prepare) {
+            try {
+              env = await deps.prepare(path, id);
+            } catch (error) {
+              throw new Error(`harnessd sync into the worktree failed: ${message(error)}`);
+            }
+          }
+          const task: Task = {
+            id,
+            title: `QA ${part.key}: PR #${pr.number}`,
+            prompt: buildQaPrompt({
+              agent: deps.agent,
+              qa,
+              parent,
+              part,
+              pr,
+              ...(diff === undefined ? {} : { diff }),
+              ...(status === undefined ? {} : { ci: status.checks }),
+              files,
+              checklist,
+              verify: partVerify(part),
+              tests,
+              ...(app === undefined
+                ? {}
+                : {
+                    app: {
+                      kind: app.kind ?? deps.commands.kind ?? "web",
+                      ...(app.url === undefined ? {} : { url: app.url }),
+                    },
+                  }),
+              ...(deps.memory ? { memory: deps.memory } : {}),
+            }),
+            budgetMs: left,
+          };
+          if (input.maxTurns !== undefined) task.maxTurns = input.maxTurns;
+          if (deps.agent.model !== undefined) task.model = deps.agent.model;
+          if (env !== undefined) task.env = env;
+          inSetup = false;
+          const reply = await runForReply(deps.adapter, task, path);
+          spent = {
+            input: spent.input + reply.tokens.input,
+            output: spent.output + reply.tokens.output,
+            cacheRead: spent.cacheRead + reply.tokens.cacheRead,
+            cacheWrite: spent.cacheWrite + reply.tokens.cacheWrite,
+          };
+          if (reply.turns !== undefined) spentTurns = (spentTurns ?? 0) + reply.turns;
+          if (!reply.ok && reply.limited) limited = true;
+          verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
+        }
       }
     } catch (error) {
       if (cancelled()) return stopped(part, pr);
@@ -728,6 +825,14 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         error: message(error),
       };
     } finally {
+      // The app stops in every teardown: approve, request_changes, error, limited, setup
+      // error, timeout and pause (D-051, D-048).
+      if (app !== undefined) {
+        await app.stop().catch((error) => {
+          log(`${qa.key}: could not stop the app: ${message(error)}`);
+        });
+        app = undefined;
+      }
       // A pause keeps the worktree in use for inspection (MET-15); the loop records it.
       if (!cancelled()) {
         // A QA PR-head checkout is never kept, even when it has local changes (D-041).
@@ -755,6 +860,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         decision: "error",
         failing: [],
         ...(setupError ? { setup: true } : {}),
+        ...(appSetup === undefined ? {} : { appSetup }),
         error: decision.error ?? "unknown",
       };
     }
@@ -774,6 +880,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       failing: decision.failing,
       // MET-156: the send-back prompt shows only the tail of a failing test run.
       ...(tests.passed ? {} : { testTail: tail(tests.output, MAX_TEST_TAIL) }),
+      ...(appSetup === undefined ? {} : { appSetup }),
     };
     try {
       const posted = await post(pr, event, body);

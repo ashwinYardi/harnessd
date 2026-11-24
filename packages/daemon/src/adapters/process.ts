@@ -214,6 +214,19 @@ function untrackGroup(pid: number | undefined): void {
   if (pid !== undefined) liveGroups.delete(pid);
 }
 
+/**
+ * Registers a child the daemon starts outside an adapter run, so `killAllLiveRuns` stops its
+ * tree when the daemon exits (MET-178). The QA app's start process is one.
+ */
+export function trackProcess(child: ChildProcess): void {
+  trackGroup(child);
+}
+
+/** Stops tracking a child: its tree was stopped or is gone (MET-178). */
+export function stopTrackingProcess(pid: number | undefined): void {
+  untrackGroup(pid);
+}
+
 /** SIGKILLs every live run's process group and every descendant's group (D-048). */
 export function killAllLiveRuns(): void {
   let text = "";
