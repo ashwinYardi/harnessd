@@ -1,8 +1,8 @@
 # D-053 A part whose Done-when items are proved by its Verify commands gets QA from those commands
 
-Status: accepted 2026-11-24. Issue: MET-199, part of MET-198. Amends D-013, D-049 and D-051. References D-014, D-041 and D-044. Updates docs/LOOP.md "QA".
+Status: accepted 2026-11-24. Issue: MET-199, part of MET-198. Amends D-013, D-049 and D-051. References D-014, D-041 and D-044.
 
-A part can now be approved by the daemon running its own Verify commands, with no QA agent. The planner marks such a part, the plan check rejects a mark it cannot support, and the split writes the mark into the part body. The next part reads the mark in `qa.ts` and produces the verdict.
+A part can now be approved by the daemon running its own Verify commands, with no QA agent. The planner marks such a part, the plan check rejects a mark it cannot support, the split writes the mark into the part body, and `qa.ts` reads the mark and produces the verdict.
 
 ## The mark
 
