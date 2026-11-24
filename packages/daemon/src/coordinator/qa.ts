@@ -374,7 +374,7 @@ export interface QaPromptInput {
   /** The vaults, when the loop synced the harness files into the checkout (MET-55). */
   memory?: AgentMemory;
   /** The running app, when the repo declares one (MET-177, D-051). */
-  app?: { kind: QaKind; url?: string };
+  app?: { kind: QaKind; url?: string; command?: string };
 }
 
 /** The diff, cut to `MAX_PROMPT_DIFF`, and how much was left out. */
@@ -387,6 +387,25 @@ function describeCi(checks: PullRequestCheck[] | undefined): string {
   if (checks === undefined) return "(could not read the checks; run `gh pr checks`)";
   if (checks.length === 0) return "(no checks yet)";
   return checks.map((c) => `- ${c.name}: ${c.detail.toLowerCase()}`).join("\n");
+}
+
+/** How QA tests an item against each kind of product (MET-180). */
+const LIVE_CHECK: Record<QaKind, string> = {
+  web: "Use qa-browser: `open` the url at 390x844 and again at 1280x800, click and type as an item needs, and screenshot what you checked.",
+  api: "Call the api with curl (or another HTTP client) and quote the status and the body.",
+  cli: "Run the product's commands with the inputs an item names and quote their output.",
+};
+
+/** The App section: where the product runs and what kind it is (MET-180). */
+function appSection(app: NonNullable<QaPromptInput["app"]>): string {
+  if (app.url !== undefined) {
+    return `## App\nThe product is running at ${app.url} (kind ${app.kind}). Check each item against it.`;
+  }
+  const command = app.command === undefined ? "`qa.start`" : `\`${app.command}\``;
+  return (
+    `## App\nThe product is a ${app.kind} (kind ${app.kind}). ` +
+    `Run it with ${command}; harnessd starts no server.`
+  );
 }
 
 /** The QA agent's prompt for one PR. */
@@ -429,13 +448,7 @@ export function buildQaPrompt(input: QaPromptInput): string {
     `## CI\n${describeCi(ci)}`,
     `## Tests\nharnessd ran the repo's tests in this worktree before you started: ${describeTests(tests)}.\n` +
       `\`\`\`text\n${tail(tests.output, MAX_TEST_TAIL) || "(no output)"}\n\`\`\``,
-    ...(app === undefined
-      ? []
-      : [
-          app.url === undefined
-            ? `## App\nThe repo declares a ${app.kind} product. \`qa.start\` is the command that runs it; harnessd starts no server.`
-            : `## App\nThe product is running at ${app.url} (kind ${app.kind}). Check the items against it.`,
-        ]),
+    ...(app === undefined ? [] : [appSection(app)]),
     `## Part brief\n${part.description.trim() || "(none)"}`,
     `## Done when (${doneWhen})\n${checklist.map((c, i) => `${i + 1}. ${c}`).join("\n")}`,
     ...(verify !== undefined && verify.length > 0
@@ -445,12 +458,24 @@ export function buildQaPrompt(input: QaPromptInput): string {
       : []),
     [
       "## How to verify",
-      "- Read this part's brief, the decision IDs it names in the part body, the part's \"Done when\" and Verify sections, the diff, the CI result and the tests. Do not read docs/SPEC.md or every decision record.",
-      "- Judge from this diff, the CI result and the tests. Open a file only to check a line the diff touches.",
-      "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
-      "- An item passes only with concrete evidence: a file and line, a test name, or command output.",
-      "- The last item, `Verify`, passes only when each Verify command ran and its result is quoted.",
-      "- `testsPassed` is false when any test or check you ran fails.",
+      ...(app === undefined
+        ? [
+            "- Read this part's brief, the decision IDs it names in the part body, the part's \"Done when\" and Verify sections, the diff, the CI result and the tests. Do not read docs/SPEC.md or every decision record.",
+            "- Judge from this diff, the CI result and the tests. Open a file only to check a line the diff touches.",
+            "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
+            "- An item passes only with concrete evidence: a file and line, a test name, or command output.",
+            "- The last item, `Verify`, passes only when each Verify command ran and its result is quoted.",
+            "- `testsPassed` is false when any test or check you ran fails.",
+          ]
+        : [
+            "- Read this part's brief, the decision IDs it names in the part body, the part's \"Done when\" and Verify sections, the diff, the CI result and the tests. Do not read docs/SPEC.md or every decision record.",
+            `- Test each item against the running product. ${LIVE_CHECK[app.kind]} Another method is allowed when an item needs it.`,
+            "- Read the diff only to find what to test. Do not judge code style: the tests and CI guard the code, and a separate reviewer judges style.",
+            "- Each item's evidence is the command you ran, the response you got, or the screenshot path. An item passes only with that evidence.",
+            "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
+            "- The last item, `Verify`, passes only when each Verify command ran and its result is quoted.",
+            "- `testsPassed` is false when any test or check you ran fails.",
+          ]),
     ].join("\n"),
   );
   if (memory) out.push(memorySection(memory));
@@ -536,12 +561,18 @@ export interface ReviewBodyInput {
   tests: TestRun;
   round: number;
   maxRounds: number;
+  /**
+   * Why this verdict was made without the product: live QA is off, or the app failed three
+   * times on this head. The body starts with `not run live: <reason>` (MET-180, D-013).
+   */
+  notLive?: string;
 }
 
 /** The PR review body. */
 export function formatReviewBody(input: ReviewBodyInput): string {
-  const { qa, parent, decision, tests, round, maxRounds } = input;
+  const { qa, parent, decision, tests, round, maxRounds, notLive } = input;
   const lines: string[] = [];
+  if (notLive !== undefined) lines.push(`not run live: ${notLive}`, "");
   if (decision.decision === "approve") {
     lines.push(
       `**harnessd QA** (${qa.key}): approved. Every "Done when" item of ${parent.key} passes and ${describeTests(tests)}.`,
@@ -745,6 +776,8 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
     let app: QaApp | undefined;
     // Why this review runs without an app: the third setup error on this head (D-051).
     let appSetup: string | undefined;
+    // What the review body puts after `not run live:`: no kind, or the app step (MET-180).
+    let liveOff: string | undefined;
     try {
       const files = await deps.github.prFiles(pr.number).catch((error) => {
         log(`${qa.key}: could not list the files of PR #${pr.number}: ${message(error)}`);
@@ -796,6 +829,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
             }
             // The same head failed three times: review it with no live app, keeping the reason.
             appSetup = reason;
+            liveOff = `app ${started.step} failed`;
             log(`${qa.key}: ${reason} on this head ${failures} times, running without it`);
           } else {
             clearAppSetupFailures(part.id);
@@ -839,6 +873,9 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
                     app: {
                       kind: app.kind ?? deps.commands.kind ?? "web",
                       ...(app.url === undefined ? {} : { url: app.url }),
+                      ...(deps.commands.start === undefined
+                        ? {}
+                        : { command: deps.commands.start }),
                     },
                   }),
               ...(deps.memory ? { memory: deps.memory } : {}),
@@ -911,6 +948,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         error: decision.error ?? "unknown",
       };
     }
+    const notLive = isLiveQa(deps.commands) ? liveOff : "no [qa] kind in .harnessd/config.toml";
     const body = formatReviewBody({
       qa,
       parent,
@@ -918,6 +956,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       tests,
       round: input.round,
       maxRounds: input.maxRounds,
+      ...(notLive === undefined ? {} : { notLive }),
     });
     const event: ReviewEvent = decision.decision === "approve" ? "APPROVE" : "REQUEST_CHANGES";
     const result: PrReview = {

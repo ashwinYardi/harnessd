@@ -7,6 +7,8 @@ import {
   extractSection,
   formatPartDescription,
   formatSplitComment,
+  NO_LIVE_QA_NOTE,
+  noLiveQaWarning,
   partIds,
   partMarker,
   qaSize,
@@ -233,6 +235,31 @@ test("a one-part split note lists its goal and files and ends with the reason (M
   );
   assert.ok(note.endsWith("\nReason: One area fits one part.\n"), note);
   assert.ok(!note.includes("Reason for more than one part"), note);
+});
+
+test("the split note warns once that the repo runs no live app (MET-180)", () => {
+  const one = child("MET-51", formatPartDescription(parent, plan[0] as PlanPart, "backend"));
+  const result = {
+    parts: [one],
+    qa: child("MET-53", partMarker("qa"), "QA"),
+    created: [],
+    related: 0,
+  };
+  const first = noLiveQaWarning({}, undefined, "2026-11-24T10:00:00.000Z");
+  assert.deepEqual(first, {
+    line: NO_LIVE_QA_NOTE,
+    warnedAt: "2026-11-24T10:00:00.000Z",
+  });
+  const note = formatSplitComment(result, "One area fits one part.", first?.line);
+  assert.ok(note.includes(`${NO_LIVE_QA_NOTE}\nReason: One area fits one part.\n`), note);
+
+  // The warning is once per repo: the recorded time, or a set kind, drops it.
+  assert.equal(noLiveQaWarning({}, first?.warnedAt, "2026-11-24T11:00:00.000Z"), undefined);
+  assert.equal(noLiveQaWarning({ kind: "web" }, undefined, "2026-11-24T11:00:00.000Z"), undefined);
+  assert.ok(
+    !formatSplitComment(result, "One area fits one part.").includes(NO_LIVE_QA_NOTE),
+    "a note without the warning leaves it out",
+  );
 });
 
 test("parts that share a file are chained, and the backend part blocks the frontend part (MET-161)", async () => {

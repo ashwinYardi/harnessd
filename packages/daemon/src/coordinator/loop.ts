@@ -72,6 +72,7 @@ import {
   formatSplitComment,
   isCanceledState,
   isWorkPart,
+  noLiveQaWarning,
   PART_MARKER_PREFIX,
   readPartMarker,
   type SubIssueRole,
@@ -1722,7 +1723,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       await save();
     }
     if (result.created.length > 0) {
-      await linear.comment(issue.id, formatSplitComment(result, plan.reason));
+      // The first split note warns once per repo that QA runs no live app (MET-180). The key
+      // is written only after the note is posted, so a failed comment can still warn later.
+      const warning = noLiveQaWarning(config.qa, state?.qaLiveWarned, clock.now().toISOString());
+      await linear.comment(issue.id, formatSplitComment(result, plan.reason, warning?.line));
+      if (warning !== undefined && state !== undefined) {
+        state.qaLiveWarned = warning.warnedAt;
+        await save();
+      }
     }
     await linear.moveTo(issue.id, "In Progress");
     // The coordinator's run is done: the next Ready issue starts on the main harness (D-048).

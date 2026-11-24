@@ -231,6 +231,11 @@ export interface LoopState {
   sessions?: Record<string, PartSession>;
   /** The next harness to try, per issue id (D-048). Optional for old files. */
   harnessSwitch?: Record<string, HarnessSwitch>;
+  /**
+   * When a split note first warned that the repo runs no live app (MET-180). Optional, so a
+   * file from before it loads; the warning comes again only when the key is removed.
+   */
+  qaLiveWarned?: string;
 }
 
 export function emptyLoopState(): LoopState {
@@ -592,6 +597,9 @@ export function parseLoopState(text: string): LoopState {
     ...(raw.harnessSwitch === undefined
       ? {}
       : { harnessSwitch: harnessSwitches(raw.harnessSwitch) }),
+    ...(typeof raw.qaLiveWarned === "string" && raw.qaLiveWarned !== ""
+      ? { qaLiveWarned: raw.qaLiveWarned }
+      : {}),
   };
 }
 

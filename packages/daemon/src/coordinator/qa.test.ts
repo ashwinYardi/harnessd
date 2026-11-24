@@ -924,7 +924,9 @@ test("the third app setup error on one head runs with no app; a new head resets 
   assert.equal(h.tasks.length, 1, "the third runs the agent with no live app");
   assert.equal(third.outcome, "approved");
   assert.equal(third.reviews[0]?.appSetup, "app start failed: boom | exit 1");
+  assert.ok(h.reviews[0]?.body.startsWith("not run live: app start failed\n"), h.reviews[0]?.body);
   assert.doesNotMatch(h.tasks[0]?.prompt ?? "", /## App/, "no app is named when none runs");
+  assert.doesNotMatch(h.tasks[0]?.prompt ?? "", /qa-browser at 390x844/);
 
   const newHead = await runQa(h.input, {
     ...h.deps,
@@ -950,11 +952,59 @@ test("the QA prompt names the live app's url and kind, and the app stops after t
       }),
   });
   assert.equal(result.outcome, "approved");
+  const prompt = h.tasks[0]?.prompt ?? "";
   assert.match(
-    h.tasks[0]?.prompt ?? "",
+    prompt,
     /## App\nThe product is running at http:\/\/127\.0\.0\.1:4321 \(kind web\)\./,
   );
+  assert.match(prompt, /qa-browser/);
+  assert.match(prompt, /390x844/);
+  assert.match(prompt, /1280x800/);
+  assert.match(prompt, /Read the diff only to find what to test\./);
+  assert.match(prompt, /Do not judge code style/);
+  assert.match(prompt, /command you ran, the response you got, or the screenshot path/);
   assert.equal(stopped, 1, "the app stops after an approval");
+  assert.doesNotMatch(h.reviews[0]?.body ?? "", /not run live:/, "a live review is not marked");
+});
+
+test("the live prompt tells QA how to test an api and a cli (MET-180)", async () => {
+  resetQaAppFailures();
+  const api = harness({ replies: [verdict([true, true])], commands: { ...liveQa, kind: "api" } });
+  const apiResult = await runQa(api.input, {
+    ...api.deps,
+    startApp: async () => ({
+      ok: true,
+      app: { kind: "api", url: "http://127.0.0.1:4321", stop: async () => {} },
+    }),
+  });
+  assert.equal(apiResult.outcome, "approved");
+  const apiPrompt = api.tasks[0]?.prompt ?? "";
+  assert.match(
+    apiPrompt,
+    /## App\nThe product is running at http:\/\/127\.0\.0\.1:4321 \(kind api\)\./,
+  );
+  assert.match(apiPrompt, /Call the api with curl/);
+
+  resetQaAppFailures();
+  const cliQa: QaConfig = {
+    setup_command: "",
+    test_command: "pnpm test",
+    kind: "cli",
+    start: "node bin/app.js",
+  };
+  const cli = harness({ replies: [verdict([true, true])], commands: cliQa });
+  const cliResult = await runQa(cli.input, {
+    ...cli.deps,
+    startApp: async () => ({ ok: true, app: { kind: "cli", stop: async () => {} } }),
+  });
+  assert.equal(cliResult.outcome, "approved");
+  const cliPrompt = cli.tasks[0]?.prompt ?? "";
+  assert.match(
+    cliPrompt,
+    /## App\nThe product is a cli \(kind cli\)\. Run it with `node bin\/app\.js`;/,
+  );
+  assert.match(cliPrompt, /Run the product's commands/);
+  assert.doesNotMatch(cliPrompt, /qa-browser/, "a cli has no browser");
 });
 
 test("only the QA run gets qa-browser first on PATH, with the live browser endpoint", async () => {
@@ -1053,7 +1103,7 @@ test("a failing test command skips the app lifecycle, so a broken build is a tes
   assert.match(result.reviews[0]?.failing[0] ?? "", /Tests: `pnpm test` exited with code 1/);
 });
 
-test("without a [qa] table no app starts and the prompt has no App section", async () => {
+test("without a [qa] table no app starts, and the review says it did not run live", async () => {
   resetQaAppFailures();
   const h = harness({ replies: [verdict([true, true])] });
   let called = false;
@@ -1066,5 +1116,14 @@ test("without a [qa] table no app starts and the prompt has no App section", asy
   });
   assert.equal(result.outcome, "approved");
   assert.equal(called, false, "the default [qa] table declares no product");
-  assert.doesNotMatch(h.tasks[0]?.prompt ?? "", /## App/);
+  assert.ok(
+    h.reviews[0]?.body.startsWith("not run live: no [qa] kind in .harnessd/config.toml\n"),
+    h.reviews[0]?.body,
+  );
+  const prompt = h.tasks[0]?.prompt ?? "";
+  assert.doesNotMatch(prompt, /## App/);
+  // With no kind, the prompt keeps the diff, CI and tests wording (MET-180).
+  assert.match(prompt, /Judge from this diff, the CI result and the tests\./);
+  assert.match(prompt, /An item passes only with concrete evidence: a file and line/);
+  assert.doesNotMatch(prompt, /qa-browser|390x844|Call the api with curl/);
 });

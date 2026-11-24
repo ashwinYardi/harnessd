@@ -959,6 +959,36 @@ test("the second parent grills after the first is Done and repairSplits drops it
   assert.equal(second.state, "In Progress");
 });
 
+test("the first split note warns once that QA runs no live app (MET-180)", async () => {
+  const adapter = fakeAdapter({
+    plans: {
+      "MET-100": plan(["backend", "S", "API"]),
+      "MET-101": plan(["backend", "S", "API too"]),
+    },
+  });
+  const t = setup({ adapter });
+  const first = t.linear.add({ title: "First", labels: ["ui"], description: BODY("S") });
+  const second = t.linear.add({ title: "Second", labels: ["ui"], description: BODY("S") });
+
+  await t.loop.tick();
+
+  const note = (key: string) =>
+    t.linear.comments.find((c) => c.key === key && c.body.startsWith("**Coordinator split**"))
+      ?.body;
+  assert.match(
+    note(first.key) ?? "",
+    /QA runs no live app: \.harnessd\/config\.toml has no \[qa\] kind \(docs\/CONFIG\.md\)\.\nReason:/,
+  );
+  assert.equal(typeof t.memory.state.qaLiveWarned, "string", "the warning time is recorded");
+
+  first.state = "Done";
+  await t.loop.tick();
+
+  assert.ok(note(second.key), "the second parent splits");
+  assert.doesNotMatch(note(second.key) ?? "", /QA runs no live app/, "the warning went out once");
+  assert.match(note(second.key) ?? "", /Reason:/);
+});
+
 test("Linear's manual order wins over creation order", async () => {
   const adapter = fakeAdapter({
     plans: {
