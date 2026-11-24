@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -26,6 +27,17 @@ function one(lines: string[]): Record<string, unknown> {
   const value: unknown = JSON.parse(lines[0] ?? "");
   assert.ok(typeof value === "object" && value !== null && !Array.isArray(value));
   return value as Record<string, unknown>;
+}
+
+/** The built bin a package manager links; build it once when a plain test run has no dist. */
+function builtScript(): string {
+  const root = fileURLToPath(new URL("../..", import.meta.url));
+  const script = join(root, "dist", "qa-browser", "qa-browser.js");
+  if (!existsSync(script)) {
+    const built = spawnSync("pnpm", ["run", "build"], { cwd: root, encoding: "utf8" });
+    assert.equal(built.status, 0, `build failed: ${built.stderr || built.stdout}`);
+  }
+  return script;
 }
 
 test("an unknown command prints one JSON error and exits 1", async () => {
@@ -77,6 +89,29 @@ test("the script itself exits 1 with one JSON line for an unknown command", () =
   const payload = one(lines);
   assert.equal(payload.ok, false);
   assert.equal(payload.command, "nope");
+});
+
+test("the built script through a bin symlink exits 1 with one JSON line", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-qa-browser-bin-"));
+  try {
+    const link = join(dir, "qa-browser");
+    await symlink(builtScript(), link);
+    const result = spawnSync(process.execPath, [link, "nope"], {
+      encoding: "utf8",
+      env: { ...process.env, HARNESSD_QA_BROWSER: "" },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    const lines = result.stdout
+      .trim()
+      .split("\n")
+      .filter((line) => line !== "");
+    const payload = one(lines);
+    assert.equal(payload.ok, false);
+    assert.equal(payload.command, "nope");
+    assert.match(String(payload.error), /unknown command "nope"/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("open takes a url, a width and a height, and defaults to 1280x800", () => {

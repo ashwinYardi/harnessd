@@ -9,9 +9,11 @@
 // path relative to HARNESSD_HOME so no local path reaches a public review. Playwright drops
 // its viewport override when the CDP connection closes, so `open` saves the size in that
 // folder and every command re-applies it before it acts.
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { chromium, type Page } from "playwright-core";
 
 /** The commands QA may run. */
@@ -281,6 +283,23 @@ export async function runQaBrowser(
 
 const consoleIo: QaBrowserIo = { out: (line) => process.stdout.write(`${line}\n`) };
 
-if (import.meta.main) {
+/**
+ * True when Node ran this file as the script. `import.meta.main` would say so, but it only
+ * arrived in Node 24.2 and the repo accepts 24.0, so compare real paths instead: a package
+ * manager links the bin, and the symlink must resolve to the module Node loaded.
+ */
+export function isMainScript(
+  entry: string | undefined = process.argv[1],
+  moduleUrl: string = import.meta.url,
+): boolean {
+  if (entry === undefined || entry === "") return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(moduleUrl));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainScript()) {
   process.exitCode = await runQaBrowser(process.argv.slice(2), consoleIo);
 }
