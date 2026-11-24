@@ -250,6 +250,19 @@ For each part:
 2. **Check it out.** The PR's head commit is checked out in a worktree of its own, detached, and removed afterwards even when it has local changes. A QA checkout is never kept (D-041).
 3. **Run the tests.** harnessd runs `qa.setup_command` and then `qa.test_command` (default `pnpm test`) in that worktree.
 4. **Start the app (D-051).** When `[qa]` sets `kind`, harnessd runs `qa.build` and `qa.seed`, picks a free port on 127.0.0.1, replaces `{port}` in `qa.url` and `qa.start`, runs `qa.start` through `sh -c` with `PORT` set and its own process group, and waits for `qa.health`. A `health` value that starts with `/` is a path: HTTP GET to the url origin plus the path passes on a 2xx or 3xx answer. Any other value is a command, and exit 0 passes. Each probe has a 5 s limit, and harnessd polls once a second for 2 minutes. `build`, `seed`, `start` and `health` get only `PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `LANG`, `TERM`, `PORT`, `HARNESSD_QA_AREA` and the names in `qa.env`, taken from the daemon's environment; an unset name is skipped with one log line. `setup_command` and `test_command` keep their environment. A cli runs `build`, `seed` and one `health` command; harnessd starts no server for it. A failing `qa.test_command` skips the app, so a PR that breaks the build is a test result, not a setup error. The app is stopped in every teardown of the round (approve, changes requested, error, limited, setup error, timeout and pause) with the tree kill (D-048).
+
+   A **web** review also gets a browser (MET-179). After health passes, harnessd finds an installed Google Chrome first and then a Playwright Chromium, and launches it headless with remote debugging on a free loopback port. It downloads nothing. A missing browser, a browser that exits before it answers and a debug port that stays quiet are `browser` setup errors (D-041), and the log line names the fix: install Google Chrome, or a Playwright Chromium with `pnpm exec playwright install chromium`. The browser is stopped with the tree kill at teardown, like the app. Only the QA run's environment gets `HARNESSD_QA_BROWSER` (the CDP endpoint), `HARNESSD_QA_RUN` (the run id) and a `PATH` with the `qa-browser` folder first; builder and coordinator runs get neither. `@harnessd/daemon` ships `qa-browser` as a bin, and it drives the page the last command left open:
+
+   ```text
+   qa-browser open <url> --width <n> --height <n>
+   qa-browser click <selector>
+   qa-browser type <selector> <text>
+   qa-browser text <selector>
+   qa-browser check <file.js>
+   qa-browser screenshot <name>
+   ```
+
+   Every command prints one JSON object, `{ ok, command, result | error }`, and exits 0 when ok and 1 when not. `open` sets the viewport, and the commands that follow and their screenshots keep that size. `check` evaluates the file in the page and returns its value. Screenshots go to `<HARNESSD_HOME>/qa/<run id>/<name>.png`, and the JSON returns the path relative to `HARNESSD_HOME`.
 5. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the part's own "Done when" and "Verify" sections; the part brief, including the decision IDs it names and the grill calls it follows; the CI result from `statusCheckRollup`; the harnessd test result; and, for a live app, its url and kind. It reads the part diff, those decision IDs, the part's items and Verify commands, CI and the tests. It does not read `docs/SPEC.md` or every record. It judges from the diff, the CI result, the tests and the running product, and opens a file only to check a line the diff touches. Its last message must be strict JSON, one item per part "Done when" item plus one last item, `Verify`:
 
    ```json
@@ -268,7 +281,7 @@ After the round:
 |---|---|
 | approved | The part's PR goes to `merges` in `loop.json` as one entry with one PR, pinned to the reviewed head, and the merge gate takes it. QA stays Ready for the next part. |
 | changes requested, first failure | The part goes back to Ready with a comment that links its review. The reviewed head records `changes_requested`; QA runs again only on a new head. Its next run resumes the part's own session on the same harness and worktree when it can, with only the failures; otherwise it starts cold (D-046). |
-| QA could not set up the review | QA goes back to Ready and runs again. No QA failure is counted and no comment is posted: the PR lookup, checkout, worktree sync, the budget before the agent, or an app build, seed, start or health step failed (D-041, D-051). |
+| QA could not set up the review | QA goes back to Ready and runs again. No QA failure is counted and no comment is posted: the PR lookup, checkout, worktree sync, the budget before the agent, an app build, seed, start or health step, or the browser step failed (D-041, D-051). |
 | app setup failed three times on one head | The review runs with no live app, counts no QA failure and keeps `app <step> failed` as the reason (D-051). A new head resets the count. |
 | second failure | QA and the parent move to Needs input. One comment goes on the parent and one notice is sent. Nothing is sent back again (D-014). |
 
