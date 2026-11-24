@@ -39,6 +39,7 @@ import type { TaskWorktrees } from "../worktrees/index.ts";
 import { agentPromptHeader } from "./dispatch.ts";
 import { extractJson, runForReply } from "./grill.ts";
 import type { Notifier } from "./notifier.ts";
+import type { PartQa } from "./plan.ts";
 import { type AgentMemory, memorySection } from "./prompt.ts";
 import { type QaApp, type QaAppInput, type QaAppStart, startQaApp } from "./qa-app.ts";
 import { extractSection, readPartMarker, sectionChecklist, sectionList } from "./split.ts";
@@ -218,6 +219,45 @@ export async function runQaTests(
     if (!last.passed || signal?.aborted) return last;
   }
   return last ?? { passed: false, command: "", exitCode: null, timedOut: false, output: "" };
+}
+
+/** One Verify command of a `QA: tests` part and its result. */
+export interface VerifyRun {
+  check: VerifyCheck;
+  result: CommandResult;
+}
+
+function commandPassed(result: CommandResult): boolean {
+  return result.exitCode === 0 && !result.timedOut && result.error === undefined;
+}
+
+/**
+ * Runs a `QA: tests` part's Verify commands in order, stopping at the first failure or when
+ * the round's budget runs out. No QA agent runs and no app starts (D-053).
+ */
+export async function runVerifyChecks(
+  checks: readonly VerifyCheck[],
+  cwd: string,
+  timeoutMs: number,
+  run: CommandRunner = runShellCommand,
+  now: () => number = Date.now,
+  signal?: AbortSignal,
+): Promise<VerifyRun[]> {
+  const deadline = now() + timeoutMs;
+  const out: VerifyRun[] = [];
+  for (const check of checks) {
+    if (signal?.aborted) break;
+    const result = await run(check.run, cwd, Math.max(deadline - now(), 1), signal);
+    out.push({ check, result });
+    if (!commandPassed(result) || signal?.aborted) break;
+  }
+  return out;
+}
+
+function verifyEvidence(result: CommandResult): string {
+  if (result.error !== undefined) return `could not run (${oneLine(result.error)})`;
+  if (result.timedOut) return "timed out";
+  return `exited with code ${result.exitCode ?? "null (killed)"}`;
 }
 
 function describeTests(tests: TestRun): string {
@@ -409,6 +449,33 @@ export function partItems(part: LinkedIssue): string[] {
 /** The commands of the part's own Verify section, each with what it must show. */
 export function partVerify(part: LinkedIssue): string[] {
   return sectionList(extractSection(part.description, "Verify")).map(oneLine);
+}
+
+/** How QA judges the part: from its Verify commands, or with the QA agent (D-053). */
+export function partQaMode(part: LinkedIssue): PartQa {
+  const match = /^\s*\*\*QA\*\*\s*:\s*(tests|agent)\s*$/im.exec(part.description);
+  return match?.[1]?.toLowerCase() === "tests" ? "tests" : "agent";
+}
+
+/** One Verify line split into its command and what its output must show. */
+export interface VerifyCheck {
+  run: string;
+  expect: string;
+}
+
+/** The part's Verify commands, in order. A line without the arrow runs as written. */
+export function partVerifyChecks(part: LinkedIssue): VerifyCheck[] {
+  const out: VerifyCheck[] = [];
+  for (const line of partVerify(part)) {
+    const match = /^`([^`]+)`\s*(?:→|->)\s*(.*)$/.exec(line);
+    if (match?.[1]) {
+      out.push({ run: match[1].trim(), expect: (match[2] ?? "").trim() });
+      continue;
+    }
+    const run = line.replace(/`/g, "").trim();
+    if (run !== "") out.push({ run, expect: "" });
+  }
+  return out;
 }
 
 /**
@@ -644,6 +711,38 @@ export function decideReview(
   return { decision: failing.length === 0 ? "approve" : "request_changes", failing, passing };
 }
 
+/**
+ * The verdict for a `QA: tests` part: every Done-when item shares the Verify result, and the
+ * last item, `Verify`, passes only when a command ran and every command exited 0 (D-053).
+ * A repo test failure leaves Verify unrun, so both the test line and Verify fail.
+ */
+export function verdictFromVerify(
+  checklist: string[],
+  tests: TestRun,
+  runs: readonly VerifyRun[],
+): QaVerdict {
+  const failed = runs.find((entry) => !commandPassed(entry.result));
+  const verifyPass = runs.length > 0 && failed === undefined;
+  const evidence =
+    runs.length === 0
+      ? "not run: the repo tests failed"
+      : runs.map((entry) => `\`${entry.check.run}\` ${verifyEvidence(entry.result)}`).join("; ");
+  return {
+    items: checklist.map((text, i) =>
+      i === checklist.length - 1
+        ? { text, pass: verifyPass, evidence }
+        : {
+            text,
+            pass: true,
+            evidence: verifyPass
+              ? "every Verify command exited 0"
+              : "the Verify commands ran; see the Verify item",
+          },
+    ),
+    testsPassed: tests.passed,
+  };
+}
+
 export interface ReviewBodyInput {
   qa: LinkedIssue;
   parent: Issue;
@@ -651,6 +750,8 @@ export interface ReviewBodyInput {
   tests: TestRun;
   round: number;
   maxRounds: number;
+  /** The failing Verify command's output for a `QA: tests` part (D-053). */
+  verifyTail?: { command: string; output: string };
   /**
    * Why this verdict was made without the product: live QA is off, or the app failed three
    * times on this head. The body starts with `not run live: <reason>` (MET-180, D-013).
@@ -660,7 +761,7 @@ export interface ReviewBodyInput {
 
 /** The PR review body. */
 export function formatReviewBody(input: ReviewBodyInput): string {
-  const { qa, parent, decision, tests, round, maxRounds, notLive } = input;
+  const { qa, parent, decision, tests, round, maxRounds, notLive, verifyTail } = input;
   const lines: string[] = [];
   if (notLive !== undefined) lines.push(`not run live: ${notLive}`, "");
   if (decision.decision === "approve") {
@@ -687,6 +788,15 @@ export function formatReviewBody(input: ReviewBodyInput): string {
       `Last lines of \`${tests.command}\`:`,
       "```text",
       tail(tests.output, MAX_TEST_TAIL),
+      "```",
+    );
+  }
+  if (verifyTail !== undefined) {
+    lines.push(
+      "",
+      `Last lines of \`${verifyTail.command}\`:`,
+      "```text",
+      tail(verifyTail.output, MAX_TEST_TAIL),
       "```",
     );
   }
@@ -873,6 +983,9 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
 
   async function review(part: LinkedIssue): Promise<PrReview> {
     const checklist = qaChecklist(parent, part);
+    // A `QA: tests` part needs its Verify commands; without them it falls back to the agent (D-053).
+    const verifyChecks = partVerifyChecks(part);
+    const testsMode = partQaMode(part) === "tests" && verifyChecks.length > 0;
     let pr: PullRequest | undefined;
     try {
       pr = await deps.github.findPrForIssue(part.key);
@@ -927,6 +1040,8 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
     let appSetup: string | undefined;
     // What the review body puts after `not run live:`: no kind, or the app step (MET-180).
     let liveOff: string | undefined;
+    // The tail of the failing Verify command, for the review body and the send-back (D-053).
+    let verifyTail: { command: string; output: string } | undefined;
     try {
       const files = await deps.github.prFiles(pr.number).catch((error) => {
         log(`${qa.key}: could not list the files of PR #${pr.number}: ${message(error)}`);
@@ -950,6 +1065,24 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       );
       if (cancelled()) {
         verdict = { ok: false, error: "cancelled by harnessd pause" };
+      } else if (testsMode) {
+        // No app and no agent: the part's Verify commands are the whole verdict (D-053).
+        const runs = tests.passed
+          ? await runVerifyChecks(
+              verifyChecks,
+              path,
+              Math.max(deadline - now(), 1),
+              deps.runCommand ?? runShellCommand,
+              now,
+              deps.signal,
+            )
+          : [];
+        if (cancelled()) return stopped(part, pr);
+        const failedRun = runs.find((entry) => !commandPassed(entry.result));
+        if (failedRun !== undefined) {
+          verifyTail = { command: failedRun.check.run, output: failedRun.result.output };
+        }
+        verdict = { ok: true, verdict: verdictFromVerify(checklist, tests, runs) };
       } else {
         // The app starts only once the tests pass: a build broken by the PR is a test result,
         // not a setup error (D-051).
@@ -1122,6 +1255,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       round: input.round,
       maxRounds: input.maxRounds,
       ...(notLive === undefined ? {} : { notLive }),
+      ...(verifyTail === undefined ? {} : { verifyTail }),
     });
     const event: ReviewEvent = decision.decision === "approve" ? "APPROVE" : "REQUEST_CHANGES";
     const result: PrReview = {
@@ -1131,6 +1265,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       failing: decision.failing,
       // MET-156: the send-back prompt shows only the tail of a failing test run.
       ...(tests.passed ? {} : { testTail: tail(tests.output, MAX_TEST_TAIL) }),
+      ...(verifyTail === undefined ? {} : { testTail: tail(verifyTail.output, MAX_TEST_TAIL) }),
       ...(appSetup === undefined ? {} : { appSetup }),
     };
     try {

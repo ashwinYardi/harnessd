@@ -104,6 +104,36 @@ const briefed = issue("MET-51", {
   ].join("\n"),
 });
 
+/** A part the plan marked `QA: tests` (D-053). */
+const testsBriefed = issue("MET-51", {
+  parentId: parent.id,
+  description: [
+    partMarker("backend"),
+    "",
+    "**Goal**",
+    "Serve the avatar field.",
+    "",
+    "**Done when**",
+    "- [ ] Avatars are served",
+    "",
+    "**Files**",
+    "- src/avatars.ts",
+    "",
+    "**Steps**",
+    "1. Add the field.",
+    "",
+    "**Verify**",
+    "- `pnpm check` → avatars pass",
+    "",
+    "**QA**: tests",
+    "",
+    "**Out of scope**",
+    "The UI.",
+    "",
+    "**Size**: S",
+  ].join("\n"),
+});
+
 function pr(number: number, key: string): PullRequest {
   return {
     number,
@@ -172,6 +202,8 @@ interface Options {
   prs?: Record<string, PullRequest>;
   /** Exit code of the test command. */
   testExit?: number;
+  /** Exit code of another command by name; unset commands exit 0. */
+  exits?: Record<string, number>;
   /** Make postReview refuse these events. */
   refuse?: string[];
   checkoutFails?: boolean;
@@ -227,7 +259,8 @@ function harness(options: Options = {}) {
   const { adapter, tasks, cwds } = fakeAdapter(options.replies ?? []);
   const runCommand: CommandRunner = async (command, cwd): Promise<CommandResult> => {
     commands.push({ command, cwd });
-    const exitCode = command === "pnpm test" ? (options.testExit ?? 0) : 0;
+    const exitCode =
+      options.exits?.[command] ?? (command === "pnpm test" ? (options.testExit ?? 0) : 0);
     return { exitCode, timedOut: false, output: exitCode === 0 ? "ok 12" : "not ok 3 - avatars" };
   };
   const deps = {
@@ -442,6 +475,59 @@ test("the verdict needs one item per part Done-when item plus Verify (MET-162)",
   assert.equal(result.outcome, "error");
   assert.equal(h.reviews.length, 0, "no review for an unusable verdict");
   assert.match(result.reviews[0]?.error ?? "", /expected 2.*got 1/);
+});
+
+test("a QA: tests part approves from its Verify commands with no QA agent (D-053)", async () => {
+  const h = harness({ prs: { [testsBriefed.key]: pr(7, testsBriefed.key) } });
+  const result = await runQa({ ...h.input, parts: [testsBriefed] }, h.deps);
+  assert.equal(result.outcome, "approved", JSON.stringify(result.reviews[0]));
+  assert.equal(h.tasks.length, 0, "no QA agent run");
+  assert.deepEqual(
+    h.commands.map((entry) => entry.command),
+    ["pnpm test", "pnpm check"],
+    "the repo tests then the part's Verify commands",
+  );
+  assert.equal(h.reviews[0]?.event, "APPROVE");
+  assert.match(h.reviews[0]?.body ?? "", /Verify: `pnpm check` exited with code 0/);
+});
+
+test("a failing Verify command requests changes with its line and test tail (D-053)", async () => {
+  const h = harness({
+    prs: { [testsBriefed.key]: pr(7, testsBriefed.key) },
+    exits: { "pnpm check": 3 },
+  });
+  const result = await runQa({ ...h.input, parts: [testsBriefed] }, h.deps);
+  assert.equal(result.outcome, "changes_requested");
+  assert.equal(h.tasks.length, 0, "no QA agent run");
+  const review = result.reviews[0];
+  assert.equal(review?.decision, "request_changes");
+  assert.ok(
+    review?.failing.some((line) => line.includes("Verify: `pnpm check` exited with code 3")),
+    JSON.stringify(review?.failing),
+  );
+  assert.match(review?.testTail ?? "", /not ok 3 - avatars/);
+  assert.match(h.reviews[0]?.body ?? "", /Last lines of `pnpm check`/);
+});
+
+test("a QA: agent part and a body with no QA line still run the QA agent (D-053)", async () => {
+  const agentPart = issue("MET-51", {
+    parentId: parent.id,
+    description: testsBriefed.description.replace("**QA**: tests", "**QA**: agent"),
+  });
+  for (const part of [agentPart, briefed]) {
+    const h = harness({
+      replies: [verdict([true, true], true, qaChecklist(parent, part))],
+      prs: { [part.key]: pr(7, part.key) },
+    });
+    const result = await runQa({ ...h.input, parts: [part] }, h.deps);
+    assert.equal(result.outcome, "approved");
+    assert.equal(h.tasks.length, 1, "the QA agent ran");
+    assert.equal(
+      h.commands.some((entry) => entry.command === "pnpm check"),
+      false,
+      "the Verify commands did not run",
+    );
+  }
 });
 
 test("the QA agent run gets the role turn cap", async () => {

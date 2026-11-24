@@ -8,7 +8,7 @@ import {
   type QaConfig,
 } from "@harnessd/shared";
 import type { LinearClient } from "../linear/client.ts";
-import type { PartRole, PlanPart } from "./plan.ts";
+import type { PartQa, PartRole, PlanPart } from "./plan.ts";
 
 /** Roles of a sub-issue: a planned part, or the QA part harnessd adds. */
 export type SubIssueRole = PartRole | "qa";
@@ -154,6 +154,8 @@ export function formatPartDescription(
   const why = extractSection(parent.description, "Why") || `Part of ${parent.key}.`;
   const decisions = part.decisions ?? [];
   const partCalls = resolvePartCalls(part, calls);
+  // A part from before this field, or a hand-made plan, gets agent QA (D-053).
+  const qa: PartQa = part.qa === "tests" ? "tests" : "agent";
   const lines = [
     partMarker(id),
     `Part of [${parent.key}](${parent.url}): ${parent.title}. Role: ${part.role}.`,
@@ -172,6 +174,8 @@ export function formatPartDescription(
     "",
     "**Verify**",
     ...part.verify.map((check) => `- \`${check.run}\` → ${check.expect}`),
+    "",
+    `**QA**: ${qa}`,
     "",
     "**Out of scope**",
     part.outOfScope,
