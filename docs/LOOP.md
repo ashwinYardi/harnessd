@@ -262,7 +262,7 @@ For each part:
    qa-browser screenshot <name>
    ```
 
-   Every command prints one JSON object, `{ ok, command, result | error }`, and exits 0 when ok and 1 when not. `check` evaluates the file in the page and returns its value. Screenshots go to `<HARNESSD_HOME>/qa/<run id>/<name>.png`, and the JSON returns the path relative to `HARNESSD_HOME`.
+   Every command prints one JSON object, `{ ok, command, result | error }`, and exits 0 when ok and 1 when not. `open` sets the viewport, and the commands that follow and their screenshots keep that size. `check` evaluates the file in the page and returns its value. Screenshots go to `<HARNESSD_HOME>/qa/<run id>/<name>.png`, and the JSON returns the path relative to `HARNESSD_HOME`.
 5. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the part's own "Done when" and "Verify" sections; the part brief, including the decision IDs it names and the grill calls it follows; the CI result from `statusCheckRollup`; the harnessd test result; and, for a live app, its url and kind. It reads the part diff, those decision IDs, the part's items and Verify commands, CI and the tests. It does not read `docs/SPEC.md` or every record. It judges from the diff, the CI result, the tests and the running product, and opens a file only to check a line the diff touches. Its last message must be strict JSON, one item per part "Done when" item plus one last item, `Verify`:
 
    ```json

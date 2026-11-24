@@ -1,8 +1,18 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { parseQaBrowserArgs, runQaBrowser, screenshotPath } from "./qa-browser.ts";
+import type { Page } from "playwright-core";
+import {
+  parseQaBrowserArgs,
+  parseViewport,
+  runQaBrowser,
+  screenshotPath,
+  viewportPath,
+} from "./qa-browser.ts";
 
 /** Captures the one stdout line the CLI writes. */
 function capture(): { lines: string[]; io: { out: (line: string) => void } } {
@@ -102,6 +112,67 @@ test("click, type, text, check and screenshot take their arguments", () => {
     name: "home",
   });
   assert.throws(() => parseQaBrowserArgs("type", ["#name"]), /missing text/);
+});
+
+test("open saves the viewport and every later command restores it", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "harnessd-qa-browser-viewport-"));
+  try {
+    const env = {
+      HARNESSD_QA_BROWSER: "http://127.0.0.1:1",
+      HARNESSD_HOME: dir,
+      HARNESSD_QA_RUN: "MET-53-qa-1-pr7",
+    };
+    const sizes: string[] = [];
+    const page = {
+      setViewportSize: async ({ width, height }: { width: number; height: number }) => {
+        sizes.push(`${width}x${height}`);
+      },
+      goto: async () => {},
+      url: () => "http://app.test/",
+      textContent: async () => "hello",
+    } as unknown as Page;
+    const deps = {
+      env,
+      connect: async () => ({ page, close: async () => {} }),
+    };
+    const { lines, io } = capture();
+
+    assert.equal(
+      await runQaBrowser(
+        ["open", "http://app.test", "--width", "390", "--height", "844"],
+        io,
+        deps,
+      ),
+      0,
+    );
+    assert.deepEqual(JSON.parse(await readFile(viewportPath("MET-53-qa-1-pr7", env), "utf8")), {
+      width: 390,
+      height: 844,
+    });
+    assert.equal(await runQaBrowser(["text", "h1"], io, deps), 0);
+    assert.deepEqual(sizes, ["390x844", "390x844"], "the later command restores the open size");
+
+    assert.equal(
+      await runQaBrowser(
+        ["open", "http://app.test", "--width", "1280", "--height", "800"],
+        io,
+        deps,
+      ),
+      0,
+    );
+    assert.equal(await runQaBrowser(["text", "h1"], io, deps), 0);
+    assert.deepEqual(sizes, ["390x844", "390x844", "1280x800", "1280x800"]);
+    assert.equal(one(lines.slice(-1)).result, "hello");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a malformed saved viewport is ignored", () => {
+  assert.equal(parseViewport(undefined), undefined);
+  assert.equal(parseViewport({ width: 0, height: 800 }), undefined);
+  assert.equal(parseViewport({ width: 390, height: "844" }), undefined);
+  assert.deepEqual(parseViewport({ width: 390, height: 844 }), { width: 390, height: 844 });
 });
 
 test("a screenshot path is relative to HARNESSD_HOME and safe", () => {

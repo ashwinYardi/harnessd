@@ -6,8 +6,10 @@
 // goes to stdout, `{ ok, command, result | error }`, and the exit code is 0 or 1.
 //
 // Screenshots are written under `<HARNESSD_HOME>/qa/<run id>/`, and the JSON returns the
-// path relative to HARNESSD_HOME so no local path reaches a public review.
-import { mkdir, readFile } from "node:fs/promises";
+// path relative to HARNESSD_HOME so no local path reaches a public review. Playwright drops
+// its viewport override when the CDP connection closes, so `open` saves the size in that
+// folder and every command re-applies it before it acts.
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { chromium, type Page } from "playwright-core";
@@ -144,6 +146,51 @@ export function screenshotPath(
   return { absolute: join(qaHome(env), "qa", run, file), relative };
 }
 
+export interface Viewport {
+  width: number;
+  height: number;
+}
+
+/** The run id a screenshot or viewport file belongs to. */
+function runIdOf(env: NodeJS.ProcessEnv): string {
+  return env.HARNESSD_QA_RUN?.trim() || "run";
+}
+
+/** Where `open` saves the viewport for the commands that follow. */
+export function viewportPath(runId: string, env: NodeJS.ProcessEnv = process.env): string {
+  return join(qaHome(env), "qa", segment(runId), "viewport.json");
+}
+
+/** A width and height from a saved file; anything malformed is ignored. */
+export function parseViewport(value: unknown): Viewport | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { width, height } = value as { width?: unknown; height?: unknown };
+  if (typeof width !== "number" || typeof height !== "number") return undefined;
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    return undefined;
+  }
+  return { width, height };
+}
+
+/** Saves the viewport with the run, so a later command can restore it. */
+async function rememberViewport(viewport: Viewport, env: NodeJS.ProcessEnv): Promise<void> {
+  const path = viewportPath(runIdOf(env), env);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, JSON.stringify(viewport));
+}
+
+/** Re-applies the viewport `open` saved; no saved size leaves the page as it is. */
+async function applySavedViewport(page: Page, env: NodeJS.ProcessEnv): Promise<void> {
+  let value: unknown;
+  try {
+    value = JSON.parse(await readFile(viewportPath(runIdOf(env), env), "utf8"));
+  } catch {
+    return;
+  }
+  const viewport = parseViewport(value);
+  if (viewport !== undefined) await page.setViewportSize(viewport);
+}
+
 /** Connects over CDP and returns the page the previous command left open. */
 async function connectPage(endpoint: string): Promise<ConnectedPage> {
   const browser = await chromium.connectOverCDP(endpoint);
@@ -156,10 +203,16 @@ async function connectPage(endpoint: string): Promise<ConnectedPage> {
 async function perform(action: Action, page: Page, deps: QaBrowserDeps): Promise<unknown> {
   const env = deps.env ?? process.env;
   if (action.kind === "open") {
-    await page.setViewportSize({ width: action.width, height: action.height });
+    const viewport = { width: action.width, height: action.height };
+    await page.setViewportSize(viewport);
     await page.goto(action.url);
-    return { url: page.url(), width: action.width, height: action.height };
+    // The CDP connection closes after this call and Playwright drops its viewport override,
+    // so save the size for the next command (MET-179 QA).
+    await rememberViewport(viewport, env);
+    return { url: page.url(), ...viewport };
   }
+  // Restore the last `open` size before acting: checks and screenshots must see it.
+  await applySavedViewport(page, env);
   if (action.kind === "click") {
     await page.locator(action.selector).click();
     return true;
