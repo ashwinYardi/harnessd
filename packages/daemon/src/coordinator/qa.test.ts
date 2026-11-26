@@ -33,7 +33,7 @@ import {
   runShellCommand,
   settleQa,
 } from "./qa.ts";
-import type { QaAppStart, QaAppStep } from "./qa-app.ts";
+import type { QaAppInput, QaAppStart, QaAppStep } from "./qa-app.ts";
 import { partMarker } from "./split.ts";
 import { emptyLoopState } from "./state.ts";
 
@@ -124,6 +124,7 @@ const testsBriefed = issue("MET-51", {
     "",
     "**Verify**",
     "- `pnpm check` → avatars pass",
+    "- `pnpm lint` → no warnings",
     "",
     "**QA**: tests",
     "",
@@ -204,6 +205,10 @@ interface Options {
   testExit?: number;
   /** Exit code of another command by name; unset commands exit 0. */
   exits?: Record<string, number>;
+  /** Output of a command by name; unset commands get the default line. */
+  outputs?: Record<string, string>;
+  /** Records the app starts a live review would make. */
+  startApp?: (input: QaAppInput) => Promise<QaAppStart>;
   /** Make postReview refuse these events. */
   refuse?: string[];
   checkoutFails?: boolean;
@@ -261,7 +266,11 @@ function harness(options: Options = {}) {
     commands.push({ command, cwd });
     const exitCode =
       options.exits?.[command] ?? (command === "pnpm test" ? (options.testExit ?? 0) : 0);
-    return { exitCode, timedOut: false, output: exitCode === 0 ? "ok 12" : "not ok 3 - avatars" };
+    return {
+      exitCode,
+      timedOut: false,
+      output: options.outputs?.[command] ?? (exitCode === 0 ? "ok 12" : "not ok 3 - avatars"),
+    };
   };
   const deps = {
     github,
@@ -281,6 +290,7 @@ function harness(options: Options = {}) {
     agent,
     commands: options.commands ?? { setup_command: "", test_command: "pnpm test" },
     runCommand,
+    ...(options.startApp === undefined ? {} : { startApp: options.startApp }),
     onWorktree: (path: string) => worktreeLog.push(path),
     log: (line: string) => logs.push(line),
   };
@@ -478,35 +488,69 @@ test("the verdict needs one item per part Done-when item plus Verify (MET-162)",
 });
 
 test("a QA: tests part approves from its Verify commands with no QA agent (D-053)", async () => {
-  const h = harness({ prs: { [testsBriefed.key]: pr(7, testsBriefed.key) } });
+  let appStarts = 0;
+  const h = harness({
+    prs: { [testsBriefed.key]: pr(7, testsBriefed.key) },
+    commands: {
+      setup_command: "",
+      test_command: "pnpm test",
+      kind: "web",
+      start: "pnpm dev",
+      url: "http://127.0.0.1:{port}",
+    },
+    startApp: async () => {
+      appStarts += 1;
+      throw new Error("a QA: tests part starts no app");
+    },
+  });
   const result = await runQa({ ...h.input, parts: [testsBriefed] }, h.deps);
   assert.equal(result.outcome, "approved", JSON.stringify(result.reviews[0]));
   assert.equal(h.tasks.length, 0, "no QA agent run");
+  assert.equal(appStarts, 0, "no app or browser starts");
   assert.deepEqual(
     h.commands.map((entry) => entry.command),
-    ["pnpm test", "pnpm check"],
-    "the repo tests then the part's Verify commands",
+    ["pnpm test", "pnpm check", "pnpm lint"],
+    "the repo tests then the part's Verify commands in order",
   );
   assert.equal(h.reviews[0]?.event, "APPROVE");
-  assert.match(h.reviews[0]?.body ?? "", /Verify: `pnpm check` exited with code 0/);
+  const body = h.reviews[0]?.body ?? "";
+  assert.ok(body.startsWith("not run live: QA from Verify commands\n"), body);
+  assert.match(body, /- \[x\] Avatars are served: every Verify command exited 0/);
+  assert.match(
+    body,
+    /- \[x\] Verify: `pnpm check` exited with code 0; `pnpm lint` exited with code 0/,
+  );
+  assert.deepEqual(result.tokens, emptyTokenUsage(), "no usage is recorded");
+  assert.equal(result.turns, undefined, "no turn cap applies");
+  assert.deepEqual(h.logs, ["MET-53: QA from Verify commands on MET-51, 2 commands"]);
 });
 
 test("a failing Verify command requests changes with its line and test tail (D-053)", async () => {
+  const output = `start\n${"x".repeat(MAX_TEST_TAIL)}\nTAIL`;
   const h = harness({
     prs: { [testsBriefed.key]: pr(7, testsBriefed.key) },
     exits: { "pnpm check": 3 },
+    outputs: { "pnpm check": output },
   });
   const result = await runQa({ ...h.input, parts: [testsBriefed] }, h.deps);
   assert.equal(result.outcome, "changes_requested");
   assert.equal(h.tasks.length, 0, "no QA agent run");
   const review = result.reviews[0];
   assert.equal(review?.decision, "request_changes");
-  assert.ok(
-    review?.failing.some((line) => line.includes("Verify: `pnpm check` exited with code 3")),
-    JSON.stringify(review?.failing),
+  assert.deepEqual(review?.failing, ["Verify: `pnpm check` exited with code 3"]);
+  assert.equal(
+    review?.testTail,
+    `…${output.slice(-MAX_TEST_TAIL)}`,
+    "the send-back carries the last MAX_TEST_TAIL characters",
   );
-  assert.match(review?.testTail ?? "", /not ok 3 - avatars/);
-  assert.match(h.reviews[0]?.body ?? "", /Last lines of `pnpm check`/);
+  assert.deepEqual(
+    h.commands.map((entry) => entry.command),
+    ["pnpm test", "pnpm check"],
+    "stops at the first failing command",
+  );
+  const body = h.reviews[0]?.body ?? "";
+  assert.ok(body.startsWith("not run live: QA from Verify commands\n"), body);
+  assert.match(body, /Last lines of `pnpm check`/);
 });
 
 test("a QA: agent part and a body with no QA line still run the QA agent (D-053)", async () => {
@@ -514,7 +558,14 @@ test("a QA: agent part and a body with no QA line still run the QA agent (D-053)
     parentId: parent.id,
     description: testsBriefed.description.replace("**QA**: tests", "**QA**: agent"),
   });
-  for (const part of [agentPart, briefed]) {
+  const noCommand = issue("MET-51", {
+    parentId: parent.id,
+    description: testsBriefed.description.replace(
+      "- `pnpm check` → avatars pass",
+      "- pnpm check → avatars pass",
+    ),
+  });
+  for (const part of [agentPart, briefed, noCommand]) {
     const h = harness({
       replies: [verdict([true, true], true, qaChecklist(parent, part))],
       prs: { [part.key]: pr(7, part.key) },
@@ -527,6 +578,16 @@ test("a QA: agent part and a body with no QA line still run the QA agent (D-053)
       false,
       "the Verify commands did not run",
     );
+    assert.equal(
+      h.logs.some((line) => line.includes("QA from Verify commands")),
+      false,
+      "no tests-mode log line",
+    );
+    if (part === noCommand) {
+      assert.deepEqual(h.logs, [
+        "MET-53: MET-51 has a Verify line with no backticked command, using agent QA",
+      ]);
+    }
   }
 });
 
@@ -1204,6 +1265,45 @@ test("runShellCommand reports the exit code and output, and kills on timeout", a
   const slow = await runShellCommand("sleep 30", process.cwd(), 200);
   assert.equal(slow.timedOut, true);
   assert.ok(Date.now() - started < 10_000);
+});
+
+test("runShellCommand keeps whitespace inside quoted arguments (MET-200)", async () => {
+  const same = await runShellCommand('test "a b" = "a b"', process.cwd(), 10_000);
+  assert.equal(same.exitCode, 0);
+  const different = await runShellCommand('test "a b" = "a  b"', process.cwd(), 10_000);
+  assert.equal(different.exitCode, 1, "the two spaces in the second string are kept");
+});
+
+test("a Verify command reaches the runner with the spaces inside its quotes (MET-200)", async () => {
+  const part = issue("MET-51", {
+    parentId: parent.id,
+    description: [
+      partMarker("backend"),
+      "",
+      "**Done when**",
+      "- [ ] The spacing rule holds",
+      "",
+      "**Verify**",
+      '- `test "a b" = "a  b"` → exits 1',
+      "",
+      "**QA**: tests",
+    ].join("\n"),
+  });
+  const command = 'test "a b" = "a  b"';
+  const h = harness({
+    prs: { [part.key]: pr(7, part.key) },
+    exits: { [command]: 1 },
+  });
+  const result = await runQa({ ...h.input, parts: [part] }, h.deps);
+  assert.deepEqual(
+    h.commands.map((entry) => entry.command),
+    ["pnpm test", command],
+    "the runner got the command unchanged",
+  );
+  assert.equal(result.outcome, "changes_requested");
+  assert.deepEqual(result.reviews[0]?.failing, [
+    'Verify: `test "a b" = "a  b"` exited with code 1',
+  ]);
 });
 
 test("runShellCommand stops when its signal aborts, and never starts once aborted", async () => {
