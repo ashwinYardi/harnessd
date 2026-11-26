@@ -6,6 +6,8 @@ import {
   type SecretReader,
   type WorkflowStateName,
 } from "@harnessd/shared";
+import { Agent, type Dispatcher } from "undici";
+import { isNetworkError } from "../net-error.ts";
 import {
   compareByPriority,
   compareQueueOrder,
@@ -53,6 +55,10 @@ export interface LinearClientOptions {
   endpoint?: string;
   /** Longest Retry-After the client waits out before giving up. Default 60 s. */
   maxRetryWaitMs?: number;
+  /** Per-request timeout. Default 30 s. */
+  timeoutMs?: number;
+  /** Builds a fresh connection pool; a test can count the resets. */
+  newDispatcher?: () => Dispatcher;
 }
 
 export interface ListReadyOptions {
@@ -94,6 +100,7 @@ interface GraphQLError {
 
 const PAGE_SIZE = 50;
 const DEFAULT_RETRY_MS = 1_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 
 const ISSUE_FIELDS = `
   id
@@ -168,6 +175,15 @@ const COMMENT_CREATE_MUTATION = `mutation CommentCreate($input: CommentCreateInp
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** Maps a thrown fetch failure to a network error; an abort is the request timeout. */
+function transportError(cause: unknown): LinearError {
+  if (cause instanceof Error && (cause.name === "TimeoutError" || cause.name === "AbortError")) {
+    return new LinearError("network", "Linear request timed out");
+  }
+  const detail = cause instanceof Error ? cause.message : String(cause);
+  return new LinearError("network", `Linear request failed: ${detail}`);
+}
+
 /** Minimal Linear GraphQL client: Ready issues, sub-issues, relations, state moves and comments. */
 export class LinearClient {
   #readKey: () => Promise<string | undefined>;
@@ -175,6 +191,9 @@ export class LinearClient {
   #sleep: (ms: number) => Promise<void>;
   #endpoint: string;
   #maxRetryWaitMs: number;
+  #timeoutMs: number;
+  #newDispatcher: () => Dispatcher;
+  #dispatcher: Dispatcher;
   /** Issue id or key → team id, filled from every issue the client has read. */
   #issueTeams = new Map<string, string>();
   /** Team id → workflow states. */
@@ -187,6 +206,20 @@ export class LinearClient {
     this.#sleep = options.sleep ?? defaultSleep;
     this.#endpoint = options.endpoint ?? LINEAR_ENDPOINT;
     this.#maxRetryWaitMs = options.maxRetryWaitMs ?? 60_000;
+    this.#timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.#newDispatcher = options.newDispatcher ?? (() => new Agent());
+    this.#dispatcher = this.#newDispatcher();
+  }
+
+  /**
+   * Drops the pooled connections, so the next request opens a fresh one (MET-184). The old
+   * pool closes in the background. #send calls this after a network error, which heals a
+   * dead socket without a daemon restart.
+   */
+  resetConnections(): void {
+    const old = this.#dispatcher;
+    this.#dispatcher = this.#newDispatcher();
+    void old.close().catch(() => {});
   }
 
   /** Ready issues that nothing unfinished blocks, in Linear's queue order. */
@@ -358,10 +391,13 @@ export class LinearClient {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: key },
         body: JSON.stringify({ query, variables }),
+        signal: AbortSignal.timeout(this.#timeoutMs),
+        // undici's Agent and the dispatcher type Node's fetch declares are the same object at
+        // runtime; the two type packages differ only in how they spell compose().
+        dispatcher: this.#dispatcher as unknown as NonNullable<RequestInit["dispatcher"]>,
       });
     } catch (cause) {
-      const detail = cause instanceof Error ? cause.message : String(cause);
-      return { ok: false, error: new LinearError("network", `Linear request failed: ${detail}`) };
+      return this.#failed(transportError(cause));
     }
 
     const status = response.status;
@@ -377,37 +413,41 @@ export class LinearClient {
     if (status === 429 || codes.includes("RATELIMITED")) {
       const error = new LinearError("rate_limited", "Linear rate limit hit.", status);
       const retryAfterMs = parseRetryAfter(response.headers.get("retry-after"));
-      return retryAfterMs === undefined ? { ok: false, error } : { ok: false, error, retryAfterMs };
+      return this.#failed(error, retryAfterMs);
     }
     if (status === 401 || status === 403 || codes.includes("AUTHENTICATION_ERROR")) {
-      return {
-        ok: false,
-        error: new LinearError(
+      return this.#failed(
+        new LinearError(
           "auth",
           `Linear rejected the API key (HTTP ${status}). Replace it in Settings, Connections, Linear.`,
           status,
         ),
-      };
+      );
     }
     if (errors.length > 0) {
       const message = errors
         .map((e) => e.extensions?.userPresentableMessage ?? e.message)
         .join("; ");
-      return { ok: false, error: new LinearError("graphql", `Linear error: ${message}`, status) };
+      return this.#failed(new LinearError("graphql", `Linear error: ${message}`, status));
     }
     if (!response.ok) {
-      return {
-        ok: false,
-        error: new LinearError("http", `Linear request failed with HTTP ${status}.`, status),
-      };
+      return this.#failed(
+        new LinearError("http", `Linear request failed with HTTP ${status}.`, status),
+      );
     }
     if (!body?.data) {
-      return {
-        ok: false,
-        error: new LinearError("invalid_response", "Linear returned no data.", status),
-      };
+      return this.#failed(new LinearError("invalid_response", "Linear returned no data.", status));
     }
     return { ok: true, data: body.data };
+  }
+
+  /** Surfaces a failed request and drops the pool when the failure was in transport. */
+  #failed(
+    error: LinearError,
+    retryAfterMs?: number,
+  ): { ok: false; error: LinearError; retryAfterMs?: number } {
+    if (isNetworkError(error)) this.resetConnections();
+    return retryAfterMs === undefined ? { ok: false, error } : { ok: false, error, retryAfterMs };
   }
 
   async #apiKey(): Promise<string> {
