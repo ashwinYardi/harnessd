@@ -1733,11 +1733,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const result = await splitIssue(issue, plan.parts, linear, fresh, grillCalls);
     if (state !== undefined) {
       state.splits ??= {};
+      // A re-split keeps the record's first time: admission is oldest first (D-050). Only a
+      // new record, after the owner canceled every part, gets a new time (MET-210).
+      const at = state.splits[issue.id]?.at ?? clock.now().toISOString();
       state.splits[issue.id] = {
         key: issue.key,
         parts: result.parts.map((part) => part.id),
         qa: result.qa.id,
-        at: clock.now().toISOString(),
+        at,
       };
       // Saved now, not at the end of the tick: the next tick must see the split even if this
       // process stops right after the move to In Progress (MET-154).
