@@ -748,8 +748,10 @@ export function decideReview(
 /**
  * The verdict for a `QA: tests` part: every item carries the commands with their exit codes,
  * and the last item, `Verify`, also carries each expected result and passes only when a
- * command ran and every command exited 0 (D-053). A repo test failure leaves Verify unrun,
- * so both the test line and Verify fail.
+ * command ran and every command exited 0 (D-053). A failing command leaves only its own line
+ * as the `Verify` evidence, so the send-back names the command that failed and not the ones
+ * before it (D-046). A repo test failure leaves Verify unrun, so both the test line and
+ * Verify fail.
  */
 export function verdictFromVerify(
   checklist: string[],
@@ -760,11 +762,12 @@ export function verdictFromVerify(
   const verifyPass = runs.length > 0 && failed === undefined;
   const evidence =
     runs.length === 0 ? "not run: the repo tests failed" : runs.map(verifyRunEvidence).join("; ");
+  const verifyEvidence = failed === undefined ? evidence : verifyRunEvidence(failed);
   return {
     items: checklist.map((text, i) => ({
       text,
       pass: i === checklist.length - 1 ? verifyPass : true,
-      evidence,
+      evidence: i === checklist.length - 1 ? verifyEvidence : evidence,
     })),
     testsPassed: tests.passed,
   };

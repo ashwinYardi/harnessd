@@ -33,7 +33,10 @@ import {
   runQa,
   runQaTests,
   runShellCommand,
+  runVerifyChecks,
   settleQa,
+  type TestRun,
+  verdictFromVerify,
 } from "./qa.ts";
 import type { QaAppInput, QaAppStart, QaAppStep } from "./qa-app.ts";
 import { partMarker } from "./split.ts";
@@ -553,6 +556,38 @@ test("a failing Verify command requests changes with its line and test tail (D-0
   const body = h.reviews[0]?.body ?? "";
   assert.ok(body.startsWith("not run live: QA from Verify commands\n"), body);
   assert.match(body, /Last lines of `pnpm check`/);
+});
+
+test("a failing Verify command names only itself, after a passing one (D-053)", async () => {
+  // QA ran `true` (passes) then the failing command straight through the daemon's own
+  // functions; the failing line must not also list the passing command.
+  const checks = [
+    { run: "true", expect: "" },
+    { run: "echo second-check-failed; exit 3", expect: "" },
+  ];
+  const run: CommandRunner = async (command) => ({
+    exitCode: command === "true" ? 0 : 3,
+    timedOut: false,
+    output: command === "true" ? "" : "start\nsecond-check-failed",
+  });
+  const runs = await runVerifyChecks(checks, "/wt", 60_000, run);
+  const checklist = ["Avatars are served", "Verify"];
+  const tests: TestRun = {
+    passed: true,
+    command: "pnpm test",
+    exitCode: 0,
+    timedOut: false,
+    output: "",
+  };
+  const verdict: ParsedQaVerdict = {
+    ok: true,
+    verdict: verdictFromVerify(checklist, tests, runs),
+  };
+  const decision = decideReview(checklist, tests, verdict);
+  assert.equal(decision.decision, "request_changes");
+  assert.deepEqual(decision.failing, [
+    "Verify: `echo second-check-failed; exit 3` exited with code 3",
+  ]);
 });
 
 test("a QA: agent part and a body with no QA line still run the QA agent (D-053)", async () => {
