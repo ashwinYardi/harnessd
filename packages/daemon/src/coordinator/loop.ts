@@ -87,6 +87,7 @@ import type {
   LoopState,
   LoopStore,
   PartSession,
+  ReviewedHead,
   SelfUpdateRecord,
   SelfUpdateTrigger,
 } from "./state.ts";
@@ -1405,6 +1406,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             maxTurns: maxTurnsFor("qa", qa.parent.size, config.limits),
             round: (s.qaFailures[qa.parent.id] ?? 0) + 1,
             maxRounds,
+            ...(s.reviewedHeads === undefined ? {} : { reviewedHeads: s.reviewedHeads }),
           },
           {
             github,
@@ -1479,10 +1481,15 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       for (const r of result.reviews) {
         if (r.pr === undefined || r.decision === "error") continue;
         s.reviewedHeads ??= {};
-        s.reviewedHeads[r.part.id] = {
+        const head: ReviewedHead = {
           sha: r.pr.headRefOid,
           verdict: r.decision === "approve" ? "approved" : "changes_requested",
         };
+        // The cases survive the builder's ok run, which deletes qaFeedback (D-054).
+        if (r.decision === "request_changes" && r.cases !== undefined && r.cases.length > 0) {
+          head.cases = r.cases;
+        }
+        s.reviewedHeads[r.part.id] = head;
       }
       const settled = await settleQa(s, { qa: issue, parent: qa.parent }, result, {
         linear,

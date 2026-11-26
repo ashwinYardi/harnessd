@@ -2263,6 +2263,11 @@ test("QA reviews one part as soon as it reaches In Review, at its PR head", asyn
     sha: "sha7",
     verdict: "approved",
   });
+  assert.equal(
+    t.memory.state.reviewedHeads?.[backend.id]?.cases,
+    undefined,
+    "an approval stores no cases",
+  );
   assert.deepEqual(
     t.memory.state.merges.map((m) => [m.qaKey, m.prs.map((p) => [p.number, p.sha])]),
     [[qa.key, [[7, "sha7"]]]],
@@ -2289,6 +2294,19 @@ test("a failed QA sends the part back with the review; the second failure escala
     /changes requested on \[PR #7\].*review-1.*\n\n- Has tests: evidence 2/s,
   );
   assert.equal(t.memory.state.qaFailures[parent.id], 1);
+  assert.deepEqual(t.memory.state.reviewedHeads?.[backend.id], {
+    sha: "sha7",
+    verdict: "changes_requested",
+    cases: [
+      {
+        id: "C1",
+        item: "item 2",
+        repro: "pnpm test",
+        expected: "it passes",
+        actual: "evidence 2",
+      },
+    ],
+  });
 
   // The part's agent runs again with the review in its prompt, while QA waits.
   const report = await t.loop.tick();
@@ -2303,6 +2321,15 @@ test("a failed QA sends the part back with the review; the second failure escala
   await t.loop.idle();
   assert.equal(backend.state, "In Review");
   assert.deepEqual(t.memory.state.qaFeedback, {});
+  assert.deepEqual(t.memory.state.reviewedHeads?.[backend.id]?.cases, [
+    {
+      id: "C1",
+      item: "item 2",
+      repro: "pnpm test",
+      expected: "it passes",
+      actual: "evidence 2",
+    },
+  ]);
 
   // Round 2: still failing. QA and the parent go to Needs input; nothing goes back.
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);

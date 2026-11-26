@@ -25,6 +25,7 @@ import {
   type ParsedQaVerdict,
   type PrReview,
   parseQaVerdict,
+  parseReQaVerdict,
   type QaRunInput,
   type QaRunResult,
   qaBrowserBinDir,
@@ -825,6 +826,123 @@ test("one failing item requests changes listing it; the part goes back to Ready"
   assert.deepEqual(s.pings, []);
 });
 
+test("a re-QA on a new head gets only the saved cases and commands (D-054)", async () => {
+  resetQaAppFailures();
+  const saved = [
+    {
+      id: "C1",
+      item: "Avatars are served",
+      repro: "pnpm test -- avatars",
+      expected: "the avatar test passes",
+      actual: "not ok 3 - avatars",
+    },
+  ];
+  const reply = JSON.stringify({
+    cases: [{ id: "C1", pass: true, evidence: "pnpm test -- avatars: ok 3 - avatars" }],
+    verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+  });
+  const h = harness({ replies: [reply] });
+  const result = await runQa(
+    {
+      ...h.input,
+      parts: [briefed],
+      reviewedHeads: {
+        [briefed.id]: { sha: "sha6", verdict: "changes_requested", cases: saved },
+      },
+    },
+    h.deps,
+  );
+  assert.equal(result.reviews[0]?.decision, "approve");
+  assert.deepEqual(result.reviews[0]?.reQa, {
+    cases: [{ id: "C1", pass: true, evidence: "pnpm test -- avatars: ok 3 - avatars" }],
+    verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+  });
+
+  const prompt = h.tasks[0]?.prompt ?? "";
+  assert.match(prompt, /## Saved cases \(1\)/);
+  assert.match(prompt, /1\. C1 \(Avatars are served\)/);
+  assert.match(prompt, /repro: pnpm test -- avatars/);
+  assert.match(prompt, /expected: the avatar test passes/);
+  assert.match(prompt, /actual: not ok 3 - avatars/);
+  assert.match(prompt, /## Verify[\s\S]*`pnpm test` → passes/);
+  assert.match(prompt, /## Tests[\s\S]*`pnpm test` passed/);
+  assert.match(prompt, /Write no new probes/);
+  assert.match(prompt, /"verify": \{ "pass": true \| false/);
+  assert.doesNotMatch(prompt, /## Diff/);
+  assert.doesNotMatch(prompt, /## Changed files/);
+  assert.doesNotMatch(prompt, /## Part brief/);
+  assert.doesNotMatch(prompt, /## Done when/);
+  assert.doesNotMatch(prompt, /docs\/SPEC/);
+  assert.deepEqual(
+    h.commands.map((entry) => entry.command),
+    ["pnpm test"],
+    "the daemon runs setup and test before the agent",
+  );
+});
+
+test("a reviewed head with no saved cases still gets the full round 1 (D-054)", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, true])] });
+  const result = await runQa(
+    {
+      ...h.input,
+      parts: [briefed],
+      reviewedHeads: {
+        [briefed.id]: { sha: "sha6", verdict: "changes_requested" },
+      },
+    },
+    h.deps,
+  );
+  assert.equal(result.outcome, "approved");
+  const prompt = h.tasks[0]?.prompt ?? "";
+  assert.match(prompt, /## Diff/);
+  assert.match(prompt, /## Part brief/);
+  assert.match(prompt, /## Done when/);
+  assert.doesNotMatch(prompt, /## Saved cases/);
+});
+
+test("a re-QA of a QA: agent part starts the live app and names it (D-051)", async () => {
+  resetQaAppFailures();
+  let stopped = false;
+  const saved = [
+    {
+      id: "C1",
+      item: "Avatars are served",
+      repro: "qa-browser open http://127.0.0.1:4321/avatars",
+      expected: "the avatar shows",
+      actual: "the page is empty",
+    },
+  ];
+  const reply = JSON.stringify({
+    cases: [{ id: "C1", pass: true, evidence: "qa-browser text .avatar: Ada" }],
+    verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+  });
+  const h = harness({
+    commands: liveQa,
+    replies: [reply],
+    startApp: async () =>
+      appStarted(async () => {
+        stopped = true;
+      }),
+  });
+  const result = await runQa(
+    {
+      ...h.input,
+      parts: [backend],
+      reviewedHeads: {
+        [backend.id]: { sha: "sha6", verdict: "changes_requested", cases: saved },
+      },
+    },
+    h.deps,
+  );
+  assert.equal(result.reviews[0]?.decision, "approve");
+  assert.match(
+    h.tasks[0]?.prompt ?? "",
+    /## App\nThe product is running at http:\/\/127\.0\.0\.1:4321 \(kind web\)/,
+  );
+  assert.equal(stopped, true, "the app stops at teardown");
+});
+
 test("a request_changes verdict carries each failing case and the settle saves it (D-054)", async () => {
   const cases = [
     {
@@ -1527,6 +1645,95 @@ test("parseQaVerdict repairs a stray backslash before a backtick or dollar (MET-
   assert.equal(!badHex.ok && badHex.kind, "not_json", "bad \\u hex is not repaired");
 
   const notJson = parseQaVerdict("no json", 1);
+  assert.equal(!notJson.ok && notJson.kind, "not_json");
+  assert.match(!notJson.ok ? notJson.error : "", /^not JSON: /);
+});
+
+test("parseReQaVerdict needs exactly one entry per saved case id (D-054)", () => {
+  const saved = ["C1", "T1"];
+  const good = JSON.stringify({
+    cases: [
+      { id: "T1", pass: false, evidence: "`pnpm test` exited with code 1" },
+      { id: "C1", pass: true, evidence: "pnpm test -- avatars: ok" },
+    ],
+    verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+  });
+  const parsed = parseReQaVerdict(`Here it is:\n\`\`\`json\n${good}\n\`\`\``, saved);
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.ok ? parsed.verdict : undefined, {
+    cases: [
+      { id: "C1", pass: true, evidence: "pnpm test -- avatars: ok" },
+      { id: "T1", pass: false, evidence: "`pnpm test` exited with code 1" },
+    ],
+    verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+  });
+
+  const bad = (cases: unknown, verify: unknown = { pass: true, evidence: "ok" }) =>
+    parseReQaVerdict(JSON.stringify({ cases, verify }), saved);
+  const error = (value: ReturnType<typeof parseReQaVerdict>) => (value.ok ? "" : value.error);
+
+  assert.match(error(bad([{ id: "C1", pass: true, evidence: "ok" }])), /missing saved case "T1"/);
+  assert.match(
+    error(
+      bad([
+        { id: "C1", pass: true, evidence: "ok" },
+        { id: "C1", pass: true, evidence: "ok" },
+      ]),
+    ),
+    /cases\[1\]\.id: duplicate "C1"/,
+  );
+  assert.match(
+    error(
+      bad([
+        { id: "C1", pass: true, evidence: "ok" },
+        { id: "C9", pass: true, evidence: "ok" },
+      ]),
+    ),
+    /cases\[1\]\.id: not a saved case "C9"/,
+  );
+  assert.match(
+    error(
+      bad([
+        { id: "C1", pass: true, evidence: "ok" },
+        { id: "T1", pass: true, evidence: "ok", item: "Tests" },
+      ]),
+    ),
+    /cases\[1\]: unknown key "item"/,
+  );
+  assert.match(
+    error(
+      bad([
+        { id: "C1", pass: true, evidence: " " },
+        { id: "T1", pass: true, evidence: "ok" },
+      ]),
+    ),
+    /cases\[0\]\.evidence: expected a non-empty string/,
+  );
+  assert.match(
+    error(
+      parseReQaVerdict(
+        JSON.stringify({ cases: [], verify: { pass: true, evidence: "ok" }, items: [] }),
+        saved,
+      ),
+    ),
+    /unknown key "items"/,
+  );
+  assert.match(
+    error(bad([], { pass: true, evidence: "ok", testsPassed: true })),
+    /verify: unknown key "testsPassed"/,
+  );
+  assert.match(
+    error(bad([], { pass: "true", evidence: "ok" })),
+    /verify\.pass: expected true or false/,
+  );
+  assert.match(
+    error(bad([], { pass: true, evidence: "" })),
+    /verify\.evidence: expected a non-empty string/,
+  );
+  assert.match(error(bad([], [])), /verify: expected an object/);
+
+  const notJson = parseReQaVerdict("no json", saved);
+  assert.equal(notJson.ok, false);
   assert.equal(!notJson.ok && notJson.kind, "not_json");
   assert.match(!notJson.ok ? notJson.error : "", /^not JSON: /);
 });

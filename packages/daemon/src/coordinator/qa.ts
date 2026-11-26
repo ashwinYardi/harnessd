@@ -45,7 +45,7 @@ import type { PartQa } from "./plan.ts";
 import { type AgentMemory, memorySection } from "./prompt.ts";
 import { type QaApp, type QaAppInput, type QaAppStart, startQaApp } from "./qa-app.ts";
 import { extractSection, readPartMarker, sectionChecklist, sectionList } from "./split.ts";
-import type { LoopState, QaCase } from "./state.ts";
+import type { LoopState, QaCase, ReviewedHead } from "./state.ts";
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -395,6 +395,27 @@ function reviewCases(
   return out;
 }
 
+/** The saved cases a round re-checks, or undefined for a full round (D-054). */
+function reQaCasesFor(reviewed: ReviewedHead | undefined, head: string): QaCase[] | undefined {
+  if (reviewed?.verdict !== "changes_requested") return undefined;
+  if (reviewed.cases === undefined || reviewed.cases.length === 0) return undefined;
+  // The same head is not a new round: run the full check instead (D-040).
+  if (reviewed.sha === head) return undefined;
+  return reviewed.cases;
+}
+
+/** The re-QA verdict as the existing review pipeline's items, with its Verify result last. */
+function reQaAsVerdict(verdict: ReQaVerdict, tests: TestRun): QaVerdict {
+  return {
+    items: [
+      ...verdict.cases.map((c) => ({ text: c.id, pass: c.pass, evidence: c.evidence })),
+      { text: "Verify", pass: verdict.verify.pass, evidence: verdict.verify.evidence },
+    ],
+    testsPassed: tests.passed,
+    cases: [],
+  };
+}
+
 // --- the verdict ------------------------------------------------------------
 
 export interface QaVerdictItem {
@@ -599,6 +620,118 @@ export function parseQaVerdict(text: string, expectedItems: number): ParsedQaVer
     });
   }
   return { ok: true, verdict: { items, testsPassed: value.testsPassed, cases } };
+}
+
+/** One saved case's result in a re-QA verdict (D-054). */
+export interface ReQaCaseVerdict {
+  id: string;
+  pass: boolean;
+  evidence: string;
+}
+
+/** A re-QA verdict: each saved case's result and the Verify commands' result (D-054). */
+export interface ReQaVerdict {
+  cases: ReQaCaseVerdict[];
+  verify: { pass: boolean; evidence: string };
+}
+
+export type ParsedReQaVerdict =
+  | { ok: true; verdict: ReQaVerdict }
+  | {
+      ok: false;
+      error: string;
+      /** Set when the reply was not valid JSON, even after the backslash repair (D-052). */
+      kind?: "not_json";
+    };
+
+/** The JSON shape a re-QA agent must end with (D-054). */
+export const RE_QA_VERDICT_SHAPE = `{
+  "cases": [{ "id": "C1", "pass": true | false, "evidence": "string" }],
+  "verify": { "pass": true | false, "evidence": "string" }
+}`;
+
+const RE_QA_CASE_KEYS = ["id", "pass", "evidence"];
+const RE_QA_VERIFY_KEYS = ["pass", "evidence"];
+
+/**
+ * Strictly validates a re-QA verdict: known keys only, exactly one entry per saved case id,
+ * booleans for every `pass`, and non-empty evidence (D-054). A missing, duplicate or unknown
+ * id, an unknown key or empty evidence is a schema error. Invalid JSON after the backslash
+ * repair stays `not_json` (D-052).
+ */
+export function parseReQaVerdict(
+  text: string,
+  saved: readonly string[] | readonly QaCase[],
+): ParsedReQaVerdict {
+  const savedIds = saved.map((entry) => (typeof entry === "string" ? entry : entry.id));
+  const parsed = parseQaJson(text);
+  if ("error" in parsed) {
+    return { ok: false, error: `not JSON: ${parsed.error.message}`, kind: "not_json" };
+  }
+  const value = parsed.value;
+  if (!isObj(value)) return { ok: false, error: "expected a JSON object" };
+  for (const key of Object.keys(value)) {
+    if (key !== "cases" && key !== "verify") {
+      return { ok: false, error: `unknown key "${key}"` };
+    }
+  }
+  if (!Array.isArray(value.cases)) return { ok: false, error: "cases: expected an array" };
+  if (!isObj(value.verify)) return { ok: false, error: "verify: expected an object" };
+  for (const key of Object.keys(value.verify)) {
+    if (!RE_QA_VERIFY_KEYS.includes(key)) {
+      return { ok: false, error: `verify: unknown key "${key}"` };
+    }
+  }
+  if (typeof value.verify.pass !== "boolean") {
+    return { ok: false, error: "verify.pass: expected true or false" };
+  }
+  const verifyEvidence = value.verify.evidence;
+  if (typeof verifyEvidence !== "string" || verifyEvidence.trim() === "") {
+    return { ok: false, error: "verify.evidence: expected a non-empty string" };
+  }
+
+  const savedSet = new Set(savedIds);
+  const seen = new Set<string>();
+  const found: ReQaCaseVerdict[] = [];
+  for (const [i, raw] of value.cases.entries()) {
+    const path = `cases[${i}]`;
+    if (!isObj(raw)) return { ok: false, error: `${path}: expected an object` };
+    for (const key of Object.keys(raw)) {
+      if (!RE_QA_CASE_KEYS.includes(key)) {
+        return { ok: false, error: `${path}: unknown key "${key}"` };
+      }
+    }
+    if (typeof raw.pass !== "boolean") {
+      return { ok: false, error: `${path}.pass: expected true or false` };
+    }
+    if (typeof raw.id !== "string" || raw.id.trim() === "") {
+      return { ok: false, error: `${path}.id: expected a non-empty string` };
+    }
+    const id = raw.id.trim();
+    if (typeof raw.evidence !== "string" || raw.evidence.trim() === "") {
+      return { ok: false, error: `${path}.evidence: expected a non-empty string` };
+    }
+    if (!savedSet.has(id)) return { ok: false, error: `${path}.id: not a saved case "${id}"` };
+    if (seen.has(id)) return { ok: false, error: `${path}.id: duplicate "${id}"` };
+    seen.add(id);
+    found.push({ id, pass: raw.pass, evidence: raw.evidence.trim() });
+  }
+  for (const id of savedIds) {
+    if (!seen.has(id)) return { ok: false, error: `cases: missing saved case "${id}"` };
+  }
+  // Keep the saved order, so a later send-back lists the cases as they were recorded.
+  const cases: ReQaCaseVerdict[] = [];
+  for (const id of savedIds) {
+    const entry = found.find((c) => c.id === id);
+    if (entry !== undefined) cases.push(entry);
+  }
+  return {
+    ok: true,
+    verdict: {
+      cases,
+      verify: { pass: value.verify.pass, evidence: verifyEvidence.trim() },
+    },
+  };
 }
 
 // --- the prompt ---------------------------------------------------------------
@@ -811,6 +944,66 @@ export function buildQaPrompt(input: QaPromptInput): string {
   return `${out.join("\n\n")}\n`;
 }
 
+export interface ReQaPromptInput {
+  agent: ResolvedAgentConfig;
+  qa: LinkedIssue;
+  part: LinkedIssue;
+  pr: PullRequest;
+  /** The cases QA recorded on the reviewed head, with their original repro (D-054). */
+  cases: readonly QaCase[];
+  /** The part's Verify commands, each with what it must show. */
+  verify: string[];
+  tests: TestRun;
+  /** The running app, when the repo declares one (D-051). */
+  app?: { kind: QaKind; url?: string; command?: string };
+}
+
+/**
+ * The QA agent's prompt for a re-QA after a send-back: only the saved cases, the part's
+ * Verify commands and the test command with its result (D-044, D-054). It carries no diff,
+ * file list, brief, Done-when list, decisions or memory.
+ */
+export function buildReQaPrompt(input: ReQaPromptInput): string {
+  const { agent, qa, part, pr, cases, verify, tests, app } = input;
+  const out = agentPromptHeader(agent, qa);
+  const ids = cases.map((c) => c.id).join(", ");
+  const caseList = cases
+    .map(
+      (c, i) =>
+        `${i + 1}. ${c.id} (${c.item})\n   repro: ${c.repro}\n` +
+        `   expected: ${c.expected}\n   actual: ${c.actual}`,
+    )
+    .join("\n\n");
+  out.push(
+    `## PR under re-QA\nPart ${part.key}: ${part.title} (${part.url})\n` +
+      `PR #${pr.number}: ${pr.title}\n${pr.url}\n` +
+      `Branch \`${pr.headRefName}\` at \`${pr.headRefOid}\`, into \`${pr.baseRefName}\`.`,
+    `## Saved cases (${cases.length})\n${caseList || "(none)"}`,
+    ...(verify.length > 0
+      ? [
+          `## Verify\nRun each command and quote its result as the evidence of its case or of \`verify\`:\n${verify.map((v) => `- ${v}`).join("\n")}`,
+        ]
+      : []),
+    `## Tests\nharnessd ran the repo's tests in this worktree before you started: ${describeTests(tests)}.\n` +
+      `\`\`\`text\n${tail(tests.output, MAX_TEST_TAIL) || "(no output)"}\n\`\`\``,
+    ...(app === undefined ? [] : [appSection(app)]),
+    [
+      "## How to verify",
+      "- This is a re-QA after a send-back. Judge only the saved cases above, each from its own repro, and the Verify commands.",
+      "- Run each case's repro and each Verify command against this PR head. The evidence is the command you ran, the response you got or the screenshot path.",
+      "- Write no new probes and add no case. Do not check anything outside the saved cases and the Verify commands.",
+      "- Do not read anything else: this round checks only the cases and the commands.",
+      "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
+    ].join("\n"),
+  );
+  out.push(
+    `## Verdict\nYour final message is strict JSON only, no prose and no code fence, with exactly one entry for each saved case id (${ids}), ` +
+      `each with \`pass\` true or false and non-empty \`evidence\`, plus one \`verify\` result for the Verify commands. ` +
+      `Do not add a case:\n${RE_QA_VERDICT_SHAPE}`,
+  );
+  return `${out.join("\n\n")}\n`;
+}
+
 // --- one PR -------------------------------------------------------------------
 
 export type ReviewDecision = "approve" | "request_changes" | "error";
@@ -838,6 +1031,8 @@ export interface PrReview {
   failing: string[];
   /** Each failing item's case, or the daemon-built T1, for the send-back (D-054). */
   cases?: QaCase[];
+  /** The checked per-case verdict of a re-QA round (D-054). */
+  reQa?: ReQaVerdict;
   /** The last lines of the tests when they failed, for the send-back prompt (MET-156). */
   testTail?: string;
   /** The posted review. */
@@ -1061,6 +1256,8 @@ export interface QaRunInput {
   parent: Issue;
   /** The parts that block the QA sub-issue. Done parts are skipped. */
   parts: LinkedIssue[];
+  /** The last judged head per part, so a changed head after a send-back is a re-QA (D-054). */
+  reviewedHeads?: LoopState["reviewedHeads"];
   /** D-014 budget of the whole round: checkouts, tests and agent runs. */
   budgetMs: number;
   /** Turn cap of each QA agent run (D-045). */
@@ -1189,6 +1386,16 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         failing: [`No open PR has ${part.key} in its title. Push the branch and open one.`],
       };
     }
+    // A new head on a sent-back part with saved cases is a re-QA (D-054). A `QA: tests`
+    // part reruns its Verify commands as today, so only the agent path branches.
+    const reQaCases = testsMode
+      ? undefined
+      : reQaCasesFor(input.reviewedHeads?.[part.id], pr.headRefOid);
+    if (reQaCases !== undefined) {
+      log(
+        `${qa.key}: re-QA of ${part.key} at ${pr.headRefOid.slice(0, 7)}, ${reQaCases.length} saved case(s)`,
+      );
+    }
     const checkout = {
       issueKey: qa.key,
       title: `pr ${pr.number}`,
@@ -1213,6 +1420,8 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
 
     let tests: TestRun;
     let verdict: ParsedQaVerdict;
+    // The checked per-case verdict, when this round is a re-QA (D-054).
+    let reQaVerdict: ReQaVerdict | undefined;
     // Why the agent gave no usable verdict; such a review counts no QA failure (D-052).
     let notJudged: PrReview["notJudged"];
     // A throw while this is true is a setup error: it counts no QA failure (D-041).
@@ -1321,34 +1530,45 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
           // Only a QA run gets qa-browser: the bin first on PATH, and a live web review's
           // CDP endpoint. Builder and coordinator runs never go through this path (MET-179).
           env = { ...(env ?? {}), ...qaBrowserEnvironment(id, app?.browser) };
+          const appInput: ReQaPromptInput["app"] =
+            app === undefined
+              ? undefined
+              : {
+                  kind: app.kind ?? deps.commands.kind ?? "web",
+                  ...(app.url === undefined ? {} : { url: app.url }),
+                  ...(deps.commands.start === undefined ? {} : { command: deps.commands.start }),
+                };
+          const prompt =
+            reQaCases === undefined
+              ? buildQaPrompt({
+                  agent: deps.agent,
+                  qa,
+                  parent,
+                  part,
+                  pr,
+                  ...(diff === undefined ? {} : { diff }),
+                  ...(status === undefined ? {} : { ci: status.checks }),
+                  files,
+                  checklist,
+                  verify: partVerify(part),
+                  tests,
+                  ...(appInput === undefined ? {} : { app: appInput }),
+                  ...(deps.memory ? { memory: deps.memory } : {}),
+                })
+              : buildReQaPrompt({
+                  agent: deps.agent,
+                  qa,
+                  part,
+                  pr,
+                  cases: reQaCases,
+                  verify: partVerify(part),
+                  tests,
+                  ...(appInput === undefined ? {} : { app: appInput }),
+                });
           const task: Task = {
             id,
             title: `QA ${part.key}: PR #${pr.number}`,
-            prompt: buildQaPrompt({
-              agent: deps.agent,
-              qa,
-              parent,
-              part,
-              pr,
-              ...(diff === undefined ? {} : { diff }),
-              ...(status === undefined ? {} : { ci: status.checks }),
-              files,
-              checklist,
-              verify: partVerify(part),
-              tests,
-              ...(app === undefined
-                ? {}
-                : {
-                    app: {
-                      kind: app.kind ?? deps.commands.kind ?? "web",
-                      ...(app.url === undefined ? {} : { url: app.url }),
-                      ...(deps.commands.start === undefined
-                        ? {}
-                        : { command: deps.commands.start }),
-                    },
-                  }),
-              ...(deps.memory ? { memory: deps.memory } : {}),
-            }),
+            prompt,
             budgetMs: left,
           };
           if (input.maxTurns !== undefined) task.maxTurns = input.maxTurns;
@@ -1378,8 +1598,19 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
                     ? "turn_cap"
                     : undefined;
           }
-          verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
-          if (!verdict.ok && verdict.kind === "not_json") notJudged = "not_json";
+          if (reply.ok && reQaCases !== undefined) {
+            const parsed = parseReQaVerdict(reply.text, reQaCases);
+            if (parsed.ok) {
+              reQaVerdict = parsed.verdict;
+              verdict = { ok: true, verdict: reQaAsVerdict(parsed.verdict, tests) };
+            } else {
+              verdict = parsed;
+              if (parsed.kind === "not_json") notJudged = "not_json";
+            }
+          } else {
+            verdict = reply.ok ? parseQaVerdict(reply.text, checklist.length) : reply;
+            if (!verdict.ok && verdict.kind === "not_json") notJudged = "not_json";
+          }
         }
       }
     } catch (error) {
@@ -1420,7 +1651,8 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         error: verdict.ok ? "limited" : verdict.error,
       };
 
-    const decision = decideReview(checklist, tests, verdict);
+    // A re-QA has no checklist: its items are the saved cases and the Verify result (D-054).
+    const decision = decideReview(reQaCases === undefined ? checklist : [], tests, verdict);
     if (decision.decision === "error") {
       return {
         part,
@@ -1433,10 +1665,16 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         error: decision.error ?? "unknown",
       };
     }
-    const cases = reviewCases(verdict, tests, verifyFailed);
+    const cases = reQaCases === undefined ? reviewCases(verdict, tests, verifyFailed) : [];
     // A request-changes verdict with no case is not judged, and feeds the D-052 count. A
     // schema error still counts a failure, and the no-case rule applies only to the agent.
-    if (decision.decision === "request_changes" && !testsMode && verdict.ok && cases.length === 0) {
+    if (
+      decision.decision === "request_changes" &&
+      !testsMode &&
+      reQaCases === undefined &&
+      verdict.ok &&
+      cases.length === 0
+    ) {
       return {
         part,
         pr,
@@ -1468,6 +1706,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       decision: decision.decision,
       failing: decision.failing,
       ...(decision.decision === "request_changes" && cases.length > 0 ? { cases } : {}),
+      ...(reQaVerdict === undefined ? {} : { reQa: reQaVerdict }),
       // MET-156: the send-back prompt shows only the tail of a failing test run.
       ...(tests.passed ? {} : { testTail: tail(tests.output, MAX_TEST_TAIL) }),
       ...(verifyTail === undefined ? {} : { testTail: tail(verifyTail.output, MAX_TEST_TAIL) }),

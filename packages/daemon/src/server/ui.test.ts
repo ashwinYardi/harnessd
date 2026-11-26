@@ -251,17 +251,36 @@ test("GET /api/events streams the state, then pause, agent and log changes", asy
     assert.equal(res.status, 200);
     assert.equal(res.headers.get("content-type"), "text/event-stream");
     assert.equal(res.headers.get("cache-control"), "no-store");
-    const seen = readEvents(res, (events) => events.some((e) => e.event === "log"));
-    setTimeout(() => {
-      void fetch(`${daemon.url}/api/pause`, {
+    let pushed = false;
+    const pushLog = () => {
+      if (pushed) return;
+      pushed = true;
+      logs.push("MET-41: paused, re-queued");
+    };
+    const seen = readEvents(res, (events) => {
+      // The stream is the only signal that the pause and the agents change were read: push
+      // the log only after both, so a slow poll never lets the log arrive first (T1).
+      const paused = events.some((e) => e.event === "pause" && (e.data as PauseState).paused);
+      const runningSeen = events.some(
+        (e) =>
+          e.event === "agents" &&
+          (e.data as AgentsSnapshot).agents[1]?.runs[0]?.issueKey === "MET-41",
+      );
+      if (paused && runningSeen) pushLog();
+      return events.some((e) => e.event === "log");
+    });
+    // If the pause never reaches the stream, the log still ends the read and the assertion
+    // below fails on the last pause value instead of hanging the suite.
+    const fallback = setTimeout(pushLog, 5_000);
+    setTimeout(async () => {
+      await fetch(`${daemon.url}/api/pause`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: "{}",
-      });
+      }).catch(() => {});
       snapshot = running;
-      setTimeout(() => logs.push("MET-41: paused, re-queued"), 80);
     }, 30);
-    const events = await seen;
+    const events = await seen.finally(() => clearTimeout(fallback));
     const names = events.map((e) => e.event);
     assert.deepEqual(names.slice(0, 3).sort(), ["agents", "board", "pause"], "the state first");
     const pauses = events.filter((e) => e.event === "pause").map((e) => e.data);
@@ -269,6 +288,59 @@ test("GET /api/events streams the state, then pause, agent and log changes", asy
     const agents = events.filter((e) => e.event === "agents").at(-1)?.data as AgentsSnapshot;
     assert.equal(agents.agents[1]?.runs[0]?.issueKey, "MET-41");
     assert.deepEqual(events.at(-1)?.event, "log");
+    assert.equal(
+      (events.at(-1)?.data as { text?: string } | undefined)?.text,
+      "MET-41: paused, re-queued",
+    );
+  } finally {
+    ui.close();
+    await daemon.close();
+  }
+});
+
+test("a pause that resolves slowly still reaches the stream before the next log line (T1)", async () => {
+  const logs = createLogBuffer({ now: () => new Date("2026-11-20T10:00:00.000Z") });
+  const base = fakePause();
+  const pause: PauseControl = {
+    status: base.status,
+    async pause(reason) {
+      // A loaded machine can take this long to record the pause.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      return base.pause(reason);
+    },
+    resume: base.resume,
+  };
+  const ui = createUiApi({
+    board: { read: async (): Promise<BoardSnapshot> => ({ fetchedAt: null, issues: [] }) },
+    agents: (): AgentsSnapshot => agentsView(mergeLayers([]), idle),
+    logs,
+    pause,
+    pollMs: 20,
+  });
+  const daemon = await startDaemon({ pause, routes: ui.routes });
+  try {
+    const res = await fetch(`${daemon.url}/api/events`);
+    let pushed = false;
+    const pushLog = () => {
+      if (pushed) return;
+      pushed = true;
+      logs.push("MET-41: paused, re-queued");
+    };
+    const seen = readEvents(res, (events) => {
+      if (events.some((e) => e.event === "pause" && (e.data as PauseState).paused)) pushLog();
+      return events.some((e) => e.event === "log");
+    });
+    const fallback = setTimeout(pushLog, 5_000);
+    setTimeout(async () => {
+      await fetch(`${daemon.url}/api/pause`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      }).catch(() => {});
+    }, 10);
+    const events = await seen.finally(() => clearTimeout(fallback));
+    const pauses = events.filter((e) => e.event === "pause").map((e) => e.data);
+    assert.deepEqual(pauses.at(-1), { paused: true, since: "2026-11-20T10:00:00.000Z" });
     assert.equal(
       (events.at(-1)?.data as { text?: string } | undefined)?.text,
       "MET-41: paused, re-queued",
