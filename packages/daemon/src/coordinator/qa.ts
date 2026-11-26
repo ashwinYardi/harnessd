@@ -45,7 +45,7 @@ import type { PartQa } from "./plan.ts";
 import { type AgentMemory, memorySection } from "./prompt.ts";
 import { type QaApp, type QaAppInput, type QaAppStart, startQaApp } from "./qa-app.ts";
 import { extractSection, readPartMarker, sectionChecklist, sectionList } from "./split.ts";
-import type { LoopState } from "./state.ts";
+import type { LoopState, QaCase } from "./state.ts";
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -56,16 +56,54 @@ function oneLine(text: string): string {
 }
 
 /**
- * Collapses whitespace outside `backticks` to one space and keeps it inside them as written,
+ * Collapses whitespace outside code spans to one space and keeps it inside them as written,
  * so a Verify command with two spaces, a tab or a newline survives (MET-200, owner exception
- * 2026-11-26).
+ * 2026-11-26). A run of N backticks opens a span and the next run of exactly N closes it; an
+ * unclosed run is plain text (D-054, C2).
  */
 function evidenceLine(text: string): string {
-  return text
-    .split("`")
-    .map((part, i) => (i % 2 === 0 ? part.replace(/\s+/g, " ") : part))
-    .join("`")
-    .trim();
+  let out = "";
+  let plain = "";
+  const flush = () => {
+    out += plain.replace(/\s+/g, " ");
+    plain = "";
+  };
+  let i = 0;
+  while (i < text.length) {
+    if (text[i] !== "`") {
+      plain += text[i];
+      i += 1;
+      continue;
+    }
+    let n = 0;
+    while (text[i + n] === "`") n += 1;
+    let close = -1;
+    let j = i + n;
+    while (j < text.length) {
+      if (text[j] !== "`") {
+        j += 1;
+        continue;
+      }
+      let m = 0;
+      while (text[j + m] === "`") m += 1;
+      if (m === n) {
+        close = j;
+        break;
+      }
+      j += m;
+    }
+    if (close === -1) {
+      // An unclosed run is plain text.
+      plain += text.slice(i, i + n);
+      i += n;
+      continue;
+    }
+    flush();
+    out += `${"`".repeat(n)}${text.slice(i + n, close)}${"`".repeat(n)}`;
+    i = close + n;
+  }
+  flush();
+  return out.trim();
 }
 
 // --- the deterministic check: the repo's tests ----------------------------
@@ -222,7 +260,12 @@ export async function runQaTests(
   const steps = [commands.setup_command.trim(), commands.test_command.trim()].filter(Boolean);
   let last: TestRun | undefined;
   for (const command of steps) {
-    const result = await run(command, cwd, Math.max(deadline - now(), 1), signal);
+    const left = deadline - now();
+    if (left <= 0) {
+      // The shared budget is spent: the step does not start with a fresh allowance (D-014).
+      return { passed: false, command, exitCode: null, timedOut: true, output: "" };
+    }
+    const result = await run(command, cwd, left, signal);
     last = {
       passed: result.exitCode === 0 && !result.timedOut && result.error === undefined,
       command,
@@ -306,6 +349,52 @@ function tail(text: string, chars: number): string {
   return t.length <= chars ? t : `…${t.slice(-chars)}`;
 }
 
+/** The actual side of a daemon-built case: the exit status and the command's test tail. */
+function caseActual(run: {
+  exitCode: number | null;
+  timedOut: boolean;
+  output: string;
+  error?: string;
+}): string {
+  const status =
+    run.error !== undefined
+      ? `could not run (${oneLine(run.error)})`
+      : run.timedOut
+        ? "timed out"
+        : `exited with code ${run.exitCode ?? "null (killed)"}`;
+  const body = tail(run.output, MAX_TEST_TAIL);
+  return body === "" ? status : `${status}\n${body}`;
+}
+
+/** The case the daemon builds for its own failing test or Verify command (D-054). */
+function daemonCase(
+  item: "Tests" | "Verify",
+  command: string,
+  run: { exitCode: number | null; timedOut: boolean; output: string; error?: string },
+): QaCase {
+  return { id: "T1", item, repro: command, expected: "exit 0", actual: caseActual(run) };
+}
+
+/**
+ * The cases of a review: the daemon's own T1 for a failing test or Verify command, then the
+ * agent's cases in reply order (D-054).
+ */
+function reviewCases(
+  verdict: ParsedQaVerdict,
+  tests: TestRun,
+  verifyFailed: VerifyRun | undefined,
+): QaCase[] {
+  const out: QaCase[] = [];
+  if (!tests.passed && tests.command.trim() !== "") {
+    out.push(daemonCase("Tests", tests.command, tests));
+  }
+  if (verifyFailed !== undefined) {
+    out.push(daemonCase("Verify", verifyFailed.check.run, verifyFailed.result));
+  }
+  if (verdict.ok) out.push(...verdict.verdict.cases);
+  return out;
+}
+
 // --- the verdict ------------------------------------------------------------
 
 export interface QaVerdictItem {
@@ -317,6 +406,8 @@ export interface QaVerdictItem {
 export interface QaVerdict {
   items: QaVerdictItem[];
   testsPassed: boolean;
+  /** One case per failing item; empty when every item passes (D-054). */
+  cases: QaCase[];
 }
 
 export type ParsedQaVerdict =
@@ -409,7 +500,8 @@ function parseQaJson(text: string): { value: unknown } | { error: Error } {
 /** The JSON shape the QA agent must end with. */
 export const QA_VERDICT_SHAPE = `{
   "items": [{ "text": "string", "pass": true | false, "evidence": "string" }],
-  "testsPassed": true | false
+  "testsPassed": true | false,
+  "cases": [{ "id": "C1", "item": "string", "repro": "string", "expected": "string", "actual": "string" }]
 }`;
 
 type Obj = Record<string, unknown>;
@@ -419,11 +511,17 @@ function isObj(value: unknown): value is Obj {
 }
 
 const ITEM_KEYS = ["text", "pass", "evidence"];
+const CASE_KEYS = ["id", "item", "repro", "expected", "actual"];
+
+/** A case names a failing verdict item's exact text, or the `Verify` item (D-054). */
+function caseNamesFailingItem(item: string, items: readonly QaVerdictItem[]): boolean {
+  return item === "Verify" || items.some((entry) => !entry.pass && entry.text === item);
+}
 
 /**
  * Strictly validates a verdict: known keys only, booleans for `pass` and `testsPassed`,
- * non-empty `text` and `evidence`, and exactly one item per checked item, the last of
- * which is `Verify` (MET-162).
+ * non-empty `text` and `evidence`, exactly one item per checked item, the last of which is
+ * `Verify` (MET-162), and one well-formed case per failing item (D-054).
  */
 export function parseQaVerdict(text: string, expectedItems: number): ParsedQaVerdict {
   const parsed = parseQaJson(text);
@@ -433,7 +531,7 @@ export function parseQaVerdict(text: string, expectedItems: number): ParsedQaVer
   const value = parsed.value;
   if (!isObj(value)) return { ok: false, error: "expected a JSON object" };
   for (const key of Object.keys(value)) {
-    if (key !== "items" && key !== "testsPassed") {
+    if (key !== "items" && key !== "testsPassed" && key !== "cases") {
       return { ok: false, error: `unknown key "${key}"` };
     }
   }
@@ -469,7 +567,38 @@ export function parseQaVerdict(text: string, expectedItems: number): ParsedQaVer
       evidence: (raw.evidence as string).trim(),
     });
   }
-  return { ok: true, verdict: { items, testsPassed: value.testsPassed } };
+  if (!Array.isArray(value.cases)) return { ok: false, error: "cases: expected an array" };
+  const cases: QaCase[] = [];
+  for (const [i, raw] of value.cases.entries()) {
+    const path = `cases[${i}]`;
+    if (!isObj(raw)) return { ok: false, error: `${path}: expected an object` };
+    for (const key of Object.keys(raw)) {
+      if (!CASE_KEYS.includes(key)) return { ok: false, error: `${path}: unknown key "${key}"` };
+    }
+    for (const key of CASE_KEYS) {
+      const v = raw[key];
+      if (typeof v !== "string" || v.trim() === "") {
+        return { ok: false, error: `${path}.${key}: expected a non-empty string` };
+      }
+    }
+    const id = (raw.id as string).trim();
+    const expectedId = `C${i + 1}`;
+    if (id !== expectedId) {
+      return { ok: false, error: `${path}.id: expected "${expectedId}"` };
+    }
+    const item = (raw.item as string).trim();
+    if (!caseNamesFailingItem(item, items)) {
+      return { ok: false, error: `${path}.item: expected the text of a failing item or "Verify"` };
+    }
+    cases.push({
+      id,
+      item,
+      repro: (raw.repro as string).trim(),
+      expected: (raw.expected as string).trim(),
+      actual: (raw.actual as string).trim(),
+    });
+  }
+  return { ok: true, verdict: { items, testsPassed: value.testsPassed, cases } };
 }
 
 // --- the prompt ---------------------------------------------------------------
@@ -673,7 +802,11 @@ export function buildQaPrompt(input: QaPromptInput): string {
   if (memory) out.push(memorySection(memory));
   out.push(
     `## Verdict\nYour final message is strict JSON only, no prose and no code fence, with exactly ${checklist.length} ` +
-      `item(s), one per item above in the order listed, \`text\` copied from the list:\n${QA_VERDICT_SHAPE}`,
+      `item(s), one per item above in the order listed, \`text\` copied from the list. ` +
+      `Add one case for each failing item: \`item\` is that item's exact \`text\` (or \`Verify\`), ` +
+      `\`id\` is C1, C2, … in order, \`repro\` is the exact command or numbered steps that reproduce it, ` +
+      `and \`expected\` and \`actual\` are what should have happened and what you saw. ` +
+      `When every item passes, send \`cases: []\`:\n${QA_VERDICT_SHAPE}`,
   );
   return `${out.join("\n\n")}\n`;
 }
@@ -695,13 +828,16 @@ export interface PrReview {
    */
   setup?: boolean;
   /**
-   * Why the QA agent gave no usable verdict: turn cap, time limit, stall or a reply that is
-   * not JSON even after the backslash repair. Such a round counts no QA failure, and two in
-   * a row on one PR head go to the human (MET-196, D-052).
+   * Why the QA agent gave no usable verdict: turn cap, time limit, stall, a reply that is not
+   * JSON even after the backslash repair, or a request-changes verdict with no failing case.
+   * Such a round counts no QA failure, and two in a row on one PR head go to the human
+   * (MET-196, D-052).
    */
-  notJudged?: "turn_cap" | "timeout" | "stalled" | "not_json";
+  notJudged?: "turn_cap" | "timeout" | "stalled" | "not_json" | "no_cases";
   /** One line per failing item: the item and its evidence. */
   failing: string[];
+  /** Each failing item's case, or the daemon-built T1, for the send-back (D-054). */
+  cases?: QaCase[];
   /** The last lines of the tests when they failed, for the send-back prompt (MET-156). */
   testTail?: string;
   /** The posted review. */
@@ -777,6 +913,8 @@ export function verdictFromVerify(
       evidence: i === checklist.length - 1 ? verifyEvidence : evidence,
     })),
     testsPassed: tests.passed,
+    // The daemon builds its own T1 case from the failing command in runQa (D-054).
+    cases: [],
   };
 }
 
@@ -911,6 +1049,8 @@ function notJudgedReason(r: PrReview): string {
       const at = error.indexOf("not JSON: ");
       return `verdict not JSON: ${at === -1 ? oneLine(error) : error.slice(at + 10)}`;
     }
+    case "no_cases":
+      return "verdict has no failing case";
     default:
       return oneLine(r.error ?? "unknown");
   }
@@ -1086,6 +1226,8 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
     let liveOff: string | undefined;
     // The tail of the failing Verify command, for the review body and the send-back (D-053).
     let verifyTail: { command: string; output: string } | undefined;
+    // The failing Verify command itself, for the daemon-built T1 case (D-054).
+    let verifyFailed: VerifyRun | undefined;
     try {
       const files = await deps.github.prFiles(pr.number).catch((error) => {
         log(`${qa.key}: could not list the files of PR #${pr.number}: ${message(error)}`);
@@ -1124,6 +1266,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         if (cancelled()) return stopped(part, pr);
         const failedRun = runs.find((entry) => !commandPassed(entry.result));
         if (failedRun !== undefined) {
+          verifyFailed = failedRun;
           verifyTail = { command: failedRun.check.run, output: failedRun.result.output };
         }
         verdict = { ok: true, verdict: verdictFromVerify(checklist, tests, runs) };
@@ -1290,6 +1433,19 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         error: decision.error ?? "unknown",
       };
     }
+    const cases = reviewCases(verdict, tests, verifyFailed);
+    // A request-changes verdict with no case is not judged, and feeds the D-052 count. A
+    // schema error still counts a failure, and the no-case rule applies only to the agent.
+    if (decision.decision === "request_changes" && !testsMode && verdict.ok && cases.length === 0) {
+      return {
+        part,
+        pr,
+        decision: "error",
+        failing: [],
+        notJudged: "no_cases",
+        error: "the QA verdict asked for changes with no failing case",
+      };
+    }
     const notLive = testsMode
       ? "QA from Verify commands"
       : isLiveQa(deps.commands)
@@ -1311,6 +1467,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       pr,
       decision: decision.decision,
       failing: decision.failing,
+      ...(decision.decision === "request_changes" && cases.length > 0 ? { cases } : {}),
       // MET-156: the send-back prompt shows only the tail of a failing test run.
       ...(tests.passed ? {} : { testTail: tail(tests.output, MAX_TEST_TAIL) }),
       ...(verifyTail === undefined ? {} : { testTail: tail(verifyTail.output, MAX_TEST_TAIL) }),
@@ -1563,6 +1720,7 @@ export async function settleQa(
     if (r.pr) feedback.prUrl = r.pr.url;
     if (r.reviewUrl) feedback.reviewUrl = r.reviewUrl;
     if (r.testTail !== undefined) feedback.testTail = r.testTail;
+    if (r.cases !== undefined) feedback.cases = r.cases;
     state.qaFeedback[r.part.id] = feedback;
     const role = readPartMarker(r.part.description)?.role ?? "part";
     const where = r.pr

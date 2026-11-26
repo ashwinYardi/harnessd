@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { LinkedIssue, ResolvedAgentConfig } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
-import { agentForRole, budgetMs, buildPartPrompt, maxTurns } from "./dispatch.ts";
+import {
+  agentForRole,
+  budgetMs,
+  buildPartPrompt,
+  buildResumePrompt,
+  maxTurns,
+} from "./dispatch.ts";
 
 const limits = mergeLayers([]).limits;
 
@@ -178,6 +184,79 @@ test("a part sent back by QA gets the failing items and is told to update its op
     assert.ok(prompt.includes(text), text);
   }
   assert.ok(!prompt.includes("gh pr create --title"));
+});
+
+test("a send-back with cases gets a numbered fix list and the Verify commands (D-054)", () => {
+  const cases = [
+    {
+      id: "C1",
+      item: "Avatars show",
+      repro: "pnpm test -- avatars",
+      expected: "the avatar test passes",
+      actual: "not ok 3 - avatars",
+    },
+    {
+      id: "C2",
+      item: "Verify",
+      repro: "pnpm verify",
+      expected: "exit 0",
+      actual: "exited with code 1",
+    },
+  ];
+  const cold = buildPartPrompt({
+    agent,
+    issue: briefIssue,
+    branch: "met-41-serve-avatars",
+    review: {
+      prUrl: "https://github.test/o/r/pull/7",
+      failing: ["Avatars show: not ok 3 - avatars", "Verify: exited with code 1"],
+      cases,
+    },
+  });
+  for (const text of [
+    "1. C1 (Avatars show)",
+    "2. C2 (Verify)",
+    "repro: pnpm test -- avatars",
+    "expected: the avatar test passes",
+    "actual: not ok 3 - avatars",
+    "repro: pnpm verify",
+    "expected: exit 0",
+    "actual: exited with code 1",
+    "Fix only these cases, add one test per case, then run the part's Verify commands.",
+  ]) {
+    assert.ok(cold.includes(text), text);
+  }
+
+  const resume = buildResumePrompt({
+    issue: briefIssue,
+    review: {
+      prUrl: "https://github.test/o/r/pull/7",
+      failing: ["Avatars show: not ok 3 - avatars", "Verify: exited with code 1"],
+      cases,
+    },
+  });
+  for (const text of [
+    "1. C1 (Avatars show)",
+    "repro: pnpm test -- avatars",
+    "expected: the avatar test passes",
+    "actual: not ok 3 - avatars",
+    "Fix only these cases, add one test per case, then run the part's Verify commands.",
+    "`pnpm test` → the API tests pass",
+  ]) {
+    assert.ok(resume.includes(text), text);
+  }
+});
+
+test("a resumed send-back with no cases keeps the failing list (D-054)", () => {
+  const prompt = buildResumePrompt({
+    issue: briefIssue,
+    review: {
+      prUrl: "https://github.test/o/r/pull/7",
+      failing: ["Has tests: no test covers the 404 path"],
+    },
+  });
+  assert.ok(prompt.includes("Failing items:\n- Has tests: no test covers the 404 path"));
+  assert.ok(!prompt.includes("add one test per case"));
 });
 
 test("with memory, the part prompt names the vaults and the generated files before the ship steps", () => {
