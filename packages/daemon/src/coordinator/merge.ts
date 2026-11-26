@@ -167,8 +167,16 @@ export interface MergeReport {
 
 type GateState = Pick<
   LoopState,
-  "merges" | "gateFailures" | "humanPings" | "qaFeedback" | "sessions"
+  "merges" | "gateFailures" | "humanPings" | "qaFeedback" | "sessions" | "reviewedHeads"
 >;
+
+/** Drops a part's saved cases, so its next QA after the gate runs a full round (D-056). */
+function clearSavedCases(state: GateState, partId: string): void {
+  const reviewed = state.reviewedHeads?.[partId];
+  if (reviewed !== undefined) delete reviewed.cases;
+  const feedback = state.qaFeedback[partId];
+  if (feedback !== undefined) delete feedback.cases;
+}
 
 /** A PR the gate sends back to its part, with one line per reason. */
 interface GateFailure {
@@ -339,6 +347,7 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
       delete state.gateFailures[entry.parentId];
       for (const { pr } of failures) {
         delete state.qaFeedback[pr.partId];
+        clearSavedCases(state, pr.partId);
         if (state.sessions !== undefined) delete state.sessions[pr.partId];
       }
       await deps.save();
@@ -371,6 +380,7 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
     state.gateFailures[entry.parentId] = count;
     for (const { pr, failing } of failures) {
       state.qaFeedback[pr.partId] = { prUrl: pr.url, failing };
+      clearSavedCases(state, pr.partId);
       report.sentBack.push(pr.partKey);
     }
     await deps.save();

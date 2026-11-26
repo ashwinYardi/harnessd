@@ -943,6 +943,272 @@ test("a re-QA of a QA: agent part starts the live app and names it (D-051)", asy
   assert.equal(stopped, true, "the app stops at teardown");
 });
 
+test("a re-QA approves when every case and command passes, and lists each case with its result (D-056)", async () => {
+  resetQaAppFailures();
+  const saved = [
+    {
+      id: "C1",
+      item: "Avatars are served",
+      repro: "pnpm test -- avatars",
+      expected: "the avatar test passes",
+      actual: "not ok 3 - avatars",
+    },
+    {
+      id: "T1",
+      item: "Tests",
+      repro: "pnpm test",
+      expected: "exit 0",
+      actual: "exited with code 1",
+    },
+  ];
+  const reply = JSON.stringify({
+    cases: [
+      { id: "C1", pass: true, evidence: "pnpm test -- avatars: ok 3 - avatars" },
+      { id: "T1", pass: true, evidence: "`pnpm test` exited with code 0" },
+    ],
+    verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+  });
+  const h = harness({ replies: [reply] });
+  const result = await runQa(
+    {
+      ...h.input,
+      parts: [briefed],
+      reviewedHeads: {
+        [briefed.id]: { sha: "sha6", verdict: "changes_requested", cases: saved },
+      },
+    },
+    h.deps,
+  );
+  assert.equal(result.outcome, "approved");
+  assert.equal(h.reviews[0]?.event, "APPROVE");
+  assert.equal(result.reviews[0]?.cases, undefined, "an approval sends back no case");
+  const body = h.reviews[0]?.body ?? "";
+  assert.match(body, /approved\. Every saved case passes and `pnpm test` passed\./);
+  assert.match(
+    body,
+    /- \[x\] C1 \(Avatars are served\): pass: pnpm test -- avatars: ok 3 - avatars/,
+  );
+  assert.match(body, /- \[x\] T1 \(Tests\): pass: `pnpm test` exited with code 0/);
+  assert.match(body, /- \[x\] Verify: pass: `pnpm test` exited with code 0/);
+});
+
+test("a re-QA sends back only the still-failing case, with its new actual and no new case (D-056)", async () => {
+  resetQaAppFailures();
+  const saved = [
+    {
+      id: "C1",
+      item: "Avatars are served",
+      repro: "pnpm test -- avatars",
+      expected: "the avatar test passes",
+      actual: "not ok 3 - avatars",
+    },
+    {
+      id: "C2",
+      item: "It has tests",
+      repro: "pnpm test -- tests",
+      expected: "the tests pass",
+      actual: "not ok 4 - tests",
+    },
+  ];
+  const reply = JSON.stringify({
+    cases: [
+      { id: "C1", pass: true, evidence: "pnpm test -- avatars: ok 3 - avatars" },
+      { id: "C2", pass: false, evidence: "pnpm test -- tests: ✖ still not ok 4" },
+    ],
+    verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+  });
+  const h = harness({ replies: [reply] });
+  const result = await runQa(
+    {
+      ...h.input,
+      parts: [briefed],
+      reviewedHeads: {
+        [briefed.id]: { sha: "sha6", verdict: "changes_requested", cases: saved },
+      },
+    },
+    h.deps,
+  );
+  assert.equal(result.outcome, "changes_requested");
+  const sent = result.reviews[0]?.cases ?? [];
+  assert.deepEqual(sent, [
+    {
+      id: "C2",
+      item: "It has tests",
+      repro: "pnpm test -- tests",
+      expected: "the tests pass",
+      actual: "pnpm test -- tests: ✖ still not ok 4",
+    },
+  ]);
+  const body = h.reviews[0]?.body ?? "";
+  assert.match(body, /- \[x\] C1 \(Avatars are served\): pass: /);
+  assert.match(body, /- \[ \] C2 \(It has tests\): fail: pnpm test -- tests: ✖ still not ok 4/);
+  assert.doesNotMatch(body, /C3/);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "sent_back");
+  assert.deepEqual(state.qaFeedback[briefed.id]?.cases, sent);
+  assert.equal(state.qaFailures[parent.id], 1);
+});
+
+test("a failing re-QA test command keeps T1 with the daemon's actual (D-056)", async () => {
+  resetQaAppFailures();
+  const saved = [
+    {
+      id: "C1",
+      item: "Avatars are served",
+      repro: "pnpm test -- avatars",
+      expected: "the avatar test passes",
+      actual: "not ok 3 - avatars",
+    },
+  ];
+  const reply = JSON.stringify({
+    cases: [{ id: "C1", pass: true, evidence: "pnpm test -- avatars: ok 3 - avatars" }],
+    verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+  });
+  const h = harness({ replies: [reply], testExit: 1 });
+  const result = await runQa(
+    {
+      ...h.input,
+      parts: [briefed],
+      reviewedHeads: {
+        [briefed.id]: { sha: "sha6", verdict: "changes_requested", cases: saved },
+      },
+    },
+    h.deps,
+  );
+  assert.equal(result.outcome, "changes_requested");
+  const sent = result.reviews[0]?.cases ?? [];
+  assert.equal(sent.length, 1, "no new case beyond T1");
+  assert.equal(sent[0]?.id, "T1");
+  assert.equal(sent[0]?.item, "Tests");
+  assert.equal(sent[0]?.repro, "pnpm test");
+  assert.equal(sent[0]?.expected, "exit 0");
+  assert.match(sent[0]?.actual ?? "", /^exited with code 1\nnot ok 3 - avatars$/);
+});
+
+test("a failing re-QA Verify command adds T1 from its evidence (D-056)", async () => {
+  resetQaAppFailures();
+  const saved = [
+    {
+      id: "C1",
+      item: "Avatars are served",
+      repro: "pnpm test -- avatars",
+      expected: "the avatar test passes",
+      actual: "not ok 3 - avatars",
+    },
+  ];
+  const reply = JSON.stringify({
+    cases: [{ id: "C1", pass: true, evidence: "pnpm test -- avatars: ok 3 - avatars" }],
+    verify: { pass: false, evidence: "`pnpm check` exited with code 1" },
+  });
+  const h = harness({ replies: [reply] });
+  const result = await runQa(
+    {
+      ...h.input,
+      parts: [briefed],
+      reviewedHeads: {
+        [briefed.id]: { sha: "sha6", verdict: "changes_requested", cases: saved },
+      },
+    },
+    h.deps,
+  );
+  assert.equal(result.outcome, "changes_requested");
+  assert.deepEqual(result.reviews[0]?.cases, [
+    {
+      id: "T1",
+      item: "Verify",
+      repro: "`pnpm test` → passes",
+      expected: "exit 0",
+      actual: "`pnpm check` exited with code 1",
+    },
+  ]);
+});
+
+test("the second failed re-QA sends the parent to Needs input and clears the cases (D-014, D-056)", async () => {
+  resetQaAppFailures();
+  const savedCase = {
+    id: "C1",
+    item: "It has tests",
+    repro: "pnpm test -- tests",
+    expected: "the tests pass",
+    actual: "not ok 4 - tests",
+  };
+  const result: QaRunResult = {
+    outcome: "changes_requested",
+    reviews: [
+      {
+        part: briefed,
+        pr: pr(7, briefed.key),
+        decision: "request_changes",
+        failing: ["It has tests: still failing"],
+        cases: [{ ...savedCase, actual: "still not ok 4" }],
+      },
+    ],
+  };
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+  state.reviewedHeads = {
+    [briefed.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      cases: [{ ...savedCase, actual: "still not ok 4" }],
+    },
+  };
+  state.qaFeedback[briefed.id] = {
+    failing: ["It has tests: still failing"],
+    cases: [{ ...savedCase, actual: "still not ok 4" }],
+  };
+
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "escalated");
+  assert.deepEqual(s.moves, [
+    { issueId: qa.id, state: "Needs input" },
+    { issueId: parent.id, state: "Needs input" },
+  ]);
+  assert.deepEqual(state.qaFailures, {});
+  assert.equal(state.reviewedHeads[briefed.id]?.cases, undefined, "the saved cases are cleared");
+  assert.deepEqual(state.qaFeedback, {}, "the send-back feedback is dropped");
+});
+
+test("a not-judged escalation clears the part's saved cases from reviewedHeads and qaFeedback (D-052, D-056)", async () => {
+  resetQaAppFailures();
+  const saved = [
+    {
+      id: "C1",
+      item: "It has tests",
+      repro: "pnpm test -- tests",
+      expected: "the tests pass",
+      actual: "not ok 4 - tests",
+    },
+  ];
+  const result: QaRunResult = {
+    outcome: "error",
+    reviews: [
+      {
+        part: briefed,
+        pr: pr(7, briefed.key),
+        decision: "error",
+        failing: [],
+        notJudged: "timeout",
+        error: "harness run timeout: budget",
+      },
+    ],
+  };
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.reviewedHeads = {
+    [briefed.id]: { sha: "sha7", verdict: "changes_requested", cases: saved },
+  };
+  state.qaFeedback[briefed.id] = { failing: ["It has tests: still failing"], cases: saved };
+
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.reviewedHeads[briefed.id]?.cases, saved, "one not-judged run keeps them");
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "escalated");
+  assert.equal(state.reviewedHeads[briefed.id]?.cases, undefined);
+  assert.deepEqual(state.qaFeedback[briefed.id], { failing: ["It has tests: still failing"] });
+});
+
 test("a request_changes verdict carries each failing case and the settle saves it (D-054)", async () => {
   const cases = [
     {

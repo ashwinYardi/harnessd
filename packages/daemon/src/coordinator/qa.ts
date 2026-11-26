@@ -1084,6 +1084,75 @@ export function decideReview(
 }
 
 /**
+ * The re-QA decision: approve only when every saved case passes, the Verify item passes and
+ * the daemon's own test run passed (D-056). Every case gets a line with its saved id and item
+ * and its new result, so the review shows each one even on approval.
+ */
+export function decideReQa(
+  saved: readonly QaCase[],
+  tests: TestRun,
+  verdict: ReQaVerdict,
+): Decision {
+  const failing: string[] = [];
+  const passing: string[] = [];
+  if (!tests.passed) {
+    failing.push(`Tests: ${describeTests(tests)} when harnessd ran it`);
+  }
+  const results = new Map(verdict.cases.map((entry) => [entry.id, entry]));
+  for (const savedCase of saved) {
+    const result = results.get(savedCase.id);
+    const pass = result?.pass === true;
+    const line =
+      `${savedCase.id} (${savedCase.item}): ${pass ? "pass" : "fail"}: ` +
+      evidenceLine(result?.evidence ?? "no evidence");
+    (pass ? passing : failing).push(line);
+  }
+  const verifyLine = `Verify: ${verdict.verify.pass ? "pass" : "fail"}: ${evidenceLine(
+    verdict.verify.evidence,
+  )}`;
+  (verdict.verify.pass ? passing : failing).push(verifyLine);
+  return { decision: failing.length === 0 ? "approve" : "request_changes", failing, passing };
+}
+
+/**
+ * The cases a failed re-QA sends back: only the saved cases that still fail, each with its
+ * new actual from the re-QA evidence (D-056). A failing test or Verify command keeps or adds
+ * the daemon case `T1`; the re-QA adds no other case.
+ */
+function reQaSendBackCases(
+  saved: readonly QaCase[],
+  verdict: ReQaVerdict,
+  tests: TestRun,
+  verify: readonly string[],
+): QaCase[] {
+  const results = new Map(verdict.cases.map((entry) => [entry.id, entry]));
+  const out: QaCase[] = [];
+  for (const savedCase of saved) {
+    const result = results.get(savedCase.id);
+    if (result?.pass === true) continue;
+    out.push({ ...savedCase, actual: result?.evidence ?? savedCase.actual });
+  }
+  let t1: QaCase | undefined;
+  if (!tests.passed && tests.command.trim() !== "") {
+    t1 = daemonCase("Tests", tests.command, tests);
+  } else if (!verdict.verify.pass) {
+    t1 = {
+      id: "T1",
+      item: "Verify",
+      repro: verify.length > 0 ? verify.join("\n") : "Verify",
+      expected: "exit 0",
+      actual: verdict.verify.evidence,
+    };
+  }
+  if (t1 !== undefined) {
+    const at = out.findIndex((entry) => entry.id === "T1");
+    if (at === -1) out.unshift(t1);
+    else out[at] = t1;
+  }
+  return out;
+}
+
+/**
  * The verdict for a `QA: tests` part: every item carries the commands with their exit codes,
  * and the last item, `Verify`, also carries each expected result and passes only when a
  * command ran and every command exited 0 (D-053). A failing command leaves only its own line
@@ -1122,6 +1191,8 @@ export interface ReviewBodyInput {
   maxRounds: number;
   /** The failing Verify command's output for a `QA: tests` part (D-053). */
   verifyTail?: { command: string; output: string };
+  /** True for a re-QA: the review approves the saved cases, not the parent's items (D-056). */
+  reQa?: boolean;
   /**
    * Why this verdict was made without the product: live QA is off, or the app failed three
    * times on this head. The body starts with `not run live: <reason>` (MET-180, D-013).
@@ -1131,12 +1202,16 @@ export interface ReviewBodyInput {
 
 /** The PR review body. */
 export function formatReviewBody(input: ReviewBodyInput): string {
-  const { qa, parent, decision, tests, round, maxRounds, notLive, verifyTail } = input;
+  const { qa, parent, decision, tests, round, maxRounds, notLive, verifyTail, reQa } = input;
   const lines: string[] = [];
   if (notLive !== undefined) lines.push(`not run live: ${notLive}`, "");
   if (decision.decision === "approve") {
+    const approved =
+      reQa === true
+        ? `Every saved case passes and ${describeTests(tests)}.`
+        : `Every "Done when" item of ${parent.key} passes and ${describeTests(tests)}.`;
     lines.push(
-      `**harnessd QA** (${qa.key}): approved. Every "Done when" item of ${parent.key} passes and ${describeTests(tests)}.`,
+      `**harnessd QA** (${qa.key}): approved. ${approved}`,
       "",
       ...decision.passing.map((p) => `- [x] ${p}`),
     );
@@ -1651,8 +1726,11 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         error: verdict.ok ? "limited" : verdict.error,
       };
 
-    // A re-QA has no checklist: its items are the saved cases and the Verify result (D-054).
-    const decision = decideReview(reQaCases === undefined ? checklist : [], tests, verdict);
+    // A re-QA decides on the saved cases, the Verify item and the daemon's test run (D-056).
+    const decision =
+      reQaCases !== undefined && reQaVerdict !== undefined
+        ? decideReQa(reQaCases, tests, reQaVerdict)
+        : decideReview(reQaCases === undefined ? checklist : [], tests, verdict);
     if (decision.decision === "error") {
       return {
         part,
@@ -1665,7 +1743,12 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         error: decision.error ?? "unknown",
       };
     }
-    const cases = reQaCases === undefined ? reviewCases(verdict, tests, verifyFailed) : [];
+    const cases =
+      reQaCases === undefined
+        ? reviewCases(verdict, tests, verifyFailed)
+        : reQaVerdict === undefined
+          ? []
+          : reQaSendBackCases(reQaCases, reQaVerdict, tests, partVerify(part));
     // A request-changes verdict with no case is not judged, and feeds the D-052 count. A
     // schema error still counts a failure, and the no-case rule applies only to the agent.
     if (
@@ -1698,6 +1781,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       maxRounds: input.maxRounds,
       ...(notLive === undefined ? {} : { notLive }),
       ...(verifyTail === undefined ? {} : { verifyTail }),
+      ...(reQaVerdict === undefined ? {} : { reQa: true }),
     });
     const event: ReviewEvent = decision.decision === "approve" ? "APPROVE" : "REQUEST_CHANGES";
     const result: PrReview = {
@@ -1811,6 +1895,20 @@ function times(n: number): string {
 }
 
 /**
+ * Drops a part's saved cases from the reviewed head and the feedback, so the next QA after a
+ * human move is a full round (D-052, D-056). The entry and its verdict stay.
+ */
+function clearSavedCases(
+  state: Pick<LoopState, "qaFeedback"> & { reviewedHeads?: LoopState["reviewedHeads"] },
+  partId: string,
+): void {
+  const reviewed = state.reviewedHeads?.[partId];
+  if (reviewed !== undefined) delete reviewed.cases;
+  const feedback = state.qaFeedback[partId];
+  if (feedback !== undefined) delete feedback.cases;
+}
+
+/**
  * Applies a QA round. Approved: QA moves to In Review (MET-14 merges). A round where no
  * part was judged and every failed review is a setup error, or gave no usable verdict
  * (turn cap, time limit, stall or invalid JSON), is re-queued with no failure counted
@@ -1822,7 +1920,7 @@ function times(n: number): string {
  * (D-014).
  */
 export async function settleQa(
-  state: Pick<LoopState, "qaFailures" | "qaFeedback" | "sessions">,
+  state: Pick<LoopState, "qaFailures" | "qaFeedback" | "sessions" | "reviewedHeads">,
   input: { qa: LinkedIssue; parent: Issue },
   result: QaRunResult,
   deps: QaSettleDeps,
@@ -1903,6 +2001,7 @@ export async function settleQa(
       }),
     );
     for (const partId of countedParts) clearNotJudged(partId);
+    clearSavedCases(state, twice.part.id);
     return "escalated";
   }
   const notApproved = result.reviews.filter((r) => r.decision !== "approve");
@@ -1923,6 +2022,7 @@ export async function settleQa(
     delete state.qaFailures[parent.id];
     for (const r of result.reviews) {
       delete state.qaFeedback[r.part.id];
+      clearSavedCases(state, r.part.id);
       if (state.sessions !== undefined) delete state.sessions[r.part.id];
       clearNotJudged(r.part.id);
     }
