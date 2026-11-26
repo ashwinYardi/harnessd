@@ -628,12 +628,18 @@ test("a QA: agent part and a body with no QA line still run the QA agent (D-053)
   }
 });
 
-test("agent QA evidence stays one line, so a newline inside backticks becomes a space (D-053)", () => {
+test("agent QA evidence keeps whitespace inside backticks as written (D-053)", () => {
   const verdict: ParsedQaVerdict = {
     ok: true,
     verdict: {
       testsPassed: true,
-      items: [{ text: "Avatars", pass: true, evidence: "src/a.ts:1 and `one\ntwo`" }],
+      items: [
+        {
+          text: "Avatars",
+          pass: true,
+          evidence: "src/a.ts:1\n\nand `one\ttwo\nthree`",
+        },
+      ],
     },
   };
   const decision = decideReview(
@@ -641,7 +647,7 @@ test("agent QA evidence stays one line, so a newline inside backticks becomes a 
     { passed: true, command: "pnpm test", exitCode: 0, timedOut: false, output: "" },
     verdict,
   );
-  assert.deepEqual(decision.passing, ["Avatars: src/a.ts:1 and `one two`"]);
+  assert.deepEqual(decision.passing, ["Avatars: src/a.ts:1 and `one\ttwo\nthree`"]);
 });
 
 test("the QA agent run gets the role turn cap", async () => {
@@ -1302,6 +1308,25 @@ test("runQaTests runs setup then tests, stopping at the first failure", async ()
   const passed = await runQaTests({ setup_command: " ", test_command: "t" }, "/x", 1000, run);
   assert.deepEqual(seen, ["t"]);
   assert.equal(passed.passed, true);
+});
+
+test("runVerifyChecks shares one deadline and starts no command once it is spent (D-014)", async () => {
+  let clock = 0;
+  const started: string[] = [];
+  const run: CommandRunner = async (command) => {
+    started.push(command);
+    clock += 11; // the first command consumes the whole 10 ms budget
+    return { exitCode: 0, timedOut: false, output: "" };
+  };
+  const checks = [
+    { run: "first", expect: "" },
+    { run: "second", expect: "" },
+  ];
+  const runs = await runVerifyChecks(checks, "/wt", 10, run, () => clock);
+  assert.deepEqual(started, ["first"], "the second command does not start after the budget");
+  assert.equal(runs.length, 2);
+  assert.equal(runs[1]?.result.timedOut, true, "the unrun command counts as a timeout");
+  assert.equal(runs[1]?.result.exitCode, null);
 });
 
 test("runShellCommand reports the exit code and output, and kills on timeout", async () => {

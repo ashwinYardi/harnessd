@@ -56,14 +56,14 @@ function oneLine(text: string): string {
 }
 
 /**
- * Flattens evidence to one line. Whitespace outside `backticks` collapses to one space, and
- * a newline or tab inside them becomes a space; ordinary spaces inside them are kept, so a
- * Verify command with two spaces in a quoted string survives (MET-200).
+ * Collapses whitespace outside `backticks` to one space and keeps it inside them as written,
+ * so a Verify command with two spaces, a tab or a newline survives (MET-200, owner exception
+ * 2026-11-26).
  */
 function evidenceLine(text: string): string {
   return text
     .split("`")
-    .map((part, i) => (i % 2 === 0 ? part.replace(/\s+/g, " ") : part.replace(/[\r\n\t]+/g, " ")))
+    .map((part, i) => (i % 2 === 0 ? part.replace(/\s+/g, " ") : part))
     .join("`")
     .trim();
 }
@@ -248,7 +248,8 @@ function commandPassed(result: CommandResult): boolean {
 
 /**
  * Runs a `QA: tests` part's Verify commands in order, stopping at the first failure or when
- * the round's budget runs out. No QA agent runs and no app starts (D-053).
+ * the round's budget runs out; a command that never starts because the budget is spent is a
+ * timeout, which is a failing command. No QA agent runs and no app starts (D-014, D-053).
  */
 export async function runVerifyChecks(
   checks: readonly VerifyCheck[],
@@ -262,7 +263,13 @@ export async function runVerifyChecks(
   const out: VerifyRun[] = [];
   for (const check of checks) {
     if (signal?.aborted) break;
-    const result = await run(check.run, cwd, Math.max(deadline - now(), 1), signal);
+    const left = deadline - now();
+    if (left <= 0) {
+      // The shared budget is spent: the command does not start with a fresh allowance.
+      out.push({ check, result: { exitCode: null, timedOut: true, output: "" } });
+      break;
+    }
+    const result = await run(check.run, cwd, left, signal);
     out.push({ check, result });
     if (!commandPassed(result) || signal?.aborted) break;
   }
@@ -1108,7 +1115,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
           ? await runVerifyChecks(
               verifyChecks,
               path,
-              Math.max(deadline - now(), 1),
+              deadline - now(),
               deps.runCommand ?? runShellCommand,
               now,
               deps.signal,
