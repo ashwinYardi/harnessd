@@ -4,10 +4,12 @@
 //
 // For each part: find its PR (the part key is in the title), check the PR head out in a
 // worktree of its own, run the repo's tests in harnessd, then run the QA agent for a
-// strict JSON verdict. When the repo declares a product in `[qa]`, harnessd starts it first
-// and, for a web app, a headless browser, then stops their trees afterwards (MET-178,
-// MET-179, D-051). harnessd approves only when every item passes and the tests pass,
-// whatever the model says; anything else requests changes.
+// strict JSON verdict. A part marked `**QA**: tests` instead runs its Verify commands and
+// builds the verdict itself, with no app, browser or agent (MET-200, D-053). When the repo
+// declares a product in `[qa]`, harnessd starts it first and, for a web app, a headless
+// browser, then stops their trees afterwards (MET-178, MET-179, D-051). harnessd approves
+// only when every item passes and the tests pass, whatever the model says; anything else
+// requests changes.
 // `settleQa` then moves the sub-issues, and the second failed round goes to the human instead
 // of looping.
 import { spawn } from "node:child_process";
@@ -51,6 +53,19 @@ function message(error: unknown): string {
 
 function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Collapses whitespace outside `backticks` to one space and keeps it inside them as written,
+ * so a Verify command with two spaces, a tab or a newline survives (MET-200, owner exception
+ * 2026-11-26).
+ */
+function evidenceLine(text: string): string {
+  return text
+    .split("`")
+    .map((part, i) => (i % 2 === 0 ? part.replace(/\s+/g, " ") : part))
+    .join("`")
+    .trim();
 }
 
 // --- the deterministic check: the repo's tests ----------------------------
@@ -233,7 +248,8 @@ function commandPassed(result: CommandResult): boolean {
 
 /**
  * Runs a `QA: tests` part's Verify commands in order, stopping at the first failure or when
- * the round's budget runs out. No QA agent runs and no app starts (D-053).
+ * the round's budget runs out; a command that never starts because the budget is spent is a
+ * timeout, which is a failing command. No QA agent runs and no app starts (D-014, D-053).
  */
 export async function runVerifyChecks(
   checks: readonly VerifyCheck[],
@@ -247,7 +263,13 @@ export async function runVerifyChecks(
   const out: VerifyRun[] = [];
   for (const check of checks) {
     if (signal?.aborted) break;
-    const result = await run(check.run, cwd, Math.max(deadline - now(), 1), signal);
+    const left = deadline - now();
+    if (left <= 0) {
+      // The shared budget is spent: the command does not start with a fresh allowance.
+      out.push({ check, result: { exitCode: null, timedOut: true, output: "" } });
+      break;
+    }
+    const result = await run(check.run, cwd, left, signal);
     out.push({ check, result });
     if (!commandPassed(result) || signal?.aborted) break;
   }
@@ -258,6 +280,17 @@ function verifyEvidence(result: CommandResult): string {
   if (result.error !== undefined) return `could not run (${oneLine(result.error)})`;
   if (result.timedOut) return "timed out";
   return `exited with code ${result.exitCode ?? "null (killed)"}`;
+}
+
+/**
+ * One Verify command's evidence: the command and its exit code, plus what its output should
+ * show when it passed. A failing command keeps the exact `Verify: <cmd> exited with code <n>`
+ * send-back line, so its expected text is left out (D-046, D-053).
+ */
+function verifyRunEvidence(entry: VerifyRun): string {
+  const line = `\`${entry.check.run}\` ${verifyEvidence(entry.result)}`;
+  if (!commandPassed(entry.result) || entry.check.expect === "") return line;
+  return `${line} (expected: ${entry.check.expect})`;
 }
 
 function describeTests(tests: TestRun): string {
@@ -446,9 +479,12 @@ export function partItems(part: LinkedIssue): string[] {
   return sectionChecklist(extractSection(part.description, "Done when")).map(oneLine);
 }
 
-/** The commands of the part's own Verify section, each with what it must show. */
+/**
+ * The lines of the part's own Verify section, trimmed at the ends only: a command keeps the
+ * spaces inside its quotes, so the daemon runs it exactly as written (MET-200).
+ */
 export function partVerify(part: LinkedIssue): string[] {
-  return sectionList(extractSection(part.description, "Verify")).map(oneLine);
+  return sectionList(extractSection(part.description, "Verify")).map((line) => line.trim());
 }
 
 /** How QA judges the part: from its Verify commands, or with the QA agent (D-053). */
@@ -463,19 +499,24 @@ export interface VerifyCheck {
   expect: string;
 }
 
-/** The part's Verify commands, in order. A line without the arrow runs as written. */
+/**
+ * The part's Verify commands, in order, taken from the backticked text before the arrow. A
+ * line without that form is skipped: the part has no runnable command there (D-053).
+ */
 export function partVerifyChecks(part: LinkedIssue): VerifyCheck[] {
   const out: VerifyCheck[] = [];
   for (const line of partVerify(part)) {
     const match = /^`([^`]+)`\s*(?:→|->)\s*(.*)$/.exec(line);
-    if (match?.[1]) {
-      out.push({ run: match[1].trim(), expect: (match[2] ?? "").trim() });
-      continue;
-    }
-    const run = line.replace(/`/g, "").trim();
-    if (run !== "") out.push({ run, expect: "" });
+    if (match?.[1] === undefined || match[1].trim() === "") continue;
+    out.push({ run: match[1].trim(), expect: (match[2] ?? "").trim() });
   }
   return out;
+}
+
+/** True when every Verify line named a backticked command for the daemon to run. */
+function partVerifyComplete(part: LinkedIssue): boolean {
+  const lines = partVerify(part);
+  return lines.length > 0 && partVerifyChecks(part).length === lines.length;
 }
 
 /**
@@ -705,16 +746,19 @@ export function decideReview(
     failing.push("Tests: the QA agent saw failing tests or checks (see the items' evidence)");
   }
   for (const [i, item] of verdict.verdict.items.entries()) {
-    const line = `${checklist[i] ?? item.text}: ${oneLine(item.evidence)}`;
+    const line = `${checklist[i] ?? item.text}: ${evidenceLine(item.evidence)}`;
     (item.pass ? passing : failing).push(line);
   }
   return { decision: failing.length === 0 ? "approve" : "request_changes", failing, passing };
 }
 
 /**
- * The verdict for a `QA: tests` part: every Done-when item shares the Verify result, and the
- * last item, `Verify`, passes only when a command ran and every command exited 0 (D-053).
- * A repo test failure leaves Verify unrun, so both the test line and Verify fail.
+ * The verdict for a `QA: tests` part: every item carries the commands with their exit codes,
+ * and the last item, `Verify`, also carries each expected result and passes only when a
+ * command ran and every command exited 0 (D-053). A failing command leaves only its own line
+ * as the `Verify` evidence, so the send-back names the command that failed and not the ones
+ * before it (D-046). A repo test failure leaves Verify unrun, so both the test line and
+ * Verify fail.
  */
 export function verdictFromVerify(
   checklist: string[],
@@ -724,21 +768,14 @@ export function verdictFromVerify(
   const failed = runs.find((entry) => !commandPassed(entry.result));
   const verifyPass = runs.length > 0 && failed === undefined;
   const evidence =
-    runs.length === 0
-      ? "not run: the repo tests failed"
-      : runs.map((entry) => `\`${entry.check.run}\` ${verifyEvidence(entry.result)}`).join("; ");
+    runs.length === 0 ? "not run: the repo tests failed" : runs.map(verifyRunEvidence).join("; ");
+  const verifyEvidence = failed === undefined ? evidence : verifyRunEvidence(failed);
   return {
-    items: checklist.map((text, i) =>
-      i === checklist.length - 1
-        ? { text, pass: verifyPass, evidence }
-        : {
-            text,
-            pass: true,
-            evidence: verifyPass
-              ? "every Verify command exited 0"
-              : "the Verify commands ran; see the Verify item",
-          },
-    ),
+    items: checklist.map((text, i) => ({
+      text,
+      pass: i === checklist.length - 1 ? verifyPass : true,
+      evidence: i === checklist.length - 1 ? verifyEvidence : evidence,
+    })),
     testsPassed: tests.passed,
   };
 }
@@ -983,9 +1020,16 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
 
   async function review(part: LinkedIssue): Promise<PrReview> {
     const checklist = qaChecklist(parent, part);
-    // A `QA: tests` part needs its Verify commands; without them it falls back to the agent (D-053).
+    // A `QA: tests` part needs a backticked command on every Verify line; otherwise it
+    // falls back to the QA agent (D-053).
+    const qaMode = partQaMode(part);
     const verifyChecks = partVerifyChecks(part);
-    const testsMode = partQaMode(part) === "tests" && verifyChecks.length > 0;
+    const testsMode = qaMode === "tests" && partVerifyComplete(part);
+    if (testsMode) {
+      log(`${qa.key}: QA from Verify commands on ${part.key}, ${verifyChecks.length} commands`);
+    } else if (qaMode === "tests") {
+      log(`${qa.key}: ${part.key} has a Verify line with no backticked command, using agent QA`);
+    }
     let pr: PullRequest | undefined;
     try {
       pr = await deps.github.findPrForIssue(part.key);
@@ -1071,7 +1115,7 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
           ? await runVerifyChecks(
               verifyChecks,
               path,
-              Math.max(deadline - now(), 1),
+              deadline - now(),
               deps.runCommand ?? runShellCommand,
               now,
               deps.signal,
@@ -1246,7 +1290,11 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         error: decision.error ?? "unknown",
       };
     }
-    const notLive = isLiveQa(deps.commands) ? liveOff : "no [qa] kind in .harnessd/config.toml";
+    const notLive = testsMode
+      ? "QA from Verify commands"
+      : isLiveQa(deps.commands)
+        ? liveOff
+        : "no [qa] kind in .harnessd/config.toml";
     const body = formatReviewBody({
       qa,
       parent,
