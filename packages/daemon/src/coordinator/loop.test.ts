@@ -916,6 +916,111 @@ test("a parent whose recorded parts are all canceled is grilled again", async ()
   assert.equal(parent.state, "In Progress");
 });
 
+test("a re-split keeps the record's first at and stays admitted ahead of a later parent", async () => {
+  const time = manualClock("2026-11-26T10:00:00.000Z");
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 3, max_parents: 1 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const linear = new FakeLinear();
+  const a = linear.add({ title: "A", labels: ["ui"], description: BODY("S") });
+  const b = linear.add({ title: "B", state: "In Progress" });
+  const bPart = linear.add({
+    title: "B part",
+    state: "Backlog",
+    parentId: b.id,
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const adapter = fakeAdapter({
+    plans: { [a.key]: plan(["backend", "S", "A API"], ["frontend", "S", "A UI"]) },
+  });
+  // The loop loads its state once. This store hands back the loaded object, so the test can
+  // add the later parent's split record between ticks, as a restart would have loaded it.
+  const state = emptyLoopState();
+  const store: LoopStore = {
+    async load() {
+      return state;
+    },
+    async save() {},
+  };
+  const t = setup({ config, linear, adapter, store, extra: { clock: time.clock } });
+
+  await t.loop.tick();
+  const first = state.splits?.[a.id];
+  assert.ok(first, "A's split is recorded at the first time");
+  t.adapter.pending[0]?.finish("ok");
+  await t.loop.idle();
+  const children = t.linear.children(a);
+  const backend = children.find((child) => roleOf(child) === "backend");
+  const frontend = children.find((child) => roleOf(child) === "frontend");
+  const qa = children.find((child) => roleOf(child) === "qa");
+  assert.ok(backend && frontend && qa);
+  backend.state = "Done";
+
+  // The owner cancels one part and escalates A. B is a later parent already in flight.
+  frontend.state = "Canceled";
+  a.state = "Needs input";
+  state.splits ??= {};
+  state.splits[b.id] = {
+    key: b.key,
+    parts: [bPart.id],
+    qa: "qa-b",
+    at: time.at(10_000),
+  };
+  bPart.state = "Ready";
+
+  time.advance(60_000);
+  a.state = "Ready";
+  const report = await t.loop.tick();
+
+  const next = state.splits?.[a.id];
+  assert.ok(next, "A keeps its split record");
+  assert.equal(next.at, first.at, "the re-split keeps the record's first at time");
+  assert.deepEqual(next.parts, [backend.id], "the record takes the new split's live parts");
+  assert.equal(next.qa, qa.id, "the record takes the new split's QA");
+  assert.deepEqual(report.dispatched, [], "A holds the only slot, so B's part does not start");
+  assert.equal(bPart.state, "Ready", "B's part waits while A stays admitted ahead of B");
+});
+
+test("a re-split after every part was canceled deletes the record and writes a fresh at", async () => {
+  const time = manualClock("2026-11-26T11:00:00.000Z");
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "Feature", labels: ["ui"], description: BODY("S") });
+  const adapter = fakeAdapter({
+    plans: { [parent.key]: plan(["backend", "S", "API"]) },
+  });
+  const t = setup({ linear, adapter, extra: { clock: time.clock } });
+
+  await t.loop.tick();
+  const first = t.memory.state.splits?.[parent.id];
+  assert.ok(first, "the first split is recorded");
+  t.adapter.pending[0]?.finish("ok");
+  await t.loop.idle();
+
+  // The owner canceled every part and moved the parent back to Ready on purpose.
+  for (const child of t.linear.children(parent)) {
+    if (roleOf(child) !== "qa") child.state = "Canceled";
+  }
+  time.advance(60_000);
+  parent.state = "Ready";
+
+  await t.loop.tick();
+
+  const next = t.memory.state.splits?.[parent.id];
+  assert.ok(next, "the regrill records a new split");
+  assert.notDeepEqual(next.parts, first.parts, "the canceled parts are replaced");
+  assert.notEqual(next.at, first.at, "the regrill does not keep the old at time");
+  assert.equal(next.at, time.at(0), "the new record gets the current time");
+});
+
 test("the sweep drops a split record when the parent is Done", async () => {
   const adapter = fakeAdapter({
     plans: { "MET-100": plan(["backend", "S", "API"]) },

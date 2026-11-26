@@ -86,6 +86,8 @@ When the split is done, the parent moves to In Progress.
 - If the read holds every recorded id and every recorded work part is Canceled, the loop drops the record and grills the parent again.
 - Otherwise it goes on to the split, which finds the live parts and does not grill again.
 
+A re-split keeps the record's first `at` and only updates its parts and QA ids; a new record, after the owner canceled every part, gets a new time (MET-210).
+
 **Re-read before the create (MET-154).** After the grill and plan, the loop reads the children again and passes that fresh list to `splitIssue`, not the list from before the grill. A part whose marker is in the fresh read is reused, never created twice. Canceled children are filtered out before the "has work parts" check and before `splitIssue`.
 
 **Dropping the record (MET-154).** Two rules, and no time window:
