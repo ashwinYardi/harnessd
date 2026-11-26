@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { SecretReader } from "@harnessd/shared";
+import { Agent } from "undici";
 import {
   LINEAR_ENDPOINT,
   LinearClient,
@@ -528,6 +529,111 @@ test("network failures map to a network LinearError", async () => {
     code: "network",
     message: "Linear request failed: fetch failed",
   });
+});
+
+test("each request carries a timeout signal that maps an abort to a network error", async () => {
+  let signal: AbortSignal | undefined;
+  const linear = new LinearClient({
+    apiKey: async () => KEY,
+    fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    }) as typeof fetch,
+  });
+  await assert.rejects(linear.comment(MET12_ID, "x"), {
+    code: "network",
+    message: "Linear request timed out",
+  });
+  assert.ok(signal instanceof AbortSignal, "the fetch got an AbortSignal");
+});
+
+test("a request that outlives timeoutMs is aborted and maps to a network timeout", async () => {
+  let aborted = false;
+  const linear = new LinearClient({
+    apiKey: async () => KEY,
+    timeoutMs: 10,
+    fetch: ((_input: string | URL | Request, init?: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          aborted = true;
+          reject(init.signal?.reason ?? new DOMException("aborted", "AbortError"));
+        });
+      })) as typeof fetch,
+  });
+  await assert.rejects(linear.comment(MET12_ID, "x"), {
+    code: "network",
+    message: "Linear request timed out",
+  });
+  assert.equal(aborted, true);
+});
+
+test("a network error replaces the connection pool before the next request", async () => {
+  const dispatchers: unknown[] = [];
+  const seen: unknown[] = [];
+  const replies = [
+    () => {
+      throw new TypeError("fetch failed");
+    },
+    () =>
+      new Response(JSON.stringify(fixture("comment-create")), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+  ];
+  const linear = new LinearClient({
+    apiKey: async () => KEY,
+    newDispatcher: () => {
+      const agent = new Agent();
+      dispatchers.push(agent);
+      return agent;
+    },
+    fetch: (async (_input: string | URL | Request, init?: RequestInit) => {
+      seen.push(init?.dispatcher);
+      const reply = replies.shift();
+      if (!reply) throw new Error("unexpected request");
+      return reply();
+    }) as typeof fetch,
+  });
+
+  await assert.rejects(linear.comment(MET12_ID, "x"), { code: "network" });
+  assert.equal(dispatchers.length, 2, "the client built a fresh pool after the network error");
+
+  await linear.comment(MET12_ID, "x");
+  assert.equal(dispatchers.length, 2, "a success reuses the pool");
+  assert.equal(seen[0], dispatchers[0], "the first request used the initial pool");
+  assert.equal(seen[1], dispatchers[1], "the retry used the fresh pool");
+});
+
+test("an HTTP 5xx answer also replaces the connection pool", async () => {
+  let dispatchers = 0;
+  const linear = new LinearClient({
+    apiKey: async () => KEY,
+    newDispatcher: () => {
+      dispatchers++;
+      return new Agent();
+    },
+    fetch: (async () => new Response("upstream down", { status: 502 })) as typeof fetch,
+  });
+  await assert.rejects(linear.comment(MET12_ID, "x"), { code: "http", status: 502 });
+  assert.equal(dispatchers, 2, "a 5xx is network-class and resets the pool");
+});
+
+test("an auth error keeps the connection pool", async () => {
+  let dispatchers = 0;
+  const linear = new LinearClient({
+    apiKey: async () => KEY,
+    newDispatcher: () => {
+      dispatchers++;
+      return new Agent();
+    },
+    fetch: (async () =>
+      new Response(JSON.stringify({ errors: [{ message: "Unauthorized" }] }), {
+        status: 401,
+        headers: { "content-type": "application/json" },
+      })) as typeof fetch,
+  });
+  await assert.rejects(linear.comment(MET12_ID, "x"), { code: "auth" });
+  assert.equal(dispatchers, 1, "an auth error is not network-class");
 });
 
 test("429 is retried once after Retry-After", async () => {

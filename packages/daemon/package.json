@@ -24,6 +24,7 @@
   "dependencies": {
     "@harnessd/shared": "workspace:*",
     "playwright-core": "^1.49.0",
-    "smol-toml": "^1.9.1"
+    "smol-toml": "^1.9.1",
+    "undici": "^7.30.2"
   }
 }
