@@ -49,7 +49,7 @@ A PR auto-merges when **all** of these hold: CI is green, QA approves every "Don
 - Per-task token and time budget by size: S 30 min, M 2 h, L must be split.
 - Per-issue token budget by size: weighted tokens S 3M, M 6M (D-043). At or over it the loop stops and asks the coordinator (Needs input).
 - One agent runs at a time by default (configurable up to 3).
-- The Ready column is a queue: at most `limits.max_parents` parents are in flight (default 1, D-050).
+- The Ready column is a queue: at most `limits.max_parents` parents are in flight (default 1, D-050), and a parent in Needs input keeps its slot (D-057).
 - Two QA failures → escalate rather than loop.
 - A global kill switch: `harnessd pause`, plus a UI button.
 
