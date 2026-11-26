@@ -173,6 +173,8 @@ export interface ReviewedHead {
   /** The PR head sha QA read. */
   sha: string;
   verdict: "approved" | "changes_requested";
+  /** The failing cases QA recorded, kept for a re-QA after the send-back (D-054). */
+  cases?: QaCase[];
 }
 
 /**
@@ -498,7 +500,10 @@ function reviewedHeads(value: unknown): Record<string, ReviewedHead> {
     if (typeof h !== "object" || h === null) continue;
     if (typeof h.sha !== "string" || h.sha === "") continue;
     if (h.verdict !== "approved" && h.verdict !== "changes_requested") continue;
-    out[id] = { sha: h.sha, verdict: h.verdict };
+    const entry: ReviewedHead = { sha: h.sha, verdict: h.verdict };
+    const cases = qaCases(h.cases);
+    if (cases !== undefined) entry.cases = cases;
+    out[id] = entry;
   }
   return out;
 }

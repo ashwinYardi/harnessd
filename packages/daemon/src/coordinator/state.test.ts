@@ -249,6 +249,58 @@ test("qaFeedback cases are optional, and a malformed case drops only the array (
   assert.deepEqual((await store.load()).qaFeedback["id-1"]?.cases, [good]);
 });
 
+test("reviewedHeads cases are optional, and a malformed one drops only the cases (D-054)", async () => {
+  const good = {
+    id: "C1",
+    item: "It has tests",
+    repro: "pnpm test -- avatars",
+    expected: "the avatar test passes",
+    actual: "not ok 3 - avatars",
+  };
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewedHeads: {
+        a: { sha: "sha7", verdict: "changes_requested", cases: [good] },
+        b: {
+          sha: "sha8",
+          verdict: "changes_requested",
+          cases: [{ ...good, actual: " " }],
+        },
+        c: { sha: "sha9", verdict: "changes_requested" },
+        d: { sha: "sha10", verdict: "approved", cases: [good] },
+      },
+    }),
+  );
+  assert.deepEqual(parsed.reviewedHeads?.a, {
+    sha: "sha7",
+    verdict: "changes_requested",
+    cases: [good],
+  });
+  assert.deepEqual(
+    parsed.reviewedHeads?.b,
+    { sha: "sha8", verdict: "changes_requested" },
+    "the head stays without its cases",
+  );
+  assert.deepEqual(parsed.reviewedHeads?.c, {
+    sha: "sha9",
+    verdict: "changes_requested",
+  });
+  assert.deepEqual(
+    parsed.reviewedHeads?.d,
+    { sha: "sha10", verdict: "approved", cases: [good] },
+    "an approved head keeps what it was given",
+  );
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.reviewedHeads = {
+    "part-1": { sha: "sha7", verdict: "changes_requested", cases: [good] },
+  };
+  await store.save(state);
+  assert.deepEqual((await store.load()).reviewedHeads?.["part-1"]?.cases, [good]);
+});
+
 test("qaLiveWarned is optional and survives a restart (MET-180)", async () => {
   assert.equal(parseLoopState('{"inFlight":[]}').qaLiveWarned, undefined, "old files still load");
   assert.equal(
