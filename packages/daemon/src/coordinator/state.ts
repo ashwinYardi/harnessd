@@ -74,6 +74,20 @@ export interface SelfUpdateRecord extends SelfUpdateView {
   trigger?: SelfUpdateTrigger;
 }
 
+/** One failing item of a QA verdict, with how to reproduce it (D-054). */
+export interface QaCase {
+  /** C1, C2, … in reply order, or T1 for a case the daemon built itself. */
+  id: string;
+  /** The exact text of a failing verdict item, or `Tests` / `Verify`. */
+  item: string;
+  /** The exact command or numbered steps that reproduce the failure. */
+  repro: string;
+  /** What should happen. */
+  expected: string;
+  /** What happened. */
+  actual: string;
+}
+
 /** What QA asked a part to fix; its next run's prompt carries it. */
 export interface QaFeedback {
   /** The part's PR, when one was found. */
@@ -84,6 +98,8 @@ export interface QaFeedback {
   failing: string[];
   /** The last lines of the tests when they failed, for the resume prompt (MET-156). */
   testTail?: string;
+  /** Each failing case with its repro, for the numbered send-back list (D-054). */
+  cases?: QaCase[];
 }
 
 /** A part run's session, so a QA send-back can resume it (MET-156). */
@@ -329,6 +345,26 @@ function counts(value: unknown): Record<string, number> {
   return out;
 }
 
+function isQaCase(value: unknown): value is QaCase {
+  const c = value as Partial<QaCase> | null;
+  const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.trim() !== "";
+  return (
+    typeof c === "object" &&
+    c !== null &&
+    nonEmpty(c.id) &&
+    nonEmpty(c.item) &&
+    nonEmpty(c.repro) &&
+    nonEmpty(c.expected) &&
+    nonEmpty(c.actual)
+  );
+}
+
+/** The cases array, or undefined when absent or any entry is malformed (D-054). */
+function qaCases(value: unknown): QaCase[] | undefined {
+  if (!Array.isArray(value) || !value.every(isQaCase)) return undefined;
+  return value;
+}
+
 function feedback(value: unknown): Record<string, QaFeedback> {
   const out: Record<string, QaFeedback> = {};
   if (typeof value !== "object" || value === null) return out;
@@ -339,6 +375,8 @@ function feedback(value: unknown): Record<string, QaFeedback> {
     if (typeof f.prUrl === "string") entry.prUrl = f.prUrl;
     if (typeof f.reviewUrl === "string") entry.reviewUrl = f.reviewUrl;
     if (typeof f.testTail === "string") entry.testTail = f.testTail;
+    const cases = qaCases(f.cases);
+    if (cases !== undefined) entry.cases = cases;
     out[id] = entry;
   }
   return out;

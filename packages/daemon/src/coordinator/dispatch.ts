@@ -9,8 +9,8 @@ import type {
   Size,
 } from "@harnessd/shared";
 import { type AgentMemory, memorySection } from "./prompt.ts";
-import { extractSection, withoutSections } from "./split.ts";
-import type { QaFeedback } from "./state.ts";
+import { extractSection, sectionList, withoutSections } from "./split.ts";
+import type { QaCase, QaFeedback } from "./state.ts";
 
 /**
  * Wall-clock budget of a run by size (D-014), from `limits.budget_minutes`.
@@ -105,6 +105,31 @@ function shipSteps(branch: string, what: string, review?: QaFeedback): string {
   ].join("\n");
 }
 
+/** A numbered fix list: `1. C1 (<item>)`, then its repro, expected and actual (D-054). */
+function caseList(cases: readonly QaCase[]): string {
+  return cases
+    .map((entry, i) =>
+      [
+        `${i + 1}. ${entry.id} (${entry.item})`,
+        `   repro: ${entry.repro}`,
+        `   expected: ${entry.expected}`,
+        `   actual: ${entry.actual}`,
+      ].join("\n"),
+    )
+    .join("\n\n");
+}
+
+/** The send-back cases, else today's failing list (D-046, D-054). */
+function reviewBlock(review: QaFeedback): string {
+  if (review.cases !== undefined && review.cases.length > 0) {
+    return (
+      `${caseList(review.cases)}\n\n` +
+      "Fix only these cases, add one test per case, then run the part's Verify commands."
+    );
+  }
+  return review.failing.map((f) => `- ${f}`).join("\n");
+}
+
 /** The prompt of a backend or frontend run. */
 export function buildPartPrompt({ agent, issue, branch, review, memory }: PartPromptInput): string {
   // MET-162: a part body with the fixed brief starts with that brief. The rules, decisions,
@@ -121,10 +146,11 @@ export function buildPartPrompt({ agent, issue, branch, review, memory }: PartPr
       review.prUrl ? `PR: ${review.prUrl}` : "",
       review.reviewUrl ? `Review: ${review.reviewUrl}` : "",
     ].filter(Boolean);
-    parts.push(
-      `## QA requested changes\nQA checked your PR and sent it back. Fix every item below on this branch.\n${where.join("\n")}\n\n` +
-        review.failing.map((f) => `- ${f}`).join("\n"),
-    );
+    const hasCases = review.cases !== undefined && review.cases.length > 0;
+    const intro = hasCases
+      ? "QA checked your PR and sent it back. Fix only these cases on this branch."
+      : "QA checked your PR and sent it back. Fix every item below on this branch.";
+    parts.push(`## QA requested changes\n${intro}\n${where.join("\n")}\n\n${reviewBlock(review)}`);
   }
   if (memory) parts.push(memorySection(memory));
   parts.push(shipSteps(branch, 'every "Done when" item in your brief is met, with tests,', review));
@@ -148,19 +174,42 @@ export function buildResumePrompt({ issue, review }: ResumePromptInput): string 
     review.reviewUrl ? `Review: ${review.reviewUrl}` : "",
   ].filter(Boolean);
   const parts = [`## QA send-back\n${where.join("\n")}`];
-  if (review.failing.length > 0) {
+  const hasCases = review.cases !== undefined && review.cases.length > 0;
+  if (hasCases) {
+    parts.push(`Cases to fix:\n${caseList(review.cases ?? [])}`);
+  } else if (review.failing.length > 0) {
     parts.push(`Failing items:\n${review.failing.map((f) => `- ${f}`).join("\n")}`);
   }
   if (review.testTail !== undefined) {
     parts.push(`Last lines of the tests:\n\`\`\`text\n${review.testTail || "(no output)"}\n\`\`\``);
   }
-  parts.push(
-    [
-      "## What to do",
-      "- Fix only these items.",
-      "- Run focused tests.",
-      "- Do not commit, push or open a PR: harnessd ships the work after your run (D-039).",
-    ].join("\n"),
-  );
+  if (hasCases) {
+    // The resumed run carries no brief, so the part's Verify commands come from its body.
+    const verify = sectionList(extractSection(issue.description, "Verify")).map((line) =>
+      line.trim(),
+    );
+    if (verify.length > 0) {
+      parts.push(
+        `## Verify\nRun each command before you finish:\n${verify.map((v) => `- ${v}`).join("\n")}`,
+      );
+    }
+    parts.push(
+      [
+        "## What to do",
+        "- Fix only these cases, add one test per case, then run the part's Verify commands.",
+        "- Run focused tests.",
+        "- Do not commit, push or open a PR: harnessd ships the work after your run (D-039).",
+      ].join("\n"),
+    );
+  } else {
+    parts.push(
+      [
+        "## What to do",
+        "- Fix only these items.",
+        "- Run focused tests.",
+        "- Do not commit, push or open a PR: harnessd ships the work after your run (D-039).",
+      ].join("\n"),
+    );
+  }
   return `${parts.join("\n\n")}\n`;
 }

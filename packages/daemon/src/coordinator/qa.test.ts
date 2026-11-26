@@ -322,7 +322,38 @@ function harness(options: Options = {}) {
   };
 }
 
-const verdict = (pass: boolean[], testsPassed = true, items = qaChecklist(parent)) =>
+interface TestCase {
+  id: string;
+  item: string;
+  repro: string;
+  expected: string;
+  actual: string;
+}
+
+/** One case per failing item, with C1, C2, … in reply order (D-054). */
+function casesFor(pass: boolean[], items: string[]): TestCase[] {
+  let n = 0;
+  const out: TestCase[] = [];
+  pass.forEach((p, i) => {
+    if (p) return;
+    n += 1;
+    out.push({
+      id: `C${n}`,
+      item: items[i] ?? `item ${i + 1}`,
+      repro: `pnpm test -- item ${i + 1}`,
+      expected: `item ${i + 1} passes`,
+      actual: `nothing covers item ${i + 1}`,
+    });
+  });
+  return out;
+}
+
+const verdict = (
+  pass: boolean[],
+  testsPassed = true,
+  items = qaChecklist(parent),
+  cases?: TestCase[],
+) =>
   JSON.stringify({
     items: pass.map((p, i) => ({
       text: items[i] ?? `item ${i + 1}`,
@@ -330,6 +361,7 @@ const verdict = (pass: boolean[], testsPassed = true, items = qaChecklist(parent
       evidence: p ? `src/avatars.ts:${i + 1}` : `nothing covers item ${i + 1}`,
     })),
     testsPassed,
+    cases: cases ?? casesFor(pass, items),
   });
 
 function settleDeps() {
@@ -633,6 +665,7 @@ test("agent QA evidence keeps whitespace inside backticks as written (D-053)", (
     ok: true,
     verdict: {
       testsPassed: true,
+      cases: [],
       items: [
         {
           text: "Avatars",
@@ -648,6 +681,29 @@ test("agent QA evidence keeps whitespace inside backticks as written (D-053)", (
     verdict,
   );
   assert.deepEqual(decision.passing, ["Avatars: src/a.ts:1 and `one\ttwo\nthree`"]);
+});
+
+test("agent QA evidence keeps whitespace in a double-backtick span (D-054)", () => {
+  const verdict: ParsedQaVerdict = {
+    ok: true,
+    verdict: {
+      testsPassed: true,
+      cases: [],
+      items: [
+        {
+          text: "Avatars",
+          pass: true,
+          evidence: 'ran ``test "a  b"``\n\nnow',
+        },
+      ],
+    },
+  };
+  const decision = decideReview(
+    ["Avatars"],
+    { passed: true, command: "pnpm test", exitCode: 0, timedOut: false, output: "" },
+    verdict,
+  );
+  assert.deepEqual(decision.passing, ['Avatars: ran ``test "a  b"`` now']);
 });
 
 test("the QA agent run gets the role turn cap", async () => {
@@ -747,6 +803,15 @@ test("one failing item requests changes listing it; the part goes back to Ready"
     failing: ["It has tests: nothing covers item 2"],
     prUrl: "https://github.test/o/r/pull/7",
     reviewUrl: "https://github.test/o/r/pull/7#review-1",
+    cases: [
+      {
+        id: "C1",
+        item: "It has tests",
+        repro: "pnpm test -- item 2",
+        expected: "item 2 passes",
+        actual: "nothing covers item 2",
+      },
+    ],
   });
   assert.deepEqual(s.moves, [
     { issueId: backend.id, state: "Ready" },
@@ -758,6 +823,152 @@ test("one failing item requests changes listing it; the part goes back to Ready"
   assert.match(partComment, /- It has tests: nothing covers item 2/);
   assert.match(s.comments.at(-1)?.body ?? "", /runs again once every part is back in review/);
   assert.deepEqual(s.pings, []);
+});
+
+test("a request_changes verdict carries each failing case and the settle saves it (D-054)", async () => {
+  const cases = [
+    {
+      id: "C1",
+      item: "It has tests",
+      repro: "pnpm test -- avatars",
+      expected: "the avatar test passes",
+      actual: "not ok 3 - avatars",
+    },
+  ];
+  const h = harness({ replies: [verdict([true, false], true, qaChecklist(parent), cases)] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "changes_requested");
+  assert.deepEqual(result.reviews[0]?.cases, cases);
+
+  const prompt = h.tasks[0]?.prompt ?? "";
+  assert.match(prompt, /"cases": \[\{ "id": "C1"/);
+  assert.match(prompt, /cases: \[\]/);
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "sent_back");
+  assert.deepEqual(state.qaFeedback[backend.id]?.cases, cases);
+  assert.deepEqual(state.qaFeedback[backend.id]?.failing, ["It has tests: nothing covers item 2"]);
+});
+
+test("a request_changes verdict with no cases is not judged with reason no_cases (D-052)", async () => {
+  resetQaAppFailures();
+  const h = harness({ replies: [verdict([true, false], true, qaChecklist(parent), [])] });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "error");
+  assert.equal(h.reviews.length, 0, "no review is posted");
+  assert.equal(result.reviews[0]?.notJudged, "no_cases");
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  state.qaFailures[parent.id] = 1;
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, { [parent.id]: 1 }, "no QA failure is counted");
+  assert.deepEqual(state.qaFeedback, {});
+  assert.deepEqual(s.logs, ["MET-53: QA not judged (verdict has no failing case), re-queued"]);
+
+  assert.equal(
+    await settleQa(state, { qa, parent }, result, s.deps),
+    "escalated",
+    "a second one in a row on the same head goes to Needs input",
+  );
+});
+
+test("a malformed case is a schema error and counts a failure (D-052, D-054)", async () => {
+  const items = qaChecklist(parent);
+  const envelope = (cases: unknown) =>
+    JSON.stringify({
+      items: items.map((text, i) => ({
+        text,
+        pass: i !== 1,
+        evidence: i === 1 ? "nothing covers item 2" : `src/avatars.ts:${i + 1}`,
+      })),
+      testsPassed: true,
+      cases,
+    });
+
+  const emptyField = parseQaVerdict(
+    envelope([{ id: "C1", item: "It has tests", repro: " ", expected: "pass", actual: "fail" }]),
+    2,
+  );
+  assert.equal(emptyField.ok, false);
+  assert.match(
+    !emptyField.ok ? emptyField.error : "",
+    /cases\[0\]\.repro: expected a non-empty string/,
+  );
+
+  const noFailingItem = parseQaVerdict(
+    envelope([
+      {
+        id: "C1",
+        item: "Avatars are served",
+        repro: "pnpm test",
+        expected: "pass",
+        actual: "fail",
+      },
+    ]),
+    2,
+  );
+  assert.equal(noFailingItem.ok, false);
+  assert.match(!noFailingItem.ok ? noFailingItem.error : "", /cases\[0\]\.item/);
+
+  // A schema error is a counted QA failure, not a not-judged run.
+  const h = harness({
+    replies: [
+      envelope([
+        {
+          id: "C1",
+          item: "Avatars are served",
+          repro: "pnpm test",
+          expected: "pass",
+          actual: "fail",
+        },
+      ]),
+    ],
+  });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "error");
+  assert.equal(result.reviews[0]?.notJudged, undefined);
+  assert.match(result.reviews[0]?.error ?? "", /QA verdict was unusable: .*cases\[0\]\.item/);
+});
+
+test("a failing test command builds case T1 itself (D-054)", async () => {
+  const output = "not ok 3 - avatars";
+  const h = harness({
+    replies: [verdict([true, true])],
+    testExit: 1,
+    outputs: { "pnpm test": output },
+  });
+  const result = await runQa(h.input, h.deps);
+  assert.equal(result.outcome, "changes_requested");
+  assert.deepEqual(result.reviews[0]?.cases, [
+    {
+      id: "T1",
+      item: "Tests",
+      repro: "pnpm test",
+      expected: "exit 0",
+      actual: `exited with code 1\n${output}`,
+    },
+  ]);
+});
+
+test("a failing Verify command builds case T1 with item Verify (D-054)", async () => {
+  const h = harness({
+    prs: { [testsBriefed.key]: pr(7, testsBriefed.key) },
+    exits: { "pnpm check": 3 },
+    outputs: { "pnpm check": "avatars check failed" },
+  });
+  const result = await runQa({ ...h.input, parts: [testsBriefed] }, h.deps);
+  assert.equal(result.outcome, "changes_requested");
+  assert.deepEqual(result.reviews[0]?.cases, [
+    {
+      id: "T1",
+      item: "Verify",
+      repro: "pnpm check",
+      expected: "exit 0",
+      actual: "exited with code 3\navatars check failed",
+    },
+  ]);
 });
 
 test("failing tests request changes even when the model says everything passes", async () => {
@@ -799,10 +1010,22 @@ test("a passing test run stores no test tail", async () => {
 });
 
 test("the model reporting failing tests also blocks approval", async () => {
-  const h = harness({ replies: [verdict([true, true], false)] });
+  const cases = [
+    {
+      id: "C1",
+      item: "Verify",
+      repro: "pnpm test -- avatars",
+      expected: "the tests pass",
+      actual: "not ok 3 - avatars",
+    },
+  ];
+  const h = harness({
+    replies: [verdict([true, true], false, qaChecklist(parent), cases)],
+  });
   const result = await runQa(h.input, h.deps);
   assert.equal(result.outcome, "changes_requested");
   assert.match(result.reviews[0]?.failing[0] ?? "", /QA agent saw failing tests/);
+  assert.deepEqual(result.reviews[0]?.cases, cases);
 });
 
 test("an invalid verdict is not judged: no review, no failure, QA re-queued", async () => {
@@ -1231,23 +1454,50 @@ test("parseQaVerdict is strict", () => {
   assert.match(bad("no json"), /not JSON/);
   assert.match(bad("[]"), /expected a JSON object/);
   assert.match(
-    bad(JSON.stringify({ items: [item], testsPassed: true, extra: 1 })),
+    bad(JSON.stringify({ items: [item], testsPassed: true, cases: [], extra: 1 })),
     /unknown key "extra"/,
   );
   assert.match(bad(JSON.stringify({ items: [item] })), /testsPassed: expected true or false/);
   assert.match(bad(JSON.stringify({ items: [item], testsPassed: "yes" })), /testsPassed/);
-  assert.match(bad(JSON.stringify({ items: [item], testsPassed: true }), 2), /expected 2.*got 1/);
   assert.match(
-    bad(JSON.stringify({ items: [{ ...item, pass: "true" }], testsPassed: true })),
+    bad(JSON.stringify({ items: [item], testsPassed: true, cases: [] }), 2),
+    /expected 2.*got 1/,
+  );
+  assert.match(
+    bad(JSON.stringify({ items: [{ ...item, pass: "true" }], testsPassed: true, cases: [] })),
     /items\[0\]\.pass/,
   );
   assert.match(
-    bad(JSON.stringify({ items: [{ ...item, evidence: " " }], testsPassed: true })),
+    bad(JSON.stringify({ items: [{ ...item, evidence: " " }], testsPassed: true, cases: [] })),
     /items\[0\]\.evidence: expected a non-empty string/,
   );
   assert.match(
-    bad(JSON.stringify({ items: [{ ...item, note: "x" }], testsPassed: true })),
+    bad(JSON.stringify({ items: [{ ...item, note: "x" }], testsPassed: true, cases: [] })),
     /items\[0\]: unknown key "note"/,
+  );
+  assert.match(
+    bad(JSON.stringify({ items: [item], testsPassed: true })),
+    /cases: expected an array/,
+  );
+  assert.match(
+    bad(
+      JSON.stringify({
+        items: [item],
+        testsPassed: true,
+        cases: [{ id: "C1", item: "a", repro: "r", expected: "e", actual: "x", note: "n" }],
+      }),
+    ),
+    /cases\[0\]: unknown key "note"/,
+  );
+  assert.match(
+    bad(
+      JSON.stringify({
+        items: [item],
+        testsPassed: true,
+        cases: [{ id: "C2", item: "a", repro: "r", expected: "e", actual: "x" }],
+      }),
+    ),
+    /cases\[0\]\.id: expected "C1"/,
   );
 });
 
@@ -1255,7 +1505,7 @@ test("parseQaVerdict repairs a stray backslash before a backtick or dollar (MET-
   // b is one real backslash; a bare backtick would be invalid JSON after it.
   const b = "\\";
   const item = (evidence: string) =>
-    `{"items":[{"text":"a","pass":true,"evidence":"${evidence}"}],"testsPassed":true}`;
+    `{"items":[{"text":"a","pass":true,"evidence":"${evidence}"}],"testsPassed":true,"cases":[]}`;
 
   const repaired = parseQaVerdict(item(`ran ${b}\`pnpm test${b}\` and ${b}$HOME`), 1);
   assert.equal(repaired.ok, true);
@@ -1308,6 +1558,28 @@ test("runQaTests runs setup then tests, stopping at the first failure", async ()
   const passed = await runQaTests({ setup_command: " ", test_command: "t" }, "/x", 1000, run);
   assert.deepEqual(seen, ["t"]);
   assert.equal(passed.passed, true);
+});
+
+test("runQaTests starts no step once the shared deadline is spent (D-014)", async () => {
+  let clock = 0;
+  const started: string[] = [];
+  const run: CommandRunner = async (command) => {
+    started.push(command);
+    clock += 11; // the setup command consumes the whole 10 ms budget
+    return { exitCode: 0, timedOut: false, output: "" };
+  };
+  const result = await runQaTests(
+    { setup_command: "setup", test_command: "test" },
+    "/x",
+    10,
+    run,
+    () => clock,
+  );
+  assert.deepEqual(started, ["setup"], "the test command does not start after the deadline");
+  assert.equal(result.passed, false);
+  assert.equal(result.command, "test");
+  assert.equal(result.timedOut, true);
+  assert.equal(result.exitCode, null);
 });
 
 test("runVerifyChecks shares one deadline and starts no command once it is spent (D-014)", async () => {
@@ -1455,7 +1727,19 @@ test("a failed prepare is a setup error: no agent runs, nothing is posted", asyn
 
 test("a round whose budget ran out before the agent is a setup error", async () => {
   const h = harness();
-  const result = await runQa({ ...h.input, budgetMs: 0 }, h.deps);
+  let clock = 0;
+  // The tests pass, but they consume the round's whole budget before the agent can start.
+  const result = await runQa(
+    { ...h.input, budgetMs: 10 },
+    {
+      ...h.deps,
+      now: () => clock,
+      runCommand: async () => {
+        clock += 11;
+        return { exitCode: 0, timedOut: false, output: "" };
+      },
+    },
+  );
   assert.equal(result.outcome, "error");
   assert.equal(result.reviews[0]?.setup, true);
   assert.match(result.reviews[0]?.error ?? "", /budget ran out before the agent ran/);

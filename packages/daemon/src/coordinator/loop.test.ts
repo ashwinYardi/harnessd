@@ -2165,11 +2165,32 @@ function qaFixture(t: ReturnType<typeof setup>, partState = "In Review") {
   return { parent, backend, qa };
 }
 
-const verdict = (...pass: boolean[]) =>
-  JSON.stringify({
+const verdict = (...pass: boolean[]) => {
+  let n = 0;
+  const cases: Array<{
+    id: string;
+    item: string;
+    repro: string;
+    expected: string;
+    actual: string;
+  }> = [];
+  pass.forEach((p, i) => {
+    if (p) return;
+    n += 1;
+    cases.push({
+      id: `C${n}`,
+      item: `item ${i + 1}`,
+      repro: "pnpm test",
+      expected: "it passes",
+      actual: `evidence ${i + 1}`,
+    });
+  });
+  return JSON.stringify({
     items: pass.map((p, i) => ({ text: `item ${i + 1}`, pass: p, evidence: `evidence ${i + 1}` })),
     testsPassed: true,
+    cases,
   });
+};
 
 test("QA reviews one part as soon as it reaches In Review, at its PR head", async () => {
   const t = setup();
