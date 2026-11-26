@@ -1062,26 +1062,125 @@ test("an equal sortOrder falls back to priority", async () => {
   assert.equal(older.state, "Ready");
 });
 
-test("a parent in Needs input frees its max_parents slot on the next tick", async () => {
+test("a split parent in Needs input holds its slot: no grill, no part and one wait line (D-057)", async () => {
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: {
+        limits: { max_concurrent: 3, max_parents: 1, token_budget: { S: 100, M: 100 } },
+      },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const linear = new FakeLinear();
+  const a = linear.add({ title: "A", labels: ["ui"], description: BODY("S") });
+  const b = linear.add({ title: "B", labels: ["ui"], description: BODY("S") });
   const adapter = fakeAdapter({
     plans: {
-      "MET-100": plan(["backend", "S", "API"]),
-      "MET-101": plan(["backend", "S", "API too"]),
+      [a.key]: plan(["backend", "S", "A API"]),
+      [b.key]: plan(["backend", "S", "B API"]),
     },
   });
-  const t = setup({ adapter });
-  const first = t.linear.add({ title: "First", labels: ["ui"], description: BODY("S") });
-  const second = t.linear.add({ title: "Second", labels: ["ui"], description: BODY("S") });
-  await t.loop.tick();
-  assert.deepEqual(grilled(t), [first.key]);
+  // A is already at its token budget: the first part dispatch parks A after its split (D-043).
+  const store = memoryStore({
+    ...emptyLoopState(),
+    usage: { [a.id]: { input: 100, cached: 0, output: 0 } },
+  });
+  const t = setup({ config, linear, adapter, store });
 
-  first.state = "Needs input";
+  await t.loop.tick();
+  const part = t.linear.children(a).find((child) => roleOf(child) === "backend");
+  const qa = t.linear.children(a).find((child) => roleOf(child) === "qa");
+  assert.ok(part);
+  assert.ok(qa);
+  assert.equal(a.state, "Needs input", "the token budget parked A after its split");
+  assert.deepEqual(grilled(t), [a.key]);
+  assert.deepEqual(t.loop.snapshot().runs, [], "the part did not start");
+  const runsAfterEscalation = t.adapter.runs().length;
+
+  const waitLine = `${b.key} waits, ${a.key} needs input`;
+  const waitLines = () => t.logs.filter((line) => line === waitLine);
+  for (let i = 0; i < 3; i++) await t.loop.tick();
+
+  assert.deepEqual(grilled(t), [a.key], "B never grills while A holds the slot");
+  assert.equal(b.state, "Ready", "B stays Ready with no split");
+  assert.deepEqual(t.linear.children(b), []);
+  assert.equal(waitLines().length, 1, "B logs the Needs-input wait once");
+  assert.equal(part.state, "Ready", "A's part keeps its place, with no move");
+  assert.equal(qa.state, "Ready", "its QA keeps its place too");
+  assert.equal(
+    t.linear.comments.filter((c) => c.key === part.key).length,
+    0,
+    "no comment on the waiting part",
+  );
+  assert.equal(t.adapter.runs().length, runsAfterEscalation, "no part or QA run starts");
+
+  // The owner moves A on. Its part resumes, and B still waits because A holds the only slot.
+  a.state = "In Progress";
+  const flightLine = `${b.key} waits, ${a.key} is in flight`;
+  const flightLinesBefore = t.logs.filter((line) => line === flightLine).length;
+  const resumed = await t.loop.tick();
+  assert.deepEqual(resumed.dispatched, [part.key]);
+  assert.equal(part.state, "In Progress");
+  assert.deepEqual(grilled(t), [a.key], "A still holds the slot");
+  assert.equal(
+    t.logs.filter((line) => line === flightLine).length,
+    flightLinesBefore + 1,
+    "the wait line logs once more when the holder leaves Needs input",
+  );
+});
+
+test("a split parent in Needs input releases its slot once it is Done or Canceled", async () => {
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 3, max_parents: 1 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const linear = new FakeLinear();
+  const parked = linear.add({ title: "Parked", state: "Needs input" });
+  const done = linear.add({ title: "Done parent", state: "Done" });
+  const canceled = linear.add({ title: "Canceled parent", state: "Canceled" });
+  const next = linear.add({ title: "Next", labels: ["ui"], description: BODY("S") });
+  const state = emptyLoopState();
+  state.splits = {
+    [parked.id]: { key: parked.key, parts: [], qa: "qa-1", at: "2026-11-24T10:00:00.000Z" },
+    [done.id]: { key: done.key, parts: [], qa: "qa-2", at: "2026-11-23T10:00:00.000Z" },
+    [canceled.id]: { key: canceled.key, parts: [], qa: "qa-3", at: "2026-11-22T10:00:00.000Z" },
+  };
+  const store = memoryStore(state);
+  const adapter = fakeAdapter({ plans: { [next.key]: plan(["backend", "S", "Next API"]) } });
+  const t = setup({ config, linear, adapter, store });
+
+  await t.loop.tick();
+
+  assert.deepEqual(grilled(t), [], "the Needs-input parent holds the only slot");
+  assert.equal(next.state, "Ready");
+  assert.ok(
+    t.logs.includes(`${next.key} waits, ${parked.key} needs input`),
+    "the wait line names the parked holder",
+  );
+  assert.equal(store.state.splits?.[done.id], undefined, "a Done parent holds no slot");
+  assert.equal(store.state.splits?.[canceled.id], undefined, "a Canceled parent holds no slot");
+
+  parked.state = "Done";
   const report = await t.loop.tick();
 
-  assert.ok(t.memory.state.splits?.[first.id], "the parked parent keeps its record");
-  assert.deepEqual(report.split, [second.key]);
-  assert.deepEqual(grilled(t), [first.key, second.key], "the free slot goes to the next parent");
-  assert.equal(second.state, "In Progress");
+  assert.equal(store.state.splits?.[parked.id], undefined, "its record is dropped at Done");
+  assert.deepEqual(report.split, [next.key]);
+  assert.deepEqual(grilled(t), [next.key], "the slot goes to the next parent");
+  assert.equal(next.state, "In Progress");
 });
 
 test("a waiting parent logs one wait line, and again only when the in-flight set changes", async () => {
@@ -1132,6 +1231,54 @@ test("a waiting parent logs one wait line, and again only when the in-flight set
   assert.deepEqual(waitLines().slice(2), [
     `${fourth.key} waits, ${second.key}, ${third.key} are in flight`,
   ]);
+});
+
+test("the wait line names Needs-input holders, joins two, and mixes them with in flight", async () => {
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 3, max_parents: 2 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const adapter = fakeAdapter({
+    plans: {
+      "MET-100": plan(["backend", "S", "API"]),
+      "MET-101": plan(["backend", "S", "API too"]),
+    },
+  });
+  const t = setup({ config, adapter });
+  const first = t.linear.add({ title: "First", labels: ["ui"], description: BODY("S") });
+  const second = t.linear.add({ title: "Second", labels: ["ui"], description: BODY("S") });
+  const third = t.linear.add({ title: "Third", labels: ["ui"], description: BODY("S") });
+  // Only the waiting parent's lines; its split also leaves parts that log their own waits.
+  const waitLines = () => t.logs.filter((line) => line.startsWith(`${third.key} waits, `));
+
+  await t.loop.tick();
+  assert.deepEqual(waitLines(), [`${third.key} waits, ${first.key}, ${second.key} are in flight`]);
+
+  // One holder parks: the same set now reads differently, so it logs once more.
+  second.state = "Needs input";
+  await t.loop.tick();
+  assert.deepEqual(waitLines().slice(1), [
+    `${third.key} waits, ${second.key} needs input, ${first.key} is in flight`,
+  ]);
+  await t.loop.tick();
+  assert.equal(waitLines().length, 2, "a tick with the same set logs nothing");
+
+  // Two holders park: the keys join and the line says "need input".
+  first.state = "Needs input";
+  await t.loop.tick();
+  assert.deepEqual(waitLines().slice(2), [
+    `${third.key} waits, ${first.key}, ${second.key} need input`,
+  ]);
+  await t.loop.tick();
+  assert.equal(waitLines().length, 3, "no line per tick");
 });
 
 test("only the oldest split records are admitted; a part of the others logs the wait line", async () => {

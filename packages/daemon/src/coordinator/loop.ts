@@ -1519,20 +1519,23 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const max = config.limits.max_concurrent;
     if (pausedNow || s.inFlight.length >= max) return;
     const candidates = await linear.listReadyContaining(team, PART_MARKER_PREFIX);
-    const { ids: admitted, keys: inFlightKeys } = admittedParents(await inFlightParents(s));
+    const { ids: admitted, parents: holders } = admittedParents(await inFlightParents(s));
+    const needsInput = new Set(holders.filter((p) => p.needsInput).map((p) => p.id));
     for (const issue of candidates) {
       if (pausedNow || s.inFlight.length >= max) break;
       if (s.inFlight.some((e) => e.issueId === issue.id)) continue;
       const marker = readPartMarker(issue.description);
       if (marker === undefined) continue;
       // Only an admitted in-flight parent's parts and QA start (D-050). A parent without a
-      // split record was not split by the loop, so its parts keep running as before.
+      // split record was not split by the loop, so its parts keep running as before. A part
+      // or QA of an admitted parent in Needs input keeps its place with no move and no
+      // comment, and logs the wait line (D-057).
       if (
         issue.parentId !== undefined &&
         s.splits?.[issue.parentId] !== undefined &&
-        !admitted.has(issue.parentId)
+        (!admitted.has(issue.parentId) || needsInput.has(issue.parentId))
       ) {
-        noteWait(issue.id, issue.key, inFlightKeys, waiting);
+        noteWait(issue.id, issue.key, holders, waiting);
         continue;
       }
       let qa: QaContext | undefined;
@@ -1759,10 +1762,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     );
   }
 
-  /** True when a parent in this state no longer holds a max_parents slot (MET-174). */
+  /** True when a parent in this state no longer holds a max_parents slot (MET-174, MET-209). */
   function endsParentSlot(state: string): boolean {
     const current = state.toLowerCase();
-    return current === "done" || current === "needs input" || isCanceledState(state);
+    return current === "done" || isCanceledState(state);
   }
 
   /** A parent in flight, with the split record time that orders the queue (D-050). */
@@ -1770,11 +1773,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     id: string;
     key: string;
     at: string;
+    /** True while Linear shows it in Needs input: it holds its slot but nothing of it starts. */
+    needsInput: boolean;
   }
 
   /**
-   * Parents in flight: those with a split record whose Linear state is not Done, Canceled or
-   * Needs input (MET-174, D-050). A Ready parent with a record counts. repairSplits drops a
+   * Parents in flight: those with a split record whose Linear state is not Done or Canceled
+   * (MET-174, MET-209, D-050, D-057). A Ready parent with a record counts, and so does one
+   * in Needs input: it keeps its slot until the owner moves it on. repairSplits drops a
    * record at Done or Canceled, and splitReady drops one whose recorded parts were all
    * canceled. Oldest split record first, so the earliest parent holds the first slot.
    */
@@ -1785,7 +1791,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     if (s?.splits === undefined) return [];
     const out: InFlightParent[] = [];
     for (const [id, record] of Object.entries(s.splits)) {
-      const parent = { id, key: record.key, at: record.at };
+      const parent = { id, key: record.key, at: record.at, needsInput: false };
       // A Ready parent is in flight while its record stands; splitReady dropped an all-canceled
       // record before this read.
       if (ready?.has(id) === true) {
@@ -1800,40 +1806,65 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         out.push(parent);
         continue;
       }
-      if (!endsParentSlot(issue.state)) out.push(parent);
+      if (!endsParentSlot(issue.state)) {
+        parent.needsInput = issue.state.toLowerCase() === "needs input";
+        out.push(parent);
+      }
     }
     return out.sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.key.localeCompare(b.key));
   }
 
   /** The parents admitted now: the first max_parents in flight, oldest split record first. */
-  function admittedParents(inFlight: InFlightParent[]): { ids: Set<string>; keys: string[] } {
-    const admitted = inFlight.slice(0, config.limits.max_parents);
-    return { ids: new Set(admitted.map((p) => p.id)), keys: admitted.map((p) => p.key) };
+  function admittedParents(inFlight: InFlightParent[]): {
+    ids: Set<string>;
+    parents: InFlightParent[];
+  } {
+    const parents = inFlight.slice(0, config.limits.max_parents);
+    return { ids: new Set(parents.map((p) => p.id)), parents };
   }
 
   /**
-   * The in-flight keys a waiting parent or part saw last, so it logs once per wait and again
-   * only when that set changes (D-050). An entry is dropped at the end of a tick where the
-   * issue no longer waits.
+   * The in-flight holders a waiting parent or part saw last, so it logs once per wait and
+   * again only when that set changes (D-050). The key includes each holder's Needs-input
+   * flag, so a move into Needs input logs once more (D-057). An entry is dropped at the end
+   * of a tick where the issue no longer waits.
    */
-  const waited = new Map<string, Set<string>>();
+  const waited = new Map<string, string>();
 
-  /** Logs `<key> waits, <keys in flight>` once per wait and once per change of the set. */
-  function noteWait(id: string, key: string, inFlight: string[], seen: Set<string>): void {
+  /** The holders as a dedup key, with each holder's Needs-input flag (D-057). */
+  function holdersKey(holders: readonly InFlightParent[]): string {
+    return holders
+      .map((holder) => `${holder.key}:${holder.needsInput ? "needs input" : "in flight"}`)
+      .sort()
+      .join("|");
+  }
+
+  /** `<holders in flight>`: Needs-input holders named as such, mixed with the rest (D-057). */
+  function waitText(holders: readonly InFlightParent[]): string {
+    if (holders.length === 0) return "no parent is in flight";
+    const parked = holders.filter((holder) => holder.needsInput);
+    const flying = holders.filter((holder) => !holder.needsInput);
+    const clauses: string[] = [];
+    if (parked.length === 1) clauses.push(`${parked[0]?.key} needs input`);
+    else if (parked.length > 1) clauses.push(`${parked.map((h) => h.key).join(", ")} need input`);
+    if (flying.length === 1) clauses.push(`${flying[0]?.key} is in flight`);
+    else if (flying.length > 1)
+      clauses.push(`${flying.map((h) => h.key).join(", ")} are in flight`);
+    return clauses.join(", ");
+  }
+
+  /** Logs `<key> waits, <holders>` once per wait and once per change of the set. */
+  function noteWait(
+    id: string,
+    key: string,
+    holders: readonly InFlightParent[],
+    seen: Set<string>,
+  ): void {
     seen.add(id);
-    const next = new Set(inFlight);
-    const prev = waited.get(id);
-    if (prev !== undefined && prev.size === next.size && [...next].every((k) => prev.has(k))) {
-      return;
-    }
+    const next = holdersKey(holders);
+    if (waited.get(id) === next) return;
     waited.set(id, next);
-    const inFlightText =
-      inFlight.length === 0
-        ? "no parent is in flight"
-        : inFlight.length === 1
-          ? `${inFlight[0]} is in flight`
-          : `${inFlight.join(", ")} are in flight`;
-    log(`${key} waits, ${inFlightText}`);
+    log(`${key} waits, ${waitText(holders)}`);
   }
 
   /** Forgets the waits that ended since the last tick. */
@@ -1914,7 +1945,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       // The line names the parents that hold the slots, recomputed so a grill started in this
       // tick is in the set. A parent left waiting logs again only when that set changes (D-050).
       const now = admittedParents(await inFlightParents(state, ready));
-      for (const item of waitingParents) noteWait(item.id, item.key, now.keys, waiting);
+      for (const item of waitingParents) noteWait(item.id, item.key, now.parents, waiting);
     }
   }
 
