@@ -159,6 +159,41 @@ test("a PR closed without merging is left to a human: one ping, the approval dro
   assert.deepEqual(state.merges, []);
 });
 
+test("a merge-gate send-back writes no cases; an escalation clears the saved cases (D-056)", async () => {
+  const state = emptyLoopState();
+  const saved = [
+    {
+      id: "C1",
+      item: "Has tests",
+      repro: "pnpm test",
+      expected: "it passes",
+      actual: "not ok 4",
+    },
+  ];
+  state.reviewedHeads = {
+    part: { sha: "sha7", verdict: "changes_requested", cases: saved },
+  };
+  state.qaFeedback.part = { failing: ["Has tests: no test"], cases: saved };
+  const failed = {
+    checks: [{ name: "t", state: "fail" as const, detail: "FAILURE" }],
+  };
+
+  const first = deps(failed, state);
+  const report = await advanceMerges(state, first.d);
+  assert.deepEqual(report.sentBack, ["MET-2"]);
+  assert.deepEqual(state.qaFeedback.part, {
+    prUrl: "https://github.test/pull/7",
+    failing: ["CI: `t` failure"],
+  });
+  assert.equal(state.reviewedHeads.part?.cases, undefined, "the next QA is a full round");
+
+  const second = deps(failed, state);
+  assert.deepEqual((await advanceMerges(state, second.d)).sentBack, []);
+  assert.equal(second.moves.find(([id]) => id === "parent")?.[1], "Needs input");
+  assert.equal(state.qaFeedback.part, undefined);
+  assert.equal(state.reviewedHeads.part?.cases, undefined, "the saved cases are cleared");
+});
+
 test("a file list shorter than the PR's changed files is never trusted", async () => {
   const state = emptyLoopState();
   const { d, merged, pings } = deps({ changedFiles: 3001 }, state);

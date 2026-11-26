@@ -2354,6 +2354,135 @@ test("a failed QA sends the part back with the review; the second failure escala
   assert.equal(t.pings.length, 1);
 });
 
+test("a re-QA approves on the saved cases, writes no cases and goes to merges (D-056)", async () => {
+  const t = setup();
+  const { backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+  t.memory.state.reviewedHeads = {
+    [backend.id]: {
+      sha: "sha6",
+      verdict: "changes_requested",
+      cases: [
+        { id: "C1", item: "item 1", repro: "pnpm test", expected: "it passes", actual: "not ok 3" },
+      ],
+    },
+  };
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  assert.match(t.adapter.runs().at(-1)?.prompt ?? "", /## Saved cases \(1\)/);
+  assert.doesNotMatch(t.adapter.runs().at(-1)?.prompt ?? "", /## Diff/);
+  t.adapter.pending.at(-1)?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({
+      cases: [{ id: "C1", pass: true, evidence: "pnpm test: ok 3" }],
+      verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+    }),
+  );
+  await t.loop.idle();
+
+  assert.equal(t.gh.reviews.at(-1)?.event, "APPROVE");
+  assert.match(
+    t.gh.reviews.at(-1)?.body ?? "",
+    /approved\. Every saved case passes.*\n\n- \[x\] C1 \(item 1\): pass: pnpm test: ok 3/s,
+  );
+  assert.deepEqual(t.memory.state.reviewedHeads?.[backend.id], {
+    sha: "sha7",
+    verdict: "approved",
+  });
+  assert.deepEqual(
+    t.memory.state.merges.map((m) => [m.qaKey, m.prs.map((p) => [p.number, p.sha])]),
+    [[qa.key, [[7, "sha7"]]]],
+  );
+  assert.deepEqual(t.memory.state.qaFailures, {});
+});
+
+test("a re-QA send-back keeps only the failing case; the second failed re-QA clears the cases (D-056)", async () => {
+  const t = setup();
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+  const saved = [
+    {
+      id: "C1",
+      item: "item 1",
+      repro: "pnpm test -- one",
+      expected: "one passes",
+      actual: "not ok 1",
+    },
+    {
+      id: "C2",
+      item: "item 2",
+      repro: "pnpm test -- two",
+      expected: "two passes",
+      actual: "not ok 2",
+    },
+  ];
+  t.memory.state.reviewedHeads = {
+    [backend.id]: { sha: "sha6", verdict: "changes_requested", cases: saved },
+  };
+
+  // Re-QA 1: C1 passes, C2 still fails. Only C2 goes back, with its new actual.
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending.at(-1)?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({
+      cases: [
+        { id: "C1", pass: true, evidence: "pnpm test -- one: ok 1" },
+        { id: "C2", pass: false, evidence: "pnpm test -- two: still not ok 2" },
+      ],
+      verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+    }),
+  );
+  await t.loop.idle();
+  const stillFailing = {
+    id: "C2",
+    item: "item 2",
+    repro: "pnpm test -- two",
+    expected: "two passes",
+    actual: "pnpm test -- two: still not ok 2",
+  };
+  assert.match(t.gh.reviews.at(-1)?.body ?? "", /- \[ \] C2 \(item 2\): fail: /);
+  assert.equal(backend.state, "Ready");
+  assert.equal(t.memory.state.qaFailures[parent.id], 1);
+  assert.deepEqual(t.memory.state.reviewedHeads?.[backend.id], {
+    sha: "sha7",
+    verdict: "changes_requested",
+    cases: [stillFailing],
+  });
+  assert.deepEqual(t.memory.state.qaFeedback[backend.id]?.cases, [stillFailing]);
+
+  // The builder fixes C2 and pushes a new head; QA runs only in review again.
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+  assert.deepEqual(t.memory.state.qaFeedback, {});
+  const reworked = t.gh.prs[backend.key];
+  assert.ok(reworked);
+  reworked.headRefOid = "sha7-fixed";
+
+  // Re-QA 2 still fails: the second failure sends the parent to Needs input and clears the cases.
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending.at(-1)?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({
+      cases: [{ id: "C2", pass: false, evidence: "pnpm test -- two: still not ok 2" }],
+      verify: { pass: true, evidence: "`pnpm test` exited with code 0" },
+    }),
+  );
+  await t.loop.idle();
+  assert.equal(qa.state, "Needs input");
+  assert.equal(parent.state, "Needs input");
+  assert.equal(backend.state, "In Review", "not sent back a second time");
+  assert.deepEqual(t.memory.state.qaFailures, {});
+  assert.equal(t.memory.state.reviewedHeads?.[backend.id]?.cases, undefined);
+  assert.deepEqual(t.memory.state.qaFeedback, {});
+});
+
 // --- a resumed send-back (MET-156) -------------------------------------------
 
 /** A parent with one backend part in Ready, its QA part and a fresh empty state. */
