@@ -20,7 +20,9 @@ import { formatNotice, type Notifier } from "./notifier.ts";
 import {
   type CommandResult,
   type CommandRunner,
+  decideReview,
   MAX_TEST_TAIL,
+  type ParsedQaVerdict,
   type PrReview,
   parseQaVerdict,
   type QaRunInput,
@@ -515,11 +517,11 @@ test("a QA: tests part approves from its Verify commands with no QA agent (D-053
   assert.equal(h.reviews[0]?.event, "APPROVE");
   const body = h.reviews[0]?.body ?? "";
   assert.ok(body.startsWith("not run live: QA from Verify commands\n"), body);
-  assert.match(body, /- \[x\] Avatars are served: every Verify command exited 0/);
-  assert.match(
-    body,
-    /- \[x\] Verify: `pnpm check` exited with code 0; `pnpm lint` exited with code 0/,
-  );
+  const evidence =
+    "`pnpm check` exited with code 0 (expected: avatars pass); " +
+    "`pnpm lint` exited with code 0 (expected: no warnings)";
+  assert.ok(body.includes(`- [x] Avatars are served: ${evidence}`), body);
+  assert.ok(body.includes(`- [x] Verify: ${evidence}`), body);
   assert.deepEqual(result.tokens, emptyTokenUsage(), "no usage is recorded");
   assert.equal(result.turns, undefined, "no turn cap applies");
   assert.deepEqual(h.logs, ["MET-53: QA from Verify commands on MET-51, 2 commands"]);
@@ -589,6 +591,22 @@ test("a QA: agent part and a body with no QA line still run the QA agent (D-053)
       ]);
     }
   }
+});
+
+test("agent QA evidence stays one line, so a newline inside backticks becomes a space (D-053)", () => {
+  const verdict: ParsedQaVerdict = {
+    ok: true,
+    verdict: {
+      testsPassed: true,
+      items: [{ text: "Avatars", pass: true, evidence: "src/a.ts:1 and `one\ntwo`" }],
+    },
+  };
+  const decision = decideReview(
+    ["Avatars"],
+    { passed: true, command: "pnpm test", exitCode: 0, timedOut: false, output: "" },
+    verdict,
+  );
+  assert.deepEqual(decision.passing, ["Avatars: src/a.ts:1 and `one two`"]);
 });
 
 test("the QA agent run gets the role turn cap", async () => {

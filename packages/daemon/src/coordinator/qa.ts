@@ -56,30 +56,16 @@ function oneLine(text: string): string {
 }
 
 /**
- * Flattens evidence to one line, but leaves the text inside `backticks` alone: a Verify
- * command with two spaces in a quoted string keeps them in the review (MET-200).
+ * Flattens evidence to one line. Whitespace outside `backticks` collapses to one space, and
+ * a newline or tab inside them becomes a space; ordinary spaces inside them are kept, so a
+ * Verify command with two spaces in a quoted string survives (MET-200).
  */
 function evidenceLine(text: string): string {
-  let out = "";
-  let inCode = false;
-  let space = false;
-  for (const ch of text) {
-    if (ch === "`") {
-      if (space && out !== "") out += " ";
-      space = false;
-      inCode = !inCode;
-      out += ch;
-      continue;
-    }
-    if (!inCode && /\s/.test(ch)) {
-      space = true;
-      continue;
-    }
-    if (space && out !== "") out += " ";
-    space = false;
-    out += ch;
-  }
-  return out;
+  return text
+    .split("`")
+    .map((part, i) => (i % 2 === 0 ? part.replace(/\s+/g, " ") : part.replace(/[\r\n\t]+/g, " ")))
+    .join("`")
+    .trim();
 }
 
 // --- the deterministic check: the repo's tests ----------------------------
@@ -287,6 +273,17 @@ function verifyEvidence(result: CommandResult): string {
   if (result.error !== undefined) return `could not run (${oneLine(result.error)})`;
   if (result.timedOut) return "timed out";
   return `exited with code ${result.exitCode ?? "null (killed)"}`;
+}
+
+/**
+ * One Verify command's evidence: the command and its exit code, plus what its output should
+ * show when it passed. A failing command keeps the exact `Verify: <cmd> exited with code <n>`
+ * send-back line, so its expected text is left out (D-046, D-053).
+ */
+function verifyRunEvidence(entry: VerifyRun): string {
+  const line = `\`${entry.check.run}\` ${verifyEvidence(entry.result)}`;
+  if (!commandPassed(entry.result) || entry.check.expect === "") return line;
+  return `${line} (expected: ${entry.check.expect})`;
 }
 
 function describeTests(tests: TestRun): string {
@@ -749,9 +746,10 @@ export function decideReview(
 }
 
 /**
- * The verdict for a `QA: tests` part: every Done-when item shares the Verify result, and the
- * last item, `Verify`, passes only when a command ran and every command exited 0 (D-053).
- * A repo test failure leaves Verify unrun, so both the test line and Verify fail.
+ * The verdict for a `QA: tests` part: every item carries the commands with their exit codes,
+ * and the last item, `Verify`, also carries each expected result and passes only when a
+ * command ran and every command exited 0 (D-053). A repo test failure leaves Verify unrun,
+ * so both the test line and Verify fail.
  */
 export function verdictFromVerify(
   checklist: string[],
@@ -761,21 +759,13 @@ export function verdictFromVerify(
   const failed = runs.find((entry) => !commandPassed(entry.result));
   const verifyPass = runs.length > 0 && failed === undefined;
   const evidence =
-    runs.length === 0
-      ? "not run: the repo tests failed"
-      : runs.map((entry) => `\`${entry.check.run}\` ${verifyEvidence(entry.result)}`).join("; ");
+    runs.length === 0 ? "not run: the repo tests failed" : runs.map(verifyRunEvidence).join("; ");
   return {
-    items: checklist.map((text, i) =>
-      i === checklist.length - 1
-        ? { text, pass: verifyPass, evidence }
-        : {
-            text,
-            pass: true,
-            evidence: verifyPass
-              ? "every Verify command exited 0"
-              : "the Verify commands ran; see the Verify item",
-          },
-    ),
+    items: checklist.map((text, i) => ({
+      text,
+      pass: i === checklist.length - 1 ? verifyPass : true,
+      evidence,
+    })),
     testsPassed: tests.passed,
   };
 }
