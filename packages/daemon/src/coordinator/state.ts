@@ -291,6 +291,8 @@ export interface PendingQaReview {
   done: boolean;
   /** Kept for the settle: a setup error, a not-judged reason, its evidence. */
   setup?: boolean;
+  /** True when the PR head moved while QA ran; such a verdict is never settled (MET-226). */
+  stale?: boolean;
   notJudged?: "turn_cap" | "timeout" | "stalled" | "not_json" | "no_cases";
   error?: string;
   testTail?: string;

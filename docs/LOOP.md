@@ -247,7 +247,7 @@ harnessd resume                    # "Resumed."
 ## Review
 The reviewer judges each part PR's code before QA (D-060). It runs read-only in a scratch checkout of the PR head, holds one `max_concurrent` slot, and uses the part's size budget and reviewer turn cap. Code: `packages/daemon/src/coordinator/review.ts`.
 
-A review starts when a shipped part is In Review and `reviewerHeads` in `loop.json` has no verdict for the current PR head. Only an admitted parent's parts get a review, and a parent in Needs input keeps its slot with no new review (D-050, D-057). A head equal to an approved or sent-back sha gets no new review.
+A review starts when a shipped part is In Review and `reviewerHeads` in `loop.json` has no verdict for the current PR head. Only an admitted parent's parts get a review, and a parent in Needs input keeps its slot with no new review (D-050, D-057). A head equal to an approved or sent-back sha gets no new review. A part this daemon never shipped in its state, or one of a parent it never split, still gets its review when a QA round is waiting on it: the wait starts the review, holds the QA sub-issue Ready and logs the same wait line (MET-226).
 
 The reviewer returns strict JSON:
 
@@ -278,9 +278,11 @@ After the verdict:
 ## QA
 QA reviews one PR, when that part reaches In Review (D-040, D-049). It checks the part's own "Done when" and "Verify" sections against the running product before anything merges (D-013, D-051). A part body from before D-049 has no such sections; QA then falls back to the parent's checklist. QA does not read the whole repo.
 
-Before a review, the loop reads the PR's `headRefOid` and compares it with the part's **reviewed head** in `loop.json`:
+QA starts only after the reviewer approved the same PR head (MET-226, D-060). While a part of the round waits for its review, the QA sub-issue stays Ready and the loop logs `<QA key> waits, <part key> review pending`, once per wait and again only when the pending set changes (D-050). A `QA: tests` part waits the same way (D-053). If the PR head moves while the round runs, the verdict names a head the reviewer has not seen: the round posts no review, re-queues with no QA failure, and the delta review then QA run on the new head (MET-226).
+
+Before QA, the loop reads the PR's `headRefOid` and compares it with the part's **reviewed head** in `loop.json`:
 - the same sha as an approved part: QA does not run again;
-- a new sha: QA runs once, as a full round or a re-QA;
+- a new sha: QA runs once, after the reviewer approved that head, as a full round or a re-QA;
 - an approved part whose PR head did not change stays approved and goes to the merge gate.
 
 A round is a **re-QA** when the reviewed head has verdict `changes_requested`, a non-empty `cases` array and a sha that differs from the PR's head (D-055). The cases are written to `reviewedHeads[part].cases` when QA requests changes, next to the sha and verdict, so they survive the builder's ok run that deletes `qaFeedback`. An approval writes no cases. With no saved cases (a legacy entry, a missing-PR send-back or a merge-gate send-back) or the same head, the round is a full round 1. A `QA: tests` part reruns its Verify commands as today (step 4).
@@ -304,7 +306,7 @@ For each part:
    ```
 
    Every command prints one JSON object, `{ ok, command, result | error }`, and exits 0 when ok and 1 when not. `open` sets the viewport, and the commands that follow and their screenshots keep that size. `check` evaluates the file in the page and returns its value. Screenshots go to `<HARNESSD_HOME>/qa/<run id>/<name>.png`, and the JSON returns the path relative to `HARNESSD_HOME`.
-6. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the part's own "Done when" and "Verify" sections; the part brief, including the decision IDs it names and the grill calls it follows; the CI result from `statusCheckRollup`; the harnessd test result; and, for a live app, its url and kind. It reads the part diff, those decision IDs, the part's items and Verify commands, CI and the tests. It does not read `docs/SPEC.md` or every record. It judges from the diff, the CI result, the tests and the running product, and opens a file only to check a line the diff touches. Its last message must be strict JSON, one item per part "Done when" item plus one last item, `Verify`, and one case per failing item (D-054):
+6. **Ask the QA agent.** Its prompt holds the PR diff from `gh pr diff`, cut to a fixed limit, with the file list after the cut; the part's own "Done when" and "Verify" sections; the part brief, including the decision IDs it names and the grill calls it follows; the CI result from `statusCheckRollup`; the harnessd test result; and, for a live app, its url and kind. It reads the part diff, those decision IDs, the part's items and Verify commands, CI and the tests. It does not read `docs/SPEC.md` or every record. It judges each item only against the running product and the tests. The diff and CI show what changed and where to test, not whether an item passes, and QA does not review the code: the reviewer does that (D-060). Its last message must be strict JSON, one item per part "Done when" item plus one last item, `Verify`, and one case per failing item (D-054):
 
    ```json
    {
@@ -331,7 +333,7 @@ For each part:
 
    **Re-QA result (D-056).** A re-QA approves only when every saved case passes, the `verify` result passes and `qa.test_command` exited 0. Its review lists every saved case as `C<n> (<item>): pass: <evidence>` or `fail: <evidence>`, plus a `Verify` line, and an approval sends the part to `merges` with `reviewedHeads` approved and no cases. A failing re-QA sends back only the saved cases that still fail: each keeps its `id`, `item`, `repro` and `expected` and gets the new `actual` from its evidence. A failing test or `verify` keeps or adds daemon case `T1`, and the re-QA adds no other case. It counts one QA failure, so with `qa_max_failures` 2 the second failed round moves QA and the parent to Needs input.
 
-   **Live run (MET-180).** For a running product the prompt names the kind and the url with its real port, or the command for a cli, and tells QA how to test each item: a web app with `qa-browser` at 390x844 and 1280x800, an api with curl (or another HTTP client), a cli by running its commands. Each item's evidence is the command it ran, the response it got or the screenshot path. QA reads the diff only to find what to test and judges no code style: the tests and CI guard the code, and the reviewer judges style. With no live app — no `qa.kind`, or the third app setup error on one head — the prompt keeps the diff, CI and tests wording, and the posted review body starts with `not run live: no [qa] kind in .harnessd/config.toml` or `not run live: app <step> failed` (D-013). An item the live product cannot reach is judged from the tests and the diff, with evidence `not reachable live: <reason>; <test>`, and it fails only when no test proves it.
+   **Live run (MET-180).** For a running product the prompt names the kind and the url with its real port, or the command for a cli, and tells QA how to test each item: a web app with `qa-browser` at 390x844 and 1280x800, an api with curl (or another HTTP client), a cli by running its commands. Each item's evidence is the command it ran, the response it got or the screenshot path. QA judges each item only against the running product and the tests: the diff shows what changed and where to look, not whether an item passes, and QA does not review the code (D-060). With no live app — no `qa.kind`, or the third app setup error on one head — the prompt judges each item from the tests, and the posted review body starts with `not run live: no [qa] kind in .harnessd/config.toml` or `not run live: app <step> failed` (D-013). An item the live product cannot reach is judged from the tests, with evidence `not reachable live: <reason>; <test>`, and it fails only when no test proves it.
 
 7. **Review.** harnessd approves only when every item passes and the tests pass, both when harnessd ran them and for the agent. Otherwise it requests changes and lists each failing item with its evidence. When the daemon itself fails `qa.test_command`, it builds case `T1` with item `Tests`; when a `QA: tests` part's Verify command fails, `T1` gets item `Verify`. Its repro is the command, expected is `exit 0`, and actual is the exit code or `timed out` plus the test tail. A missing PR keeps its failing line and gets no case. GitHub does not let you approve your own PR, so when every agent shares one `gh` login, the verdict is posted as a comment review.
 
@@ -436,10 +438,11 @@ A switch is recorded in `harnessSwitch` in `loop.json`. The next dispatch picks 
 ## Merge
 The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR merges only when **all** of these hold:
 - QA approved it, at the head it still has;
+- the reviewer approved it, at the same head (MET-226, D-060);
 - CI is green;
 - it touches no protected path.
 
-**Approval.** GitHub's review state cannot be the record: on a PR opened by the same `gh` login, the verdict is only a comment review. So harnessd records the approval itself. Each approved part adds one entry to `merges` in `loop.json`, with the part's PR number and the head sha QA checked out and reviewed (D-040).
+**Approval.** GitHub's review state cannot be the record: on a PR opened by the same `gh` login, the verdict is only a comment review. So harnessd records the approval itself. Each approved part adds one entry to `merges` in `loop.json`, with the part's PR number and the head sha QA checked out and reviewed (D-040). The reviewer's verdict in `reviewerHeads` must name that same sha and be `approved`; otherwise nothing merges.
 
 **Each tick**, every PR in `merges` is read again with one call, `gh pr view <n> --json number,url,state,headRefOid,mergeable,statusCheckRollup,files,changedFiles`. Then, in this order:
 
@@ -447,12 +450,13 @@ The merge gate (D-013). Code: `packages/daemon/src/coordinator/merge.ts`. A PR m
 |---|---|
 | merged on GitHub | A human merged it: the part moves to Done. |
 | closed, not merged | The parent moves to Needs input, with a comment and one notice. The approval is dropped. |
-| head is not the approved sha | Nothing merges unreviewed. QA moves back to Ready with a comment and runs again on the new head. No QA failure is counted. |
+| head is not the approved sha | Nothing merges unreviewed. QA moves back to Ready. The delta review runs on the new head, then QA runs after approval. No QA failure is counted. |
 | a changed file matches `merge.protected_paths` | Needs a human (below). |
 | GitHub listed fewer files than `changedFiles` | Needs a human: the paths could not all be checked. |
 | a check failed, or the PR conflicts with its base | Sent back (below). |
 | a check is pending, there are no checks yet, or mergeability is still UNKNOWN | Nothing happens. The next tick looks again. |
-| every check passed | `gh pr merge <n> --squash --match-head-commit <approved sha>`. The part moves to Done, with a comment and a notice to the notifier (D-015). |
+| the reviewer has not approved the PR head | Nothing happens. The next tick looks again, after the review at that head. |
+| every check passed and both approvals name the PR head | `gh pr merge <n> --squash --match-head-commit <approved sha>`. The part moves to Done, with a comment and a notice to the notifier (D-015). |
 
 - **CI green** means at least one check, and every check passed: a check run that completed with SUCCESS, NEUTRAL or SKIPPED, or a commit status of SUCCESS. When a check was re-run, only its latest run counts. Any other conclusion fails. A PR with no checks waits, because D-013 needs CI green.
 - **Needs a human.** The PR gets the `merge.label` label (default `needs-human`; the label is created when the repo lacks it). The parent moves to Needs input with one comment, and one notice is sent. The notice is recorded under `humanPings` in `loop.json`, keyed by the PR URL, before it is sent. So a PR gets one notice, across ticks, restarts and new QA rounds. harnessd never merges that PR. It keeps reading it, and once a human merges it, the part moves to Done. A merge GitHub refuses (branch protection, a draft) goes the same way, with gh's error in the comment.

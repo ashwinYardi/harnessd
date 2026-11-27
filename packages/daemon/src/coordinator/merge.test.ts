@@ -144,8 +144,70 @@ function deps(status: Partial<PullRequestStatus>, state: LoopState) {
       },
     ],
   });
+  // D-013 needs the reviewer's approval at the same head as QA's (MET-226).
+  state.reviewerHeads = {
+    part: {
+      sha: "sha7",
+      verdict: "approved",
+      findings: [],
+      at: "2026-11-19T10:00:00.000Z",
+    },
+  };
   return { d, moves, pings, merged };
 }
+
+test("the gate refuses a merge without both approvals on the same head (MET-226)", async () => {
+  const logs: string[] = [];
+  const noReviewer = emptyLoopState();
+  const first = deps({}, noReviewer);
+  delete noReviewer.reviewerHeads;
+  first.d.log = (line) => logs.push(line);
+  const firstReport = await advanceMerges(noReviewer, first.d);
+  assert.deepEqual(first.merged, [], "no merge without the reviewer");
+  assert.deepEqual(firstReport.merged, []);
+  assert.equal(noReviewer.merges.length, 1, "the approval waits for the review");
+  assert.ok(logs.includes("MET-2: PR #7 waits (reviewer approval pending)"), logs.join("\n"));
+
+  const staleReview = emptyLoopState();
+  const second = deps({}, staleReview);
+  staleReview.reviewerHeads = {
+    part: {
+      sha: "sha6",
+      verdict: "approved",
+      findings: [],
+      at: "2026-11-19T10:00:00.000Z",
+    },
+  };
+  await advanceMerges(staleReview, second.d);
+  assert.deepEqual(second.merged, [], "the reviewer approved another head");
+  assert.equal(staleReview.merges.length, 1);
+
+  const changesRequested = emptyLoopState();
+  const blocked = deps({}, changesRequested);
+  changesRequested.reviewerHeads = {
+    part: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [],
+      at: "2026-11-19T10:00:00.000Z",
+    },
+  };
+  await advanceMerges(changesRequested, blocked.d);
+  assert.deepEqual(blocked.merged, [], "a verdict on sha7 still has to be an approval");
+
+  const noQa = emptyLoopState();
+  const untested = deps({}, noQa);
+  noQa.merges = [];
+  await advanceMerges(noQa, untested.d);
+  assert.deepEqual(untested.merged, [], "reviewer approval alone cannot merge");
+
+  const both = emptyLoopState();
+  const third = deps({}, both);
+  const report = await advanceMerges(both, third.d);
+  assert.deepEqual(third.merged, [7], "both approvals name sha7, so it merges");
+  assert.deepEqual(report.merged, ["MET-2"]);
+  assert.deepEqual(both.merges, []);
+});
 
 test("a PR closed without merging is left to a human: one ping, the approval dropped", async () => {
   const state = emptyLoopState();

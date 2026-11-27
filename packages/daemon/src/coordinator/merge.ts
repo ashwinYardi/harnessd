@@ -7,7 +7,9 @@
 //   and one ping goes out, ever, per PR;
 // - CI failed or the PR conflicts: the part is sent back once, then escalated (D-014);
 // - CI is pending: try again next tick;
-// - CI is green: `gh pr merge --squash --match-head-commit <approved sha>`, part to Done.
+// - the reviewer has not approved the QA head: wait, so nothing merges without both (MET-226);
+// - CI is green and both approvals name the PR head: `gh pr merge --squash --match-head-commit
+//   <approved sha>`, part to Done.
 // Once every part is merged, the QA sub-issue and the parent move to Done.
 import type { Issue, LinkedIssue, MergeConfig } from "@harnessd/shared";
 import type { GitHub, PullRequestCheck, PullRequestStatus } from "../github/client.ts";
@@ -167,7 +169,13 @@ export interface MergeReport {
 
 type GateState = Pick<
   LoopState,
-  "merges" | "gateFailures" | "humanPings" | "qaFeedback" | "sessions" | "reviewedHeads"
+  | "merges"
+  | "gateFailures"
+  | "humanPings"
+  | "qaFeedback"
+  | "sessions"
+  | "reviewedHeads"
+  | "reviewerHeads"
 >;
 
 /** Drops a part's saved cases, so its next QA after the gate runs a full round (D-056). */
@@ -513,6 +521,12 @@ export async function advanceMerges(state: GateState, deps: MergeDeps): Promise<
               ? `${ci.pending.map((c) => c.name).join(", ")} pending`
               : "no checks yet";
         log(`${pr.partKey}: PR #${pr.number} waits (${why})`);
+        continue;
+      }
+      // D-013 needs the reviewer's approval too, at the same head as QA's (MET-226, D-060).
+      const reviewer = state.reviewerHeads?.[pr.partId];
+      if (reviewer?.verdict !== "approved" || reviewer.sha !== status.headRefOid) {
+        log(`${pr.partKey}: PR #${pr.number} waits (reviewer approval pending)`);
         continue;
       }
       if (await paused()) return false;

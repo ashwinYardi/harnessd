@@ -918,20 +918,19 @@ export function buildQaPrompt(input: QaPromptInput): string {
       "## How to verify",
       ...(app === undefined
         ? [
-            "- Read this part's brief, the decision IDs it names in the part body, the part's \"Done when\" and Verify sections, the diff, the CI result and the tests. Do not read docs/SPEC.md or every decision record.",
-            "- Judge from this diff, the CI result and the tests. Open a file only to check a line the diff touches.",
+            "- Read this part's brief, the decision IDs it names in the part body, the part's \"Done when\" and Verify sections and the tests. Do not read docs/SPEC.md or every decision record.",
+            "- Judge each item only from the test results: an item passes when a test that ran proves it. The CI result and the diff are context, not evidence.",
+            "- An item is about behaviour: name the test or command output that proves it.",
             "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
-            "- An item passes only with concrete evidence: a file and line, a test name, or command output.",
             "- The last item, `Verify`, passes only when each Verify command ran and its result is quoted.",
             "- `testsPassed` is false when any test or check you ran fails.",
           ]
         : [
             "- Read this part's brief, the decision IDs it names in the part body, the part's \"Done when\" and Verify sections, the diff, the CI result and the tests. Do not read docs/SPEC.md or every decision record.",
             `- Test each item against the running product. ${LIVE_CHECK[app.kind]} Another method is allowed when an item needs it.`,
-            "- When the running product cannot reach an item's behaviour (for example, the sandbox stays in setup because it has no secrets, so the loop never runs), judge the item from the tests and the diff. It passes when a test that ran proves it, and its evidence starts with `not reachable live: <reason>;` and then names the test.",
+            "- When the running product cannot reach an item's behaviour (for example, the sandbox stays in setup because it has no secrets, so the loop never runs), judge the item from the tests. It passes when a test that ran proves it, and its evidence starts with `not reachable live: <reason>;` and then names the test.",
             "- Such an item fails only when no test proves it, and then the case's `actual` says which test is missing. A case never asks for a secret, an account or a different sandbox.",
-            "- Read the diff only to find what to test. Do not judge code style: the tests and CI guard the code, and a separate reviewer judges style.",
-            "- Each item's evidence is the command you ran, the response you got, or the screenshot path. An item passes only with that evidence.",
+            "- The diff shows what changed and where to look. It is not evidence: each item's evidence is the command you ran, the response you got, or the screenshot path. An item passes only with that evidence.",
             "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
             "- The last item, `Verify`, passes only when each Verify command ran and its result is quoted.",
             "- `testsPassed` is false when any test or check you ran fails.",
@@ -1026,6 +1025,11 @@ export interface PrReview {
    * before the agent). Such a round is re-queued without counting a QA failure (D-041).
    */
   setup?: boolean;
+  /**
+   * True when the PR head moved while QA ran: the verdict names a head the reviewer has not
+   * seen, so it is dropped and the round re-queues with no failure (MET-226, D-040).
+   */
+  stale?: boolean;
   /**
    * Why the QA agent gave no usable verdict: turn cap, time limit, stall, a reply that is not
    * JSON even after the backslash repair, or a request-changes verdict with no failing case.
@@ -1348,6 +1352,8 @@ export interface QaRunInput {
   parent: Issue;
   /** The parts that block the QA sub-issue. Done parts are skipped. */
   parts: LinkedIssue[];
+  /** The reviewer-approved heads captured by the loop when it dispatched this round. */
+  approvedHeads?: Readonly<Record<string, string>>;
   /** The last judged head per part, so a changed head after a send-back is a re-QA (D-054). */
   reviewedHeads?: LoopState["reviewedHeads"];
   /** D-014 budget of the whole round: checkouts, tests and agent runs. */
@@ -1496,6 +1502,18 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         failing: [],
         setup: true,
         error: `could not look up the PR: ${message(error)}`,
+      };
+    }
+    if (
+      input.approvedHeads !== undefined &&
+      (pr === undefined || pr.headRefOid !== input.approvedHeads[part.id])
+    ) {
+      return {
+        part,
+        decision: "error",
+        failing: [],
+        setup: true,
+        error: "the reviewer-approved PR head changed before QA checkout",
       };
     }
     if (pr === undefined) {
@@ -1785,6 +1803,37 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         ...(notJudged === undefined ? {} : { notJudged }),
         ...(appSetup === undefined ? {} : { appSetup }),
         error: decision.error ?? "unknown",
+      };
+    }
+    // A push during the round makes this verdict stale: applying it could send the part back
+    // or spend its QA budget on a head the reviewer has not seen (MET-226, D-040). Re-read
+    // the head before anything is posted and re-queue with no counted failure.
+    let current: PullRequest | undefined;
+    try {
+      current = await deps.github.findPrForIssue(part.key);
+    } catch (error) {
+      return {
+        part,
+        pr,
+        decision: "error",
+        failing: [],
+        setup: true,
+        error: `could not re-read the PR head: ${message(error)}`,
+      };
+    }
+    if (current === undefined || current.headRefOid !== pr.headRefOid) {
+      const moved =
+        current === undefined
+          ? "closed or unreadable"
+          : `moved from ${pr.headRefOid.slice(0, 7)} to ${current.headRefOid.slice(0, 7)}`;
+      log(`${qa.key}: ${part.key} head ${moved} during QA, re-queued`);
+      return {
+        part,
+        pr,
+        decision: "error",
+        failing: [],
+        stale: true,
+        error: `the PR head ${moved} during QA`,
       };
     }
     const cases =
@@ -2105,7 +2154,7 @@ export async function settleQa(
   const notApproved = result.reviews.filter((r) => r.decision !== "approve");
   const noVerdictOnly =
     notApproved.length > 0 &&
-    notApproved.every((r) => r.setup === true || r.notJudged !== undefined) &&
+    notApproved.every((r) => r.setup === true || r.stale === true || r.notJudged !== undefined) &&
     !result.reviews.some((r) => r.decision === "request_changes");
   if (noVerdictOnly) {
     const reasons = notApproved.map((r) =>
