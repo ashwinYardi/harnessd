@@ -263,6 +263,34 @@ test("pendingQa is optional, and a malformed entry is dropped (MET-213)", () => 
   assert.deepEqual(parsed.pendingQa, { "qa-1": good }, "the well-formed record stays");
 });
 
+test("pendingQa keeps a stale verdict across a reload and drops a non-boolean stale (MET-232)", async () => {
+  const good = state.pendingQa?.["qa-1"];
+  assert.ok(good);
+  const stale = { ...good.reviews[0], decision: "error", stale: true };
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      pendingQa: {
+        "qa-1": { ...good, reviews: [stale] },
+        "qa-2": { ...good, reviews: [{ ...stale, stale: "yes" }] },
+        "qa-3": { ...good, reviews: [{ ...stale, stale: null }] },
+      },
+    }),
+  );
+  assert.equal(parsed.pendingQa?.["qa-1"]?.reviews[0]?.stale, true, "the stale flag is kept");
+  assert.deepEqual(
+    Object.keys(parsed.pendingQa ?? {}),
+    ["qa-1"],
+    "a non-boolean stale drops the record",
+  );
+
+  const store = createFileLoopStore(await repo());
+  const next = emptyLoopState();
+  next.pendingQa = parsed.pendingQa ?? {};
+  await store.save(next);
+  assert.equal((await store.load()).pendingQa?.["qa-1"]?.reviews[0]?.stale, true);
+});
+
 test("qaFeedback cases are optional, and a malformed case drops only the array (D-054)", async () => {
   const good = {
     id: "C1",
@@ -683,4 +711,42 @@ test("pendingReviewSettle is optional, keeps a valid entry and drops a malformed
   state.pendingReviewSettle = parsed.pendingReviewSettle ?? {};
   await store.save(state);
   assert.deepEqual((await store.load()).pendingReviewSettle, state.pendingReviewSettle);
+});
+
+test("pendingReviewSettle keeps a saved not-judged escalation and drops a malformed one (MET-232)", async () => {
+  const valid = {
+    partId: "part-1",
+    partKey: "MET-41",
+    parentId: "parent-1",
+    prNumber: 7,
+    prUrl: "https://github.test/pull/7",
+    head: "sha7",
+    notJudged: "timeout",
+    escalation: { reasons: ["timed out", "stalled"] },
+    done: [`comment on MET-165`],
+  };
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      pendingReviewSettle: {
+        a: valid,
+        b: { ...valid, escalation: { reasons: [] } },
+        c: { ...valid, escalation: { reasons: ["timed out", 3] } },
+        d: { ...valid, escalation: { reasons: ["timed out", ""] } },
+        e: { ...valid, escalation: "timed out" },
+        f: { ...valid, escalation: {} },
+      },
+    }),
+  );
+  assert.deepEqual(parsed.pendingReviewSettle, { a: valid }, "only the well-formed decision stays");
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.pendingReviewSettle = parsed.pendingReviewSettle ?? {};
+  await store.save(state);
+  assert.deepEqual(
+    (await store.load()).pendingReviewSettle,
+    state.pendingReviewSettle,
+    "the escalation survives a reload",
+  );
 });
