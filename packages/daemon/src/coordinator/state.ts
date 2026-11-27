@@ -13,6 +13,7 @@ import {
 } from "@harnessd/shared";
 import type { ReviewEvent } from "../github/client.ts";
 import type { WorktreeKeepReason } from "../worktrees/index.ts";
+import type { ReviewFinding } from "./review.ts";
 
 /** A sub-issue an agent is working on. */
 export interface InFlightRun {
@@ -178,6 +179,32 @@ export interface ReviewedHead {
   cases?: QaCase[];
 }
 
+/** What the reviewer decided about one part at one PR head (MET-224, D-060). */
+export interface ReviewerHead {
+  /** The PR head sha the reviewer read. */
+  sha: string;
+  verdict: "approved" | "changes_requested";
+  /** Every finding, blocking and nit, with its file and line. */
+  findings: ReviewFinding[];
+  at: string;
+}
+
+/**
+ * A review the daemon could not post (MET-224, D-058). The verdict is already in
+ * `reviewerHeads`; the loop retries only the PR comment on each tick.
+ */
+export interface PendingReview {
+  partId: string;
+  partKey: string;
+  parentId: string;
+  prNumber: number;
+  prUrl: string;
+  head: string;
+  body: string;
+  /** The posted review, once a retry succeeds. */
+  reviewUrl?: string;
+}
+
 /**
  * The usage sum before a budget escalation. When a human moves the parent back to Ready,
  * the budget counts from this point (D-040).
@@ -276,6 +303,10 @@ export interface LoopState {
   limits: Partial<Record<HarnessId, HarnessHold>>;
   /** The PR head QA last judged, per part id (D-040). Optional for old files. */
   reviewedHeads?: Record<string, ReviewedHead>;
+  /** The PR head the reviewer last judged, per part id (MET-224, D-060). */
+  reviewerHeads?: Record<string, ReviewerHead>;
+  /** Review comments a failed post left to send, per part id (MET-224, D-058). */
+  pendingReview?: Record<string, PendingReview>;
   /** Parts the ship step moved to In Review, per part id (MET-128). Optional for old files. */
   shipped?: Record<string, ShippedPart>;
   /** Tokens used per parent issue id, across grill, plan, part and QA runs (D-040). */
@@ -549,6 +580,81 @@ function reviewedHeads(value: unknown): Record<string, ReviewedHead> {
   return out;
 }
 
+function reviewFinding(value: unknown): ReviewFinding | undefined {
+  const f = value as Partial<ReviewFinding> | null;
+  if (typeof f !== "object" || f === null) return undefined;
+  if (typeof f.file !== "string" || f.file.trim() === "") return undefined;
+  if (typeof f.line !== "number" || !Number.isInteger(f.line) || f.line < 1) return undefined;
+  if (f.severity !== "blocking" && f.severity !== "nit") return undefined;
+  if (f.kind !== "code" && f.kind !== "design") return undefined;
+  if (typeof f.text !== "string" || f.text.trim() === "") return undefined;
+  return {
+    file: f.file,
+    line: f.line,
+    severity: f.severity,
+    kind: f.kind,
+    text: f.text,
+  };
+}
+
+function reviewFindings(value: unknown): ReviewFinding[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: ReviewFinding[] = [];
+  for (const raw of value) {
+    const finding = reviewFinding(raw);
+    if (finding === undefined) return undefined;
+    out.push(finding);
+  }
+  return out;
+}
+
+function reviewerHeads(value: unknown): Record<string, ReviewerHead> {
+  const out: Record<string, ReviewerHead> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const h = raw as Partial<ReviewerHead> | null;
+    if (typeof h !== "object" || h === null) continue;
+    if (typeof h.sha !== "string" || h.sha === "") continue;
+    if (h.verdict !== "approved" && h.verdict !== "changes_requested") continue;
+    const findings = reviewFindings(h.findings);
+    if (findings === undefined) continue;
+    if (typeof h.at !== "string" || h.at === "") continue;
+    out[id] = { sha: h.sha, verdict: h.verdict, findings, at: h.at };
+  }
+  return out;
+}
+
+/** A half-readable pending review is dropped: its comment cannot be replayed safely. */
+function pendingReviews(value: unknown): Record<string, PendingReview> {
+  const out: Record<string, PendingReview> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const r = raw as Partial<PendingReview> | null;
+    if (typeof r !== "object" || r === null) continue;
+    if (typeof r.partId !== "string" || r.partId === "") continue;
+    if (typeof r.partKey !== "string" || r.partKey === "") continue;
+    if (typeof r.parentId !== "string" || r.parentId === "") continue;
+    if (typeof r.prNumber !== "number" || !Number.isInteger(r.prNumber) || r.prNumber <= 0) {
+      continue;
+    }
+    if (typeof r.prUrl !== "string") continue;
+    if (typeof r.head !== "string" || r.head === "") continue;
+    if (typeof r.body !== "string") continue;
+    if (r.reviewUrl !== undefined && typeof r.reviewUrl !== "string") continue;
+    out[id] = {
+      partId: r.partId,
+      partKey: r.partKey,
+      parentId: r.parentId,
+      prNumber: r.prNumber,
+      prUrl: r.prUrl,
+      head: r.head,
+      body: r.body,
+      ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
+    };
+  }
+  return out;
+}
+
 function shippedParts(value: unknown): Record<string, ShippedPart> {
   const out: Record<string, ShippedPart> = {};
   if (typeof value !== "object" || value === null) return out;
@@ -756,6 +862,10 @@ export function parseLoopState(text: string): LoopState {
     ...(update ? { selfUpdate: update } : {}),
     limits: holds(raw.limits),
     ...(raw.reviewedHeads === undefined ? {} : { reviewedHeads: reviewedHeads(raw.reviewedHeads) }),
+    ...(raw.reviewerHeads === undefined ? {} : { reviewerHeads: reviewerHeads(raw.reviewerHeads) }),
+    ...(raw.pendingReview === undefined
+      ? {}
+      : { pendingReview: pendingReviews(raw.pendingReview) }),
     ...(raw.shipped === undefined ? {} : { shipped: shippedParts(raw.shipped) }),
     ...(raw.usage === undefined ? {} : { usage: usageSums(raw.usage) }),
     ...(raw.usageBaseline === undefined

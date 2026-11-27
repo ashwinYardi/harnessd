@@ -1,10 +1,20 @@
 // The review run: a senior-dev code review of a part's PR before QA (MET-165, MET-223).
 // The reviewer reads the diff, the parent issue and the part brief in a read-only PR-head
 // checkout, then returns a strict JSON verdict. A blocking finding sends the PR back; a nit
-// does not. See docs/LOOP.md "Review".
-import type { Issue, LinkedIssue, ResolvedAgentConfig, Task } from "@harnessd/shared";
-import type { PullRequest } from "../github/client.ts";
+// does not. See D-060.
+import {
+  emptyTokenUsage,
+  type HarnessAdapter,
+  type Issue,
+  type LinkedIssue,
+  type ResolvedAgentConfig,
+  type Task,
+  type TokenUsage,
+} from "@harnessd/shared";
+import type { GitHub, PullRequest } from "../github/client.ts";
+import type { TaskWorktrees } from "../worktrees/index.ts";
 import { agentPromptHeader, partBrief } from "./dispatch.ts";
+import { runForReply } from "./grill.ts";
 import { type AgentMemory, memorySection } from "./prompt.ts";
 import { cutDiff, MAX_PROMPT_DIFF, parseStrictJson } from "./qa.ts";
 import { extractSection } from "./split.ts";
@@ -267,4 +277,195 @@ export function buildReviewTask(input: ReviewTaskInput): Task {
   if (input.maxTurns !== undefined) task.maxTurns = input.maxTurns;
   if (input.model !== undefined) task.model = input.model;
   return task;
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export interface ReviewCommentInput {
+  part: LinkedIssue;
+  parent: Issue;
+  pr: PullRequest;
+  verdict: ReviewVerdict;
+}
+
+/**
+ * The PR comment review (MET-224, D-060): every blocking finding and nit, each with its
+ * file and line. It is always a COMMENT: the account opened the PR, so GitHub refuses an
+ * APPROVE, and the merge decision belongs to the gate (D-013).
+ */
+export function formatReviewComment(input: ReviewCommentInput): string {
+  const { part, parent, pr, verdict } = input;
+  const blocking = verdict.findings.filter((finding) => finding.severity === "blocking");
+  const nits = verdict.findings.filter((finding) => finding.severity === "nit");
+  const decision = verdict.decision === "approve" ? "approved" : "changes requested";
+  const lines = [
+    `**harnessd review** (reviewer): ${decision} at \`${pr.headRefOid}\` for ${part.key}, PR #${pr.number} (${parent.key}).`,
+  ];
+  if (blocking.length === 0) {
+    lines.push("", "No blocking finding.");
+  } else {
+    lines.push("", `Blocking (${blocking.length}):`, ...blocking.map(findingLine));
+  }
+  if (nits.length > 0) {
+    lines.push("", `Nits (${nits.length}):`, ...nits.map(findingLine));
+  }
+  return `${lines.join("\n")}\n`;
+}
+
+export interface ReviewRunInput {
+  part: LinkedIssue;
+  parent: Issue;
+  pr: PullRequest;
+  /** The part's size budget (D-014). */
+  budgetMs: number;
+  /** The reviewer turn cap for the part's size (D-045, D-047). */
+  maxTurns?: number;
+}
+
+export interface ReviewRunDeps {
+  github: Pick<GitHub, "prDiff" | "findPrByHead">;
+  worktrees: Pick<TaskWorktrees, "checkout" | "remove">;
+  adapter: HarnessAdapter;
+  agent: ResolvedAgentConfig;
+  /** Syncs the harness files into the checkout, as QA does (MET-55). */
+  prepare?: (worktree: string, runId: string) => Promise<Record<string, string>>;
+  /** Told the checkout in use ("" once removed), so a crash can clean it up. */
+  onWorktree?: (path: string) => void;
+  memory?: AgentMemory;
+  /** Aborted by a pause: the reviewer is stopped and the checkout removed (D-041). */
+  signal?: AbortSignal;
+  log?: (line: string) => void;
+}
+
+export interface ReviewRunResult {
+  pr: PullRequest;
+  verdict?: ReviewVerdict;
+  /** The comment body, set with the verdict. */
+  body?: string;
+  tokens: TokenUsage;
+  turns?: number;
+  usageUnknown?: true;
+  /** The reviewer's harness hit a usage limit: no verdict, no failure (MET-70). */
+  limited?: boolean;
+  /** `signal` stopped the run. Nothing is posted and no verdict is recorded. */
+  cancelled?: boolean;
+  error?: string;
+}
+
+/**
+ * One review of a part's PR at its head (MET-224, D-060). It checks the PR head out, puts
+ * the diff in the prompt, runs the reviewer read-only, and returns the verdict and comment for the loop to settle.
+ * The scratch checkout is never kept (D-041).
+ */
+export async function runReview(
+  input: ReviewRunInput,
+  deps: ReviewRunDeps,
+): Promise<ReviewRunResult> {
+  const { part, parent, pr } = input;
+  const { agent } = deps;
+  const log = deps.log ?? (() => {});
+  const id = `${part.key}-review-pr${pr.number}`;
+  let tokens: TokenUsage = emptyTokenUsage();
+  let turns: number | undefined;
+  let usageUnknown: true | undefined;
+  let path: string | undefined;
+  const cancelled = (): boolean => deps.signal?.aborted === true;
+  try {
+    const checkout = await deps.worktrees.checkout({
+      issueKey: part.key,
+      title: `pr ${pr.number}`,
+      branch: pr.headRefName,
+      sha: pr.headRefOid,
+    });
+    path = checkout.path;
+    deps.onWorktree?.(path);
+    if (cancelled()) return { pr, tokens, cancelled: true };
+    let env: Record<string, string> | undefined;
+    if (deps.prepare !== undefined) {
+      try {
+        env = await deps.prepare(path, id);
+      } catch (error) {
+        throw new Error(`harnessd sync into the worktree failed: ${message(error)}`);
+      }
+    }
+    const diff = await deps.github.prDiff(pr.number);
+    const current = await deps.github.findPrByHead(pr.headRefName);
+    if (current?.number !== pr.number || current.headRefOid !== pr.headRefOid) {
+      throw new Error(`PR #${pr.number} changed while reading its diff`);
+    }
+    const prompt = buildReviewPrompt({
+      agent,
+      part,
+      parent,
+      pr,
+      diff,
+      ...(deps.memory === undefined ? {} : { memory: deps.memory }),
+    });
+    const task = buildReviewTask({
+      id,
+      title: `Review ${part.key}: PR #${pr.number}`,
+      prompt,
+      budgetMs: input.budgetMs,
+      ...(input.maxTurns === undefined ? {} : { maxTurns: input.maxTurns }),
+      ...(agent.model === undefined ? {} : { model: agent.model }),
+    });
+    if (env !== undefined) task.env = env;
+    if (cancelled()) return { pr, tokens, cancelled: true };
+
+    const reply = await runForReply(deps.adapter, task, path);
+    tokens = reply.tokens;
+    turns = reply.turns;
+    usageUnknown = reply.usageUnknown;
+    if (cancelled())
+      return { pr, tokens, cancelled: true, ...(turns === undefined ? {} : { turns }) };
+    if (!reply.ok) {
+      return {
+        pr,
+        tokens,
+        ...(turns === undefined ? {} : { turns }),
+        ...(usageUnknown === undefined ? {} : { usageUnknown }),
+        ...(reply.limited ? { limited: true } : {}),
+        error: reply.error,
+      };
+    }
+    const parsed = parseReviewVerdict(reply.text);
+    if (!parsed.ok) {
+      return {
+        pr,
+        tokens,
+        ...(turns === undefined ? {} : { turns }),
+        ...(usageUnknown === undefined ? {} : { usageUnknown }),
+        error: `the review verdict was unusable: ${parsed.error}`,
+      };
+    }
+    const body = formatReviewComment({ part, parent, pr, verdict: parsed.verdict });
+    return {
+      pr,
+      verdict: parsed.verdict,
+      body,
+      tokens,
+      ...(turns === undefined ? {} : { turns }),
+      ...(usageUnknown === undefined ? {} : { usageUnknown }),
+    };
+  } catch (error) {
+    return {
+      pr,
+      tokens,
+      ...(turns === undefined ? {} : { turns }),
+      ...(usageUnknown === undefined ? {} : { usageUnknown }),
+      ...(cancelled() ? { cancelled: true } : { error: message(error) }),
+    };
+  } finally {
+    // A review PR-head checkout is never kept, even when it has local changes (D-041).
+    if (path !== undefined) {
+      try {
+        const result = await deps.worktrees.remove(path, { force: true });
+        if (result.removed) deps.onWorktree?.("");
+      } catch (error) {
+        log(`${part.key}: could not remove ${path}: ${message(error)}`);
+      }
+    }
+  }
 }
