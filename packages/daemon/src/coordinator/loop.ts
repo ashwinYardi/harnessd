@@ -1842,6 +1842,17 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         continue;
       const marker = readPartMarker(issue.description);
       if (marker === undefined) continue;
+      const parentRecord = issue.parentId === undefined ? undefined : s.splits?.[issue.parentId];
+      // A child the parent's split record does not list belongs to an older plan: leave it
+      // alone, with no move and no comment (MET-217). A parent without a record keeps D-050's
+      // "runs as before".
+      if (
+        parentRecord !== undefined &&
+        !parentRecord.parts.includes(issue.id) &&
+        parentRecord.qa !== issue.id
+      ) {
+        continue;
+      }
       // Only an admitted in-flight parent's parts and QA start (D-050). A parent without a
       // split record was not split by the loop, so its parts keep running as before. A part
       // or QA of an admitted parent in Needs input keeps its place with no move and no
@@ -1859,7 +1870,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         if (issue.parentId === undefined) continue;
         // Per-part QA: review each part that is In Review at a head QA has not approved.
         // A part whose PR head did not change since its approval is not reviewed again (D-040).
-        const children = (await linear.listChildren(issue.parentId)).filter(isWorkPart);
+        // With a split record, only the record's parts are reviewed, never an older plan's
+        // marked child (MET-217).
+        const record = s.splits?.[issue.parentId];
+        const children = (await linear.listChildren(issue.parentId)).filter((child) =>
+          record === undefined ? isWorkPart(child) : record.parts.includes(child.id),
+        );
         const parts: LinkedIssue[] = [];
         for (const part of children) {
           if (part.state.toLowerCase() !== "in review") continue;
@@ -1930,6 +1946,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     // part, even when its marker matches the new plan (MET-216).
     const before = shouldGrill ? await linear.listChildren(issue.id) : [];
     const beforeIds = new Set(before.map((child) => child.id));
+    // A parent without a record that still has marked children is grilled afresh, and the old
+    // children are left alone. One line names them before the grill (MET-217).
+    if (shouldGrill && record === undefined) {
+      const oldParts = before.filter((child) => readPartMarker(child.description) !== undefined);
+      if (oldParts.length > 0) {
+        log(`${issue.key}: old parts not reused: ${oldParts.map((child) => child.key).join(", ")}`);
+      }
+    }
     let plan: SplitPlan = { parts: [], source: "model" };
     /** The grill's calls, rendered into each new part body (D-044). */
     let grillCalls: Call[] = [];
@@ -2221,8 +2245,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const context = await loadContext();
 
     // Settle the records on Ready parents first: a stale read keeps the parent in flight, an
-    // interrupted split is finished without a grill, and every recorded part canceled frees the
-    // parent for a new grill (MET-154).
+    // interrupted split is finished without a grill, and no recorded work part left live frees
+    // the parent for a new grill (MET-154, MET-217).
     const work: Array<{ issue: Issue; grill: boolean }> = [];
     for (const issue of issues) {
       if (pausedNow) break;
@@ -2245,12 +2269,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         continue;
       }
       const recorded = children.filter((child) => record.parts.includes(child.id));
-      if (!recorded.every((child) => isCanceledState(child.state))) {
+      if (recorded.some(isLiveChild)) {
         // An interrupted split: finish it, but do not grill or plan it again.
         work.push({ issue, grill: false });
         continue;
       }
-      // The owner canceled every part and moved the parent back to Ready on purpose.
+      // No recorded work part is live: the owner canceled or finished every part and moved
+      // the parent back to Ready on purpose.
       if (state?.splits !== undefined) {
         delete state.splits[issue.id];
         await save();

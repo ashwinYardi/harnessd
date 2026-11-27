@@ -680,6 +680,10 @@ test("a Ready issue splits into backend and frontend parts plus a QA part they b
   assert.ok(t.adapter.tasks[0]?.id.startsWith("grill-"));
   assert.ok(t.adapter.tasks[1]?.id.startsWith("plan-"));
   assert.ok(t.linear.comments[0]?.body.startsWith("**Coordinator grill**"));
+  assert.ok(
+    !t.logs.some((line) => line.includes("old parts not reused")),
+    "no old-parts line when the parent had no marked children",
+  );
 
   // Serial parts: only part 1 runs; part 2 waits until part 1 is merged.
   assert.deepEqual(report.dispatched, [backend.key]);
@@ -929,6 +933,50 @@ test("a parent whose recorded parts are all canceled is grilled again", async ()
     next.parts.every((id) => !recorded.parts.includes(id)),
     "the canceled parts are gone from the record",
   );
+  assert.notEqual(next.qa, recorded.qa, "the old QA child is not reused");
+  assert.equal(parent.state, "In Progress");
+});
+
+test("a parent whose recorded parts are all Done or Canceled is grilled again and names them", async () => {
+  const adapter = fakeAdapter({
+    plans: { "MET-100": plan(["backend", "S", "API"], ["frontend", "S", "UI"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Feature", labels: ["ui"], description: BODY("M") });
+
+  await t.loop.tick();
+  const recorded = t.memory.state.splits?.[parent.id];
+  assert.ok(recorded);
+  const oldChildren = t.linear.children(parent);
+  const oldBackend = oldChildren.find((child) => roleOf(child) === "backend");
+  const oldFrontend = oldChildren.find((child) => roleOf(child) === "frontend");
+  const oldQa = oldChildren.find((child) => roleOf(child) === "qa");
+  assert.ok(oldBackend && oldFrontend && oldQa);
+  const grills = grilled(t).length;
+
+  // One recorded part is Done, the other Canceled: no recorded work part is live.
+  parent.state = "Ready";
+  oldBackend.state = "Done";
+  oldFrontend.state = "Canceled";
+
+  await t.loop.tick();
+
+  assert.equal(grilled(t).length, grills + 1, "the grill runs again");
+  const oldLine = `${parent.key}: old parts not reused: ${oldBackend.key}, ${oldFrontend.key}, ${oldQa.key}`;
+  assert.deepEqual(
+    t.logs.filter((line) => line === oldLine),
+    [oldLine],
+    "one line names the old children in Linear order, QA included",
+  );
+  const next = t.memory.state.splits?.[parent.id];
+  assert.ok(next, "the new split is recorded");
+  assert.ok(
+    next.parts.every((id) => !recorded.parts.includes(id)),
+    "the Done and Canceled parts are not reused",
+  );
+  assert.notEqual(next.qa, recorded.qa, "the old QA child is not reused");
+  assert.equal(oldBackend.state, "Done", "the old part is left alone");
+  assert.equal(oldFrontend.state, "Canceled", "the old part is left alone");
   assert.equal(parent.state, "In Progress");
 });
 
@@ -997,6 +1045,10 @@ test("a split without a record does not reuse live children of an older plan (ME
   const report = await t.loop.tick();
 
   assert.deepEqual(report.split, [parent.key], "the parent is grilled and split");
+  assert.ok(
+    t.logs.includes(`${parent.key}: old parts not reused: ${oldBackend.key}, ${oldQa.key}`),
+    "one line names the old children before the grill, QA included",
+  );
   const record = t.memory.state.splits?.[parent.id];
   assert.ok(record, "the new split is recorded");
   assert.ok(!record.parts.includes(oldBackend.id), "the old backend part is not reused");
@@ -1011,6 +1063,17 @@ test("a split without a record does not reuse live children of an older plan (ME
     ),
     "no relation touches an old child",
   );
+
+  // The owner moves the old part to Ready. The record does not list it, so dispatch leaves it
+  // alone: no move and no comment (MET-217).
+  oldBackend.state = "Ready";
+  const moves = t.linear.moves.length;
+  const comments = t.linear.comments.length;
+  const dispatched = (await t.loop.tick()).dispatched;
+  assert.ok(!dispatched.includes(oldBackend.key), "the old Ready child is not dispatched");
+  assert.equal(oldBackend.state, "Ready", "the old child keeps its place");
+  assert.equal(t.linear.moves.length, moves, "the old child is not moved");
+  assert.equal(t.linear.comments.length, comments, "the old child gets no comment");
 });
 
 test("a re-split keeps the record's first at and stays admitted ahead of a later parent", async () => {
@@ -2778,6 +2841,50 @@ test("QA reviews one part as soon as it reaches In Review, at its PR head", asyn
     t.memory.state.merges.map((m) => [m.qaKey, m.prs.map((p) => [p.number, p.sha])]),
     [[qa.key, [[7, "sha7"]]]],
     "one merge entry with one PR",
+  );
+});
+
+test("per-part QA reviews only the split record's parts, not an older marked child (MET-217)", async () => {
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const backend = linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: "In Review",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const old = linear.add({
+    title: "Old API",
+    parentId: parent.id,
+    state: "In Review",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const qa = linear.add({
+    title: "QA: P",
+    parentId: parent.id,
+    description: `${partMarker("qa")}\n**Size**: M`,
+  });
+  linear.relations.push({ blocker: backend.id, blocked: qa.id });
+  const state = emptyLoopState();
+  state.splits = {
+    [parent.id]: {
+      key: parent.key,
+      parts: [backend.id],
+      qa: qa.id,
+      at: "2026-11-23T10:00:00.000Z",
+    },
+  };
+  const t = setup({ linear, store: memoryStore(state) });
+  t.gh.open(backend.key, 7);
+  t.gh.open(old.key, 8);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+
+  assert.deepEqual(
+    t.wt.checkouts.map((c) => [c.title, c.branch]),
+    [["pr 7", backend.key.toLowerCase()]],
+    "only the record's part is checked out for review",
   );
 });
 
