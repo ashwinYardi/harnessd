@@ -44,6 +44,15 @@ export const NO_MCP_SERVERS = '{"mcpServers":{}}';
 /** D-045: about 5k tokens of one Bash result, for every Claude Code run. */
 export const BASH_MAX_OUTPUT_LENGTH = "20000";
 
+/** MET-219: a coordinator run may read, search and look up files, and nothing else. */
+export const READ_ONLY_TOOLS = "Read,Grep,Glob";
+/**
+ * MET-219: no edits, no shell and no vault writes. The daemon writes the grill's notes itself,
+ * and the memory read tools stay available.
+ */
+export const READ_ONLY_DISALLOWED_TOOLS =
+  "Edit,Write,NotebookEdit,Bash,mcp__harnessd-memory__write_note";
+
 function isolationArgs(cwd: string | undefined): string[] {
   const mcp =
     cwd === undefined || existsSync(join(cwd, ".mcp.json")) ? ".mcp.json" : NO_MCP_SERVERS;
@@ -67,8 +76,16 @@ export function claudeArgs(task: Task, options: ClaudeCodeOptions = {}, cwd?: st
   if (task.resumeSessionId !== undefined) args.push("--resume", task.resumeSessionId);
   const model = task.model ?? options.model;
   if (model) args.push("--model", model);
-  if (options.permissionMode) args.push("--permission-mode", options.permissionMode);
-  if (options.skipPermissions) args.push("--dangerously-skip-permissions");
+  // MET-219: a coordinator run gets read-only tools only. The D-031 flags above stay.
+  const readOnly = task.readOnly === true;
+  if (readOnly) {
+    args.push("--tools", READ_ONLY_TOOLS, "--disallowedTools", READ_ONLY_DISALLOWED_TOOLS);
+  }
+  // Read-only needs no approval flags; `auto` would also approve writes the tool limits deny.
+  if (options.permissionMode && !(readOnly && options.permissionMode === "auto")) {
+    args.push("--permission-mode", options.permissionMode);
+  }
+  if (options.skipPermissions && !readOnly) args.push("--dangerously-skip-permissions");
   if (task.maxTurns !== undefined) args.push("--max-turns", String(task.maxTurns));
   return args;
 }
