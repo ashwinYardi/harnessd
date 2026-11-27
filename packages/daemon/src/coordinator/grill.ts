@@ -275,6 +275,15 @@ export type RunReply =
       usageUnknown?: true;
     };
 
+/**
+ * Marks a task as a coordinator run (MET-219, D-059): read-only tools only, so it cannot
+ * edit code, commit or push. Grill, plan and any later coordinator step build their task
+ * through here, so the flag lives in one place.
+ */
+export function coordinatorTask(task: Task): Task {
+  return { ...task, readOnly: true };
+}
+
 /** Runs one task to the end and returns the final assistant text, or why there is none. */
 export async function runForReply(
   adapter: HarnessAdapter,
@@ -392,7 +401,7 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
       attempt === 1
         ? prompt
         : `${prompt}\nYour previous reply was rejected (${parsed.ok ? "" : parsed.error}). Reply again with only the JSON object.\n`;
-    const reply = await runForReply(deps.adapter, task(attempt, text), deps.cwd);
+    const reply = await runForReply(deps.adapter, coordinatorTask(task(attempt, text)), deps.cwd);
     if (reply.usageUnknown === true) unknownReplies += 1;
     else {
       knownReplies += 1;

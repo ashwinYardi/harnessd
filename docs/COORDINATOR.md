@@ -12,10 +12,21 @@ Before any work starts, the coordinator grills each picked issue itself (SPEC "A
 | `adapter` | A `HarnessAdapter` (D-002). Its id must match the coordinator's harness. |
 | `agent` | `resolveAgentConfig(merged, "coordinator")`: model and instructions. |
 | `context` | `loadGrillContext(repo, { skillsDir })`: `docs/SPEC.md`, `docs/decisions/*.md`, `GLOSSARY.md`, the workspace vault glossary and the method. |
-| `cwd` | The repo. The model may read code and `.harnessd/vault/`; it must not edit. |
+| `cwd` | The repo. The model may read code and `.harnessd/vault/`; it cannot edit: read-only tools only. |
 | `linear` | `comment(issueId, body)` and `moveTo(issueId, state)`. `LinearClient` fits. |
 | `notifier` | `Notifier { notify(notice) }`: Slack #harnessd, or `NullNotifier` without a webhook (D-021). |
 | `decisions` | `DecisionSink { write(note), term?(note), draft?(note) }`. `createFileDecisionSink(vault)` is the default. |
+
+## Read-only
+The coordinator plans and decides. It never edits code, commits or pushes. Every coordinator-role run — grill, plan and any later coordinator step — is a read-only run: it builds its `Task` through `coordinatorTask` in `packages/daemon/src/coordinator/grill.ts`, which sets `readOnly: true`. Builder and QA tasks leave it unset.
+
+| Harness | Flags of a read-only run |
+|---|---|
+| Claude Code | `--tools Read,Grep,Glob` with `--disallowedTools Edit,Write,NotebookEdit,Bash,mcp__harnessd-memory__write_note`; no `--permission-mode auto` and no `--dangerously-skip-permissions`. |
+| Codex | `--sandbox read-only` instead of `danger-full-access` (`-c sandbox_mode="read-only"` on a resume); the D-031 and D-032 isolation and approval flags stay. |
+| OpenCode | An inline `OPENCODE_CONFIG_CONTENT` that denies `edit`, `bash`, `webfetch`, `websearch`, `task`, `external_directory` and `question`. `--auto` approves only pending requests and cannot override a deny (checked on 2.3.2). |
+
+A failed QA or review round is never fixed by the coordinator: it goes back to the part's builder as a send-back, resumed when possible (D-046). At `limits.qa_max_failures` QA and the parent go to Needs input and no builder or coordinator run starts (D-014, D-056). An interactive coordinator session cannot get a harness flag from the loop, so `.harnessd/AGENTS.md` carries the same rule. The record is D-059; it amends D-031, D-032 and D-036.
 
 ## Method: grill-with-docs
 grill-with-docs (D-017) is the `grilling` and `domain-modeling` skills together. Its SKILL.md has `disable-model-invocation: true`, so a headless run cannot start it with the Skill tool. The prompt carries the method instead.

@@ -671,6 +671,7 @@ test("planIssue runs the coordinator harness and returns the model plan", async 
   assert.equal(tasks[0]?.budgetMs, 10 * 60_000);
   assert.equal(tasks[0]?.maxTurns, 50);
   assert.equal(tasks[0]?.model, "opus");
+  assert.equal(tasks[0]?.readOnly, true, "a coordinator run is read-only (D-059)");
   assert.deepEqual(plan.tokens, RUN_TOKENS);
 });
 
