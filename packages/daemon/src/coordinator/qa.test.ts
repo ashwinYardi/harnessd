@@ -18,6 +18,7 @@ import type { GitHub, PullRequest, PullRequestStatus, ReviewInput } from "../git
 import type { Worktree } from "../worktrees/index.ts";
 import { formatNotice, type Notifier } from "./notifier.ts";
 import {
+  buildQaPrompt,
   type CommandResult,
   type CommandRunner,
   decideReview,
@@ -2342,6 +2343,40 @@ test("the QA prompt names the live app's url and kind, and the app stops after t
   assert.match(prompt, /command you ran, the response you got, or the screenshot path/);
   assert.equal(stopped, 1, "the app stops after an approval");
   assert.doesNotMatch(h.reviews[0]?.body ?? "", /not run live:/, "a live review is not marked");
+});
+
+test("the live prompt judges an item the product cannot reach from its tests (MET-229)", () => {
+  const tests: TestRun = {
+    passed: true,
+    command: "pnpm test",
+    exitCode: 0,
+    timedOut: false,
+    output: "ok 12",
+  };
+  const base = {
+    agent,
+    qa,
+    parent,
+    part: backend,
+    pr: pr(7, backend.key),
+    files: [{ path: "src/avatars.ts", additions: 40, deletions: 2 }],
+    checklist: qaChecklist(parent),
+    tests,
+  };
+  const live = buildQaPrompt({
+    ...base,
+    app: { kind: "web", url: "http://127.0.0.1:4321" },
+  });
+  assert.match(live, /not reachable live: <reason>;/);
+  assert.match(live, /judge the item from the tests and the diff/);
+  assert.match(live, /fails only when no test proves it/);
+  assert.match(live, /case's `actual` says which test is missing/);
+  assert.match(live, /never asks for a secret, an account or a different sandbox/);
+
+  const noApp = buildQaPrompt(base);
+  assert.doesNotMatch(noApp, /not reachable live:/, "the no-app prompt is unchanged");
+  assert.doesNotMatch(noApp, /fails only when no test proves it/);
+  assert.doesNotMatch(noApp, /never asks for a secret/);
 });
 
 test("the live prompt tells QA how to test an api and a cli (MET-180)", async () => {
