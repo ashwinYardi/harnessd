@@ -263,6 +263,43 @@ test("a resumed send-back with no cases keeps the failing list (D-054)", () => {
   assert.ok(!prompt.includes("add one test per case"));
 });
 
+test("a review send-back carries the numbered findings and not a QA round (MET-225)", () => {
+  const review = {
+    source: "review" as const,
+    prUrl: "https://github.test/o/r/pull/7",
+    failing: ["R1 (src/api.ts:12) The loop reads the file on every tick."],
+  };
+  const cold = buildPartPrompt({
+    agent,
+    issue: briefIssue,
+    branch: "met-41-serve-avatars",
+    review,
+  });
+  for (const text of [
+    "## Review requested changes",
+    "The reviewer checked your PR and sent it back. Fix only these findings on this branch.",
+    "R1 (src/api.ts:12) The loop reads the file on every tick.",
+    "Fix only these findings, run focused tests and the part's Verify commands, and do not commit.",
+    "Do not run `git commit`, `git push` or `gh pr create`.",
+  ]) {
+    assert.ok(cold.includes(text), text);
+  }
+  assert.ok(!cold.includes("## QA requested changes"));
+  assert.ok(!cold.includes("add one test per case"));
+
+  const resume = buildResumePrompt({ issue: briefIssue, review });
+  for (const text of [
+    "## Review send-back",
+    "Findings to fix:\nR1 (src/api.ts:12) The loop reads the file on every tick.",
+    "- Fix only these findings, run focused tests and the part's Verify commands.",
+    "Run each command before you finish:\n- `pnpm test` → the API tests pass",
+    "Do not commit, push or open a PR",
+  ]) {
+    assert.ok(resume.includes(text), text);
+  }
+  assert.ok(!resume.includes("## QA send-back"));
+});
+
 test("with memory, the part prompt names the vaults and the generated files before the ship steps", () => {
   const prompt = buildPartPrompt({
     agent,

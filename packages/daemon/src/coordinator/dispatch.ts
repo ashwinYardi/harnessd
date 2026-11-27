@@ -130,6 +130,12 @@ function reviewBlock(review: QaFeedback): string {
       "Fix only these cases, add one test per case, then run the part's Verify commands."
     );
   }
+  if (review.source === "review") {
+    return (
+      `${review.failing.join("\n")}\n\n` +
+      "Fix only these findings, run focused tests and the part's Verify commands, and do not commit."
+    );
+  }
   return review.failing.map((f) => `- ${f}`).join("\n");
 }
 
@@ -150,10 +156,14 @@ export function buildPartPrompt({ agent, issue, branch, review, memory }: PartPr
       review.reviewUrl ? `Review: ${review.reviewUrl}` : "",
     ].filter(Boolean);
     const hasCases = review.cases !== undefined && review.cases.length > 0;
+    const fromReview = review.source === "review";
     const intro = hasCases
       ? "QA checked your PR and sent it back. Fix only these cases on this branch."
-      : "QA checked your PR and sent it back. Fix every item below on this branch.";
-    parts.push(`## QA requested changes\n${intro}\n${where.join("\n")}\n\n${reviewBlock(review)}`);
+      : fromReview
+        ? "The reviewer checked your PR and sent it back. Fix only these findings on this branch."
+        : "QA checked your PR and sent it back. Fix every item below on this branch.";
+    const title = fromReview ? "Review requested changes" : "QA requested changes";
+    parts.push(`## ${title}\n${intro}\n${where.join("\n")}\n\n${reviewBlock(review)}`);
   }
   if (memory) parts.push(memorySection(memory));
   parts.push(shipSteps(branch, 'every "Done when" item in your brief is met, with tests,', review));
@@ -176,17 +186,21 @@ export function buildResumePrompt({ issue, review }: ResumePromptInput): string 
     review.prUrl ? `PR: ${review.prUrl}` : "",
     review.reviewUrl ? `Review: ${review.reviewUrl}` : "",
   ].filter(Boolean);
-  const parts = [`## QA send-back\n${where.join("\n")}`];
+  const fromReview = review.source === "review";
+  const title = fromReview ? "Review send-back" : "QA send-back";
+  const parts = [`## ${title}\n${where.join("\n")}`];
   const hasCases = review.cases !== undefined && review.cases.length > 0;
   if (hasCases) {
     parts.push(`Cases to fix:\n${caseList(review.cases ?? [])}`);
+  } else if (fromReview) {
+    parts.push(`Findings to fix:\n${review.failing.join("\n")}`);
   } else if (review.failing.length > 0) {
     parts.push(`Failing items:\n${review.failing.map((f) => `- ${f}`).join("\n")}`);
   }
   if (review.testTail !== undefined) {
     parts.push(`Last lines of the tests:\n\`\`\`text\n${review.testTail || "(no output)"}\n\`\`\``);
   }
-  if (hasCases) {
+  if (hasCases || fromReview) {
     // The resumed run carries no brief, so the part's Verify commands come from its body.
     const verify = sectionList(extractSection(issue.description, "Verify")).map((line) =>
       line.trim(),
@@ -199,7 +213,9 @@ export function buildResumePrompt({ issue, review }: ResumePromptInput): string 
     parts.push(
       [
         "## What to do",
-        "- Fix only these cases, add one test per case, then run the part's Verify commands.",
+        hasCases
+          ? "- Fix only these cases, add one test per case, then run the part's Verify commands."
+          : "- Fix only these findings, run focused tests and the part's Verify commands.",
         "- Run focused tests.",
         "- Do not commit, push or open a PR: harnessd ships the work after your run (D-039).",
       ].join("\n"),

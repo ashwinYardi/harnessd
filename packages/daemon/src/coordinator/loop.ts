@@ -76,7 +76,7 @@ import {
   settleQa,
 } from "./qa.ts";
 import type { ReviewRunResult } from "./review.ts";
-import { runReview } from "./review.ts";
+import { runReview, settleReview } from "./review.ts";
 import { type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import {
   formatSplitComment,
@@ -923,6 +923,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       if (current === "in review") continue;
       if (current !== "in progress") {
         delete s.shipped[id];
+        // A part at Done has no review failures left to cap (MET-225).
+        if (current === "done" && s.reviewFailures !== undefined) delete s.reviewFailures[id];
         changed = true;
         continue;
       }
@@ -1104,30 +1106,97 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   }
 
   /** Posts a saved verdict, leaving failed writes for the next tick (D-058). */
-  async function postPendingReview(s: LoopState, partId: string): Promise<void> {
+  async function postPendingReview(s: LoopState, partId: string): Promise<boolean> {
     const records = s.pendingReview;
     const record = records?.[partId];
-    if (records === undefined || record === undefined) return;
+    if (records === undefined || record === undefined) return false;
+    if (record.posted === true) return true;
     try {
-      await github.postReview(record.prNumber, {
+      const url = await github.postReview(record.prNumber, {
         event: "COMMENT",
         body: record.body,
         commitId: record.head,
       });
+      record.reviewUrl = url;
+      record.posted = true;
+      await save();
+      return true;
     } catch (error) {
       log(
         `${record.partKey}: could not post the review on PR #${record.prNumber}: ${message(error)}`,
       );
+      return false;
+    }
+  }
+
+  /**
+   * Settles a review whose PR comment is posted, then drops its pending record (MET-225).
+   * A failed post or the Linear reads it needs keep the record, so a later tick finishes the
+   * settle without running the reviewer again for that verdict.
+   */
+  async function settlePendingReview(s: LoopState, partId: string): Promise<void> {
+    const record = s.pendingReview?.[partId];
+    if (record === undefined || record.posted !== true) return;
+    let part: Issue;
+    let parent: Issue;
+    try {
+      part = await linear.getIssue(record.partId);
+      parent = await linear.getIssue(record.parentId);
+    } catch (error) {
+      log(`${record.partKey}: could not read it for the review settle: ${message(error)}`);
       return;
     }
-    delete records[partId];
-    if (Object.keys(records).length === 0) delete s.pendingReview;
+    const pr: PullRequest = {
+      number: record.prNumber,
+      title: `${record.partKey}: review`,
+      url: record.prUrl,
+      headRefName: "",
+      headRefOid: record.head,
+      baseRefName: "",
+      isDraft: false,
+    };
+    const linked: LinkedIssue = {
+      ...part,
+      parentId: record.parentId,
+      parentKey: parent.key,
+      blockers: [],
+    };
+    await settleReview(
+      s,
+      {
+        part: linked,
+        parent,
+        pr,
+        ...(record.verdict === undefined
+          ? {}
+          : {
+              verdict: {
+                decision: record.verdict === "approved" ? "approve" : "changes_requested",
+                findings: record.findings ?? [],
+              },
+            }),
+        ...(record.reviewUrl === undefined ? {} : { reviewUrl: record.reviewUrl }),
+      },
+      {
+        linear,
+        notifier,
+        maxFailures: config.limits.qa_max_failures,
+        log,
+      },
+    );
+    const records = s.pendingReview;
+    if (records !== undefined) {
+      delete records[partId];
+      if (Object.keys(records).length === 0) delete s.pendingReview;
+    }
     await save();
   }
 
   async function retryPendingReviews(s: LoopState): Promise<void> {
     for (const partId of Object.keys(s.pendingReview ?? {})) {
-      if (!live.has(partId)) await postPendingReview(s, partId);
+      if (live.has(partId)) continue;
+      if (!(await postPendingReview(s, partId))) continue;
+      await settlePendingReview(s, partId);
     }
   }
 
@@ -2009,6 +2078,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     report.dispatched.push(part.key);
     l.done = (async () => {
       let result: ReviewRunResult;
+      const recorded = s.reviewerHeads?.[part.id];
       try {
         result = await runReview(
           {
@@ -2017,6 +2087,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             pr,
             budgetMs: budget,
             maxTurns: maxTurnsFor("reviewer", part.size, config.limits),
+            ...(recorded === undefined
+              ? {}
+              : { since: { sha: recorded.sha, findings: recorded.findings } }),
           },
           {
             github,
@@ -2050,7 +2123,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         result.turns,
         result.usageUnknown === true,
       );
-      if (agentResult !== undefined && agentResult.status === "ok") clearSwitch(part.id);
+      if (agentResult !== undefined) {
+        if (agentResult.status === "ok") clearSwitch(part.id);
+        else {
+          const why = switchWhy(agentResult);
+          if (why !== undefined) recordSwitch(s, part.id, agent.harness, why);
+        }
+      }
       if (entry.worktree !== "") {
         // A review checkout is never kept, even when the run failed (D-041).
         await removeWithGuard(s, entry, entry.worktree, { force: true });
@@ -2078,11 +2157,49 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           prUrl: pr.url,
           head: pr.headRefOid,
           body: result.body,
+          verdict: head.verdict,
+          findings: head.findings,
         };
         await save();
-        await postPendingReview(s, part.id);
-        log(`${part.key}: review ${head.verdict}, PR #${pr.number}`);
+        if (await postPendingReview(s, part.id)) {
+          await settlePendingReview(s, part.id);
+          log(`${part.key}: review ${head.verdict}, PR #${pr.number}`);
+        }
+      } else if (result.notJudged !== undefined) {
+        // A turn cap, timeout, stall or invalid JSON is not judged: no review failure (D-052).
+        await settleReview(
+          s,
+          {
+            part,
+            parent,
+            pr,
+            notJudged: result.notJudged,
+            ...(result.error === undefined ? {} : { error: result.error }),
+          },
+          {
+            linear,
+            notifier,
+            maxFailures: config.limits.qa_max_failures,
+            log,
+          },
+        );
       } else {
+        // A schema error or any other agent error counts a failed review (D-014, D-052).
+        await settleReview(
+          s,
+          {
+            part,
+            parent,
+            pr,
+            ...(result.error === undefined ? {} : { error: result.error }),
+          },
+          {
+            linear,
+            notifier,
+            maxFailures: config.limits.qa_max_failures,
+            log,
+          },
+        );
         log(
           `${part.key}: review failed (${oneLine(result.error ?? "no verdict")}), retrying next tick`,
         );

@@ -90,8 +90,10 @@ export interface QaCase {
   actual: string;
 }
 
-/** What QA asked a part to fix; its next run's prompt carries it. */
+/** What QA or the reviewer asked a part to fix; its next run's prompt carries it. */
 export interface QaFeedback {
+  /** Who sent the part back: QA by default, `review` for a reviewer send-back (MET-225). */
+  source?: "qa" | "review";
   /** The part's PR, when one was found. */
   prUrl?: string;
   /** The request-changes review, when it was posted. */
@@ -201,6 +203,12 @@ export interface PendingReview {
   prUrl: string;
   head: string;
   body: string;
+  /** The judged verdict, so the settle runs after a failed post is retried (MET-225). */
+  verdict?: "approved" | "changes_requested";
+  /** The verdict's findings, kept with the verdict for that settle. */
+  findings?: ReviewFinding[];
+  /** True once the PR comment is posted; the settle then runs and drops the record. */
+  posted?: boolean;
   /** The posted review, once a retry succeeds. */
   reviewUrl?: string;
 }
@@ -287,6 +295,8 @@ export interface LoopState {
   attempts: Record<string, number>;
   /** Failed QA rounds per parent issue id (D-014: the second one escalates). */
   qaFailures: Record<string, number>;
+  /** Failed review rounds per part id (MET-225, D-014: the second one escalates). */
+  reviewFailures: Record<string, number>;
   /** Open QA requests per part sub-issue id, cleared when the part's next run succeeds. */
   qaFeedback: Record<string, QaFeedback>;
   /** QA approvals the merge gate has not finished, one per QA sub-issue. */
@@ -336,6 +346,7 @@ export function emptyLoopState(): LoopState {
     interrupted: [],
     attempts: {},
     qaFailures: {},
+    reviewFailures: {},
     qaFeedback: {},
     merges: [],
     gateFailures: {},
@@ -446,6 +457,7 @@ function feedback(value: unknown): Record<string, QaFeedback> {
     const f = raw as Partial<QaFeedback> | null;
     if (typeof f !== "object" || f === null || !Array.isArray(f.failing)) continue;
     const entry: QaFeedback = { failing: f.failing.filter((l) => typeof l === "string") };
+    if (f.source === "qa" || f.source === "review") entry.source = f.source;
     if (typeof f.prUrl === "string") entry.prUrl = f.prUrl;
     if (typeof f.reviewUrl === "string") entry.reviewUrl = f.reviewUrl;
     if (typeof f.testTail === "string") entry.testTail = f.testTail;
@@ -641,6 +653,12 @@ function pendingReviews(value: unknown): Record<string, PendingReview> {
     if (typeof r.head !== "string" || r.head === "") continue;
     if (typeof r.body !== "string") continue;
     if (r.reviewUrl !== undefined && typeof r.reviewUrl !== "string") continue;
+    if (r.verdict !== undefined && r.verdict !== "approved" && r.verdict !== "changes_requested") {
+      continue;
+    }
+    if (r.posted !== undefined && typeof r.posted !== "boolean") continue;
+    const findings = r.findings === undefined ? undefined : reviewFindings(r.findings);
+    if (r.findings !== undefined && findings === undefined) continue;
     out[id] = {
       partId: r.partId,
       partKey: r.partKey,
@@ -649,6 +667,9 @@ function pendingReviews(value: unknown): Record<string, PendingReview> {
       prUrl: r.prUrl,
       head: r.head,
       body: r.body,
+      ...(r.verdict === undefined ? {} : { verdict: r.verdict }),
+      ...(findings === undefined ? {} : { findings }),
+      ...(r.posted === undefined ? {} : { posted: r.posted }),
       ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
     };
   }
@@ -854,6 +875,7 @@ export function parseLoopState(text: string): LoopState {
     interrupted: interruptedRuns(raw.interrupted),
     attempts: counts(raw.attempts),
     qaFailures: counts(raw.qaFailures),
+    reviewFailures: counts(raw.reviewFailures),
     qaFeedback: feedback(raw.qaFeedback),
     merges: merges(raw.merges),
     gateFailures: counts(raw.gateFailures),
