@@ -120,6 +120,26 @@ test("harnessForRun orders the configured harness first, the fallback second, th
   assert.deepEqual(harnesses(noFallback), ["claude-code", "opencode", "codex"]);
 });
 
+test("the reviewer order is Codex then Claude Code, and only Codex gets the model (MET-222, D-048)", () => {
+  const { fallback_harness: _harness, fallback_model: _model, ...base } = AGENT;
+  const reviewer: ResolvedAgentConfig = {
+    ...base,
+    name: "reviewer",
+    role: "reviewer",
+    harness: "codex",
+    model: "gpt-6.2-sol",
+  };
+  const order = harnessForRun(reviewer, availability());
+  assert.deepEqual(
+    order.map((c) => c.harness),
+    ["codex", "claude-code"],
+  );
+  assert.equal(order[0]?.model, "gpt-6.2-sol");
+  assert.equal("model" in (order[1] ?? {}), false);
+  // A user layer can move the reviewer to another harness; the role order still follows.
+  assert.deepEqual(harnesses({ ...reviewer, harness: "claude-code" }), ["claude-code", "codex"]);
+});
+
 test("harnessForRun removes duplicates, including a fallback equal to the main harness", () => {
   assert.deepEqual(harnesses({ ...AGENT, fallback_harness: "claude-code" }), [
     "claude-code",

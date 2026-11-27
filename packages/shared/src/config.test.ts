@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  AGENT_ROLES,
   ConfigError,
+  DEFAULT_AGENTS,
   DEFAULT_SETTINGS,
   HARNESSES,
+  isAgentRole,
   isLiveQa,
   parseAgentSettings,
   parseConfigFile,
@@ -53,6 +56,19 @@ test("parseConfigFile accepts a full config", () => {
 
 test("parseConfigFile accepts an empty file", () => {
   assert.deepEqual(parseConfigFile({}, FILE), {});
+});
+
+test("reviewer is the fifth role, on Codex by default (MET-222)", () => {
+  assert.deepEqual(AGENT_ROLES, ["coordinator", "backend", "frontend", "qa", "reviewer"]);
+  assert.equal(isAgentRole("reviewer"), true);
+  assert.deepEqual(DEFAULT_AGENTS.reviewer, {
+    role: "reviewer",
+    harness: "codex",
+    model: "gpt-6.2-sol",
+  });
+  assert.deepEqual(parseConfigFile({ agents: { reviewer: { role: "reviewer" } } }, FILE), {
+    agents: { reviewer: { role: "reviewer" } },
+  });
 });
 
 test("an unknown harness names the file and key", () => {
@@ -248,7 +264,7 @@ test("wrong types are rejected with their path", () => {
   );
   rejects(
     { agents: { qa: { role: "tester" } } },
-    `${FILE}: agents.qa.role: expected one of coordinator, backend, frontend, qa, got "tester"`,
+    `${FILE}: agents.qa.role: expected one of coordinator, backend, frontend, qa, reviewer, got "tester"`,
   );
   rejects({ agents: { qa: [] } }, `${FILE}: agents.qa: expected a table, got an array`);
 });

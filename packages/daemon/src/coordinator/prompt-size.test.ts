@@ -113,7 +113,7 @@ test("the four prompt kinds stay within their measured size", () => {
   assert.ok(qa < 60_000, `qa ${qa}`);
 });
 
-test("the committed skill pack a worktree loads loses the skills a builder does not use", () => {
+test("the committed skill pack a worktree loads loses the skills a run does not use", () => {
   // A worktree is cut from main, so it starts with the skill folders the repo commits.
   // Count those, not only the files sync generates (D-040, D-043).
   const pack = committedSkills();
@@ -121,6 +121,7 @@ test("the committed skill pack a worktree loads loses the skills a builder does 
   const builder = withheldSkills("backend");
   const qa = withheldSkills("qa");
   const frontend = withheldSkills("frontend");
+  const reviewer = withheldSkills("reviewer");
   assert.ok(pack.names.includes("grill-with-docs"));
   assert.ok(pack.names.includes("code-review"));
   const sum = (list: string[]): number => list.reduce((total, name) => total + size(body(name)), 0);
@@ -134,21 +135,24 @@ test("the committed skill pack a worktree loads loses the skills a builder does 
     "committed SKILL.md bodies, builder run",
     sum(pack.names.filter((name) => !builder.includes(name))),
   );
-  const reviewed = report(
-    "committed SKILL.md bodies, QA run",
-    sum(pack.names.filter((name) => !qa.includes(name))),
+  const inspected = report(
+    "committed SKILL.md bodies, reviewer run",
+    sum(pack.names.filter((name) => !reviewer.includes(name))),
   );
-  // Builder and frontend runs drop grill-with-docs and code-review; QA reviews.
+  // Builder, frontend and QA runs drop grill-with-docs and code-review; the reviewer keeps
+  // code-review (MET-222).
   assert.ok(frontend.includes("grill-with-docs"));
   assert.ok(frontend.includes("code-review"));
   assert.equal(qa.includes("grill-with-docs"), true);
-  assert.equal(qa.includes("code-review"), false);
-  // The QA run keeps code-review, so it loads that body and the builder does not.
-  assert.equal(reviewed - nonUi, size(body("code-review")));
+  assert.equal(qa.includes("code-review"), true);
+  assert.equal(reviewer.includes("grill-with-docs"), true);
+  assert.equal(reviewer.includes("code-review"), false);
+  // The reviewer run keeps code-review, so it loads that body and the builder does not.
+  assert.equal(inspected - nonUi, size(body("code-review")));
   // A builder run must stay well under the size docs/LOOP.md reports.
   assert.ok(ui < 60_000, `frontend skill bodies ${ui}`);
   assert.ok(nonUi < 50_000, `builder skill bodies ${nonUi}`);
-  assert.ok(nonUi < full, "the builder drops two committed skill bodies");
+  assert.ok(nonUi < full, "the builder drops the skills it does not use");
 });
 
 /** The builder skill set before D-044: the five non-builder skills from D-043. */

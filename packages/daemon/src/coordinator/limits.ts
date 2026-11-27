@@ -80,6 +80,7 @@ export const HARNESS_ORDER: Record<AgentRole, readonly HarnessId[]> = {
   backend: ["opencode", "codex", "claude-code"],
   frontend: ["opencode", "codex", "claude-code"],
   qa: ["codex", "claude-code"],
+  reviewer: ["codex", "claude-code"],
 };
 
 /** Why a harness cannot take this run (D-048). */

@@ -36,7 +36,7 @@ export function buildBoard(issues: readonly BoardIssue[], loop: LoopSnapshot): B
   });
 }
 
-/** Every configured agent, coordinator first, then backend, frontend and QA, with its runs. */
+/** Every configured agent, in role order (coordinator, builders, QA, reviewer), with its runs. */
 export function agentsView(config: MergedConfig, loop: LoopSnapshot): AgentsSnapshot {
   const order = (role: string) => (AGENT_ROLES as readonly string[]).indexOf(role);
   const agents = Object.entries(config.agents)

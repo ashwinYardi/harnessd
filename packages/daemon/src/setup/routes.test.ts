@@ -135,7 +135,7 @@ test("GET /api/harnesses has one card per harness, from the status checks", asyn
         [
           "codex",
           "Codex",
-          false,
+          true,
           ["harness.codex.cli", "harness.codex.auth", "harness.codex.version"],
         ],
         ["opencode", "OpenCode", false, []],
@@ -420,6 +420,7 @@ test("GET /api/team lists every agent and which ones can be removed", async () =
         ["backend", "backend", "claude-code", false],
         ["frontend", "frontend", "claude-code", false],
         ["qa", "qa", "claude-code", false],
+        ["reviewer", "reviewer", "codex", false],
         ["docs", "frontend", "claude-code", true],
       ],
     );
@@ -475,6 +476,7 @@ test("a saved backend row with harness codex passes the config validator and run
       { name: "backend", role: "backend", harness: "codex" },
       { name: "frontend", role: "frontend", harness: "claude-code" },
       { name: "qa", role: "qa", harness: "claude-code" },
+      { name: "reviewer", role: "reviewer", harness: "codex" },
       { name: "docs", role: "frontend", harness: "claude-code" },
     ];
     const res = await s.post("/api/team", { agents: team });

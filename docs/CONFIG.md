@@ -61,7 +61,7 @@ test_command = "pnpm test"   # a failure means changes requested, whatever the a
 # kind, start, url, health, seed, build and env are described under "Live QA".
 
 [agents.backend]
-role = "backend"            # coordinator | backend | frontend | qa
+role = "backend"            # coordinator | backend | frontend | qa | reviewer
 harness = "claude-code"     # claude-code | codex | antigravity | opencode | cursor | grok
 model = "opus"              # optional, passed to the harness
 avatar = "avatars/backend.png"  # optional: path in this .harnessd/ folder, or a URL
@@ -222,7 +222,17 @@ fallback_harness = "codex"   # while Claude Code is limited
 fallback_model = "gpt-5"
 ```
 
-Default agents: coordinator, backend, frontend and qa, all on `claude-code` (D-010). Settings → Team edits the `[agents.<name>]` tables of the workspace file and nothing else; comments and other tables stay (D-026). It can change a default agent but not remove it. The agent's name is its table key or file name; without an `avatar` the UI shows the name's initial. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
+Default agents: coordinator, backend, frontend, qa and reviewer. The first four are on `claude-code` (D-010). The reviewer is on `codex` with `model = "gpt-6.2-sol"` (MET-222), so Claude quota stays with the coordinator. Settings → Team edits the `[agents.<name>]` tables of the workspace file and nothing else; comments and other tables stay (D-026). It can change a default agent but not remove it. The agent's name is its table key or file name; without an `avatar` the UI shows the name's initial. Any other agent name must set `role`. MCP server names use letters, digits, `_` and `-`. Unknown keys are errors.
+
+**Reviewer.** The reviewer role reads a PR's code like a senior developer. Its default is Codex on `gpt-6.2-sol`. Each `[agents.<name>]` layer can override `harness`, `model`, `fallback_harness` and `fallback_model`, as for every role (D-035). The role's harness order is `codex`, then `claude-code` (D-048). `gpt-6.2-sol` goes only to Codex; another harness gets no `--model`.
+```toml
+[agents.reviewer]
+harness = "codex"            # default; a layer may change it
+model = "gpt-6.2-sol"        # default; a layer may change it
+fallback_harness = "claude-code"   # optional
+fallback_model = "opus"            # optional
+```
+A reviewer worktree keeps `code-review`, `codebase-design`, `tdd`, `diagnosing-bugs` and `domain-modeling` from the pack. It withholds `impeccable`, `grilling`, `research`, `prototype` and `grill-with-docs`. QA no longer keeps `code-review`; its worktree withholds it too (MET-222). The map is built in, not config: `enabled = false` still turns a skill off for everyone.
 
 ## agents/<name>.md
 Optional frontmatter with `role`, `harness`, `model`, `fallback_harness`, `fallback_model` and `avatar`; the body is the agent's instructions.
