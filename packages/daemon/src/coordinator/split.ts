@@ -253,11 +253,17 @@ export function isCanceledState(state: string): boolean {
   return name === "canceled" || name === "cancelled";
 }
 
+/** True when a child is neither Done nor Canceled, so a split may reuse it (MET-216). */
+export function isLiveChild(child: { state: string }): boolean {
+  return child.state.toLowerCase() !== "done" && !isCanceledState(child.state);
+}
+
 /**
  * Creates one sub-issue per planned part and one QA sub-issue that every part blocks.
- * Sub-issues already present (matched by marker) are reused, never duplicated. When the
- * parent already has parts, `plan` may be empty: only QA and missing relations are added.
- * `children` is the parent's current children, when the caller already has them.
+ * Only the children the caller passes as the reuse set are reused, never duplicated. A child
+ * that is Done or Canceled is never reused, even when it is in that set. When the parent
+ * already has parts, `plan` may be empty: only QA and missing relations are added. The
+ * `parts` list is built in plan order, or in the caller's order when there is no plan.
  */
 export async function splitIssue(
   parent: Issue,
@@ -266,7 +272,7 @@ export async function splitIssue(
   children?: LinkedIssue[],
   calls: readonly Call[] = [],
 ): Promise<SplitResult> {
-  const existing = children ?? (await linear.listChildren(parent.id));
+  const existing = (children ?? (await linear.listChildren(parent.id))).filter(isLiveChild);
   const byMarker = new Map<string, LinkedIssue>();
   for (const child of existing) {
     const marker = readPartMarker(child.description);
@@ -276,10 +282,14 @@ export async function splitIssue(
   const created: string[] = [];
 
   const ids = partIds(plan);
-  const parts: LinkedIssue[] = existing.filter(isWorkPart);
+  const parts: LinkedIssue[] = [];
   for (const [i, part] of plan.entries()) {
     const id = ids[i] ?? part.role;
-    if (byMarker.has(id)) continue;
+    const reused = byMarker.get(id);
+    if (reused !== undefined) {
+      parts.push(reused);
+      continue;
+    }
     const child = await linear.createSubIssue(parent.id, {
       title: part.title,
       description: formatPartDescription(parent, part, id, calls),
@@ -289,6 +299,13 @@ export async function splitIssue(
     byMarker.set(id, child);
     parts.push(child);
     created.push(child.key);
+  }
+  // A recorded split passes no plan on the next tick: keep its live parts in the order the
+  // caller gave, which is the record's plan order.
+  if (plan.length === 0) {
+    for (const child of existing) {
+      if (isWorkPart(child) && !parts.includes(child)) parts.push(child);
+    }
   }
   if (parts.length === 0) throw new Error(`${parent.key}: nothing to split, the plan is empty`);
 

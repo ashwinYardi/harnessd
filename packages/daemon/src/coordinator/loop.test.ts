@@ -932,6 +932,87 @@ test("a parent whose recorded parts are all canceled is grilled again", async ()
   assert.equal(parent.state, "In Progress");
 });
 
+test("an interrupted split reuses its live recorded parts and adds the missing QA and serial relations (MET-216)", async () => {
+  const adapter = fakeAdapter({
+    plans: { "MET-100": plan(["backend", "S", "API"], ["frontend", "S", "UI"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Feature", labels: ["ui"], description: BODY("M") });
+
+  await t.loop.tick();
+  const record = t.memory.state.splits?.[parent.id];
+  assert.ok(record, "the split is recorded");
+  const created = [...t.linear.created];
+  const grills = grilled(t).length;
+  const parts = record.parts.map((id) => t.linear.issues.get(id));
+  const qa = t.linear.issues.get(record.qa);
+  assert.ok(parts[0] && parts[1] && qa);
+
+  // As if the process stopped after creating the sub-issues: the parent is Ready again and
+  // the QA and serial relations are missing.
+  parent.state = "Ready";
+  t.linear.relations = [];
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.split, [parent.key]);
+  assert.equal(grilled(t).length, grills, "there is no second grill");
+  assert.deepEqual(t.linear.created, created, "no duplicate sub-issue is created");
+  assert.deepEqual(
+    record.parts.map((id) => t.linear.issues.get(id)?.id),
+    parts.map((part) => part?.id),
+    "the live recorded parts are reused",
+  );
+  assert.deepEqual(
+    t.linear.relations.map((r) => [r.blocker, r.blocked]),
+    [
+      [parts[0].id, qa.id],
+      [parts[1].id, qa.id],
+      [parts[0].id, parts[1].id],
+    ],
+    "the missing QA and serial relations are added",
+  );
+  assert.equal(parent.state, "In Progress");
+});
+
+test("a split without a record does not reuse live children of an older plan (MET-216)", async () => {
+  const adapter = fakeAdapter({
+    plans: { "MET-100": plan(["backend", "S", "API"], ["frontend", "S", "UI"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "Feature", labels: ["ui"], description: BODY("M") });
+  const oldBackend = t.linear.add({
+    title: "Old API",
+    state: "Backlog",
+    parentId: parent.id,
+    description: partMarker("backend"),
+  });
+  const oldQa = t.linear.add({
+    title: "Old QA",
+    state: "Backlog",
+    parentId: parent.id,
+    description: partMarker("qa"),
+  });
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.split, [parent.key], "the parent is grilled and split");
+  const record = t.memory.state.splits?.[parent.id];
+  assert.ok(record, "the new split is recorded");
+  assert.ok(!record.parts.includes(oldBackend.id), "the old backend part is not reused");
+  assert.notEqual(record.qa, oldQa.id, "the old QA child is not reused");
+  assert.equal(oldBackend.state, "Backlog", "the old part is left alone");
+  assert.equal(oldQa.state, "Backlog", "the old QA is left alone");
+  assert.ok(
+    t.linear.relations.every(
+      (r) =>
+        ![oldBackend.id, oldQa.id].includes(r.blocker) &&
+        ![oldBackend.id, oldQa.id].includes(r.blocked),
+    ),
+    "no relation touches an old child",
+  );
+});
+
 test("a re-split keeps the record's first at and stays admitted ahead of a later parent", async () => {
   const time = manualClock("2026-11-26T10:00:00.000Z");
   const config = mergeLayers([
@@ -979,7 +1060,8 @@ test("a re-split keeps the record's first at and stays admitted ahead of a later
   const frontend = children.find((child) => roleOf(child) === "frontend");
   const qa = children.find((child) => roleOf(child) === "qa");
   assert.ok(backend && frontend && qa);
-  backend.state = "Done";
+  // The backend part is still live; only the frontend part was canceled.
+  backend.state = "In Progress";
 
   // The owner cancels one part and escalates A. B is a later parent already in flight.
   frontend.state = "Canceled";
@@ -5454,9 +5536,18 @@ test("a second budget escalation counts from its own point after the human moves
     parentId: parent.id,
     description: `${partMarker("backend")}\n**Size**: S`,
   });
+  const qa = linear.add({
+    title: "QA",
+    parentId: parent.id,
+    description: `${partMarker("qa")}\n**Size**: M`,
+  });
   const store = memoryStore({
     ...emptyLoopState(),
     usage: { [parent.id]: { input: 100, cached: 0, output: 0 } },
+    // A parent the loop already split: a Ready move finishes its split without a grill.
+    splits: {
+      [parent.id]: { key: parent.key, parts: [part.id], qa: qa.id, at: "2026-11-20T10:00:00.000Z" },
+    },
   });
   const t = setup({ config, linear, store });
 

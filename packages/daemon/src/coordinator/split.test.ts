@@ -349,6 +349,60 @@ test("splitIssue reuses children by marker and only adds what is missing", async
   ]);
 });
 
+test("splitIssue never reuses a canceled or done child, even when it is in the reuse set (MET-216)", async () => {
+  const canceled = { ...child("MET-41", partMarker("backend")), state: "Canceled" };
+  const done = { ...child("MET-42", partMarker("frontend")), state: "Done" };
+  const { linear, creates, relations } = fakeLinear([canceled, done]);
+
+  const result = await splitIssue(parent, plan, linear, [canceled, done]);
+
+  assert.deepEqual(
+    creates.map((c) => c.title),
+    ["Serve avatars", "Show avatars", "QA: Agents show avatars"],
+    "a closed child is not reused",
+  );
+  assert.deepEqual(
+    result.parts.map((part) => part.key),
+    ["MET-51", "MET-52"],
+  );
+  assert.equal(result.qa.key, "MET-53");
+  assert.ok(
+    result.parts.every((part) => part.id !== canceled.id && part.id !== done.id),
+    "the closed children stay out of the split",
+  );
+  assert.deepEqual(
+    relations,
+    [
+      ["id-MET-51", "id-MET-53"],
+      ["id-MET-52", "id-MET-53"],
+      ["id-MET-51", "id-MET-52"],
+    ],
+    "only the new parts block the new QA and each other",
+  );
+});
+
+test("splitIssue does not reuse an old QA child outside the reuse set; it creates a new one (MET-216)", async () => {
+  const oldQa = child("MET-42", partMarker("qa"), "QA", ["MET-41"]);
+  const late = child("MET-41", partMarker("backend"));
+  const { linear, creates } = fakeLinear([oldQa, late]);
+
+  // The no-record path passes only this tick's planned children, so an old QA is not in it.
+  const result = await splitIssue(parent, plan, linear, [late]);
+
+  assert.deepEqual(
+    creates.map((c) => c.title),
+    ["Show avatars", "QA: Agents show avatars"],
+    "only the missing part and the new QA are created",
+  );
+  assert.deepEqual(
+    result.parts.map((part) => part.key),
+    ["MET-41", "MET-51"],
+    "the planned child in the reuse set is kept",
+  );
+  assert.equal(result.qa.key, "MET-52", "a new QA sub-issue is created");
+  assert.notEqual(result.qa.id, oldQa.id, "the old QA child is left alone");
+});
+
 test("a part body lists its decision IDs and the grill calls it follows (D-044)", async () => {
   const calls = [
     { question: "Where?", answer: "daemon", basis: "SPEC" },
