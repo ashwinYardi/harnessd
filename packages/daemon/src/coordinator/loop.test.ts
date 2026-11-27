@@ -3176,6 +3176,57 @@ test("a part missing from shipped still gets the review its QA round waits for (
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key], "QA starts after the approval");
 });
 
+test("a part QA already approved still gets the review it never had (MET-233)", async () => {
+  const t = setup({ config: ONE_AT_A_TIME });
+  const parent = t.linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const part = t.linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: "In Review",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const qa = t.linear.add({
+    title: "QA: P",
+    parentId: parent.id,
+    description: `${partMarker("qa")}\n**Size**: M`,
+  });
+  t.linear.relations.push({ blocker: part.id, blocked: qa.id });
+  // An old part: QA approved this head, but no reviewer ever judged it, and the daemon holds
+  // no shipped or split record for it (MET-233, D-060).
+  t.memory.state.reviewedHeads = { [part.id]: { sha: "sha7", verdict: "approved" } };
+  t.gh.open(part.key, 7);
+
+  const first = await t.loop.tick();
+  assert.deepEqual(first.dispatched, [part.key], "the review runs where the skip used to be");
+  assert.equal(
+    t.adapter.runs().filter((run) => run.role === "reviewer").length,
+    1,
+    "one review run",
+  );
+  assert.equal(
+    t.adapter.runs().filter((run) => run.role === "qa").length,
+    0,
+    "no QA run before the review",
+  );
+  assert.equal(qa.state, "Ready");
+
+  (await nextRun(t.adapter)).finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "approve", findings: [] }),
+  );
+  await t.loop.idle();
+  assert.equal(t.memory.state.reviewerHeads?.[part.id]?.sha, "sha7");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [], "both approved this head: no QA run");
+  assert.equal(
+    t.adapter.runs().filter((run) => run.role === "qa").length,
+    0,
+    "the QA approval at this head stands",
+  );
+  assert.equal(qa.state, "Ready");
+});
+
 test("a head that moves during QA re-queues the round and runs a delta review (MET-226)", async () => {
   const t = setup({ config: ONE_AT_A_TIME });
   const fx = qaFixture(t);
@@ -3275,6 +3326,98 @@ test("a reloaded stale pending QA result re-queues QA and counts no failure (MET
     [],
     "no parent comment",
   );
+});
+
+/** A pending QA approval for the review fixture's part, saved at PR #7 sha7 (MET-233). */
+function pendingQaApproval(fx: ReturnType<typeof reviewFixture>) {
+  const qa = fx.qa;
+  assert.ok(qa);
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "approved",
+      findings: [],
+      at: "2026-11-23T10:00:00.000Z",
+    },
+  };
+  fx.state.qaFailures = { [fx.parent.id]: 1 };
+  fx.state.pendingQa = {
+    [qa.id]: {
+      parentId: fx.parent.id,
+      qaKey: qa.key,
+      reviews: [
+        {
+          partId: fx.part.id,
+          partKey: fx.part.key,
+          decision: "approve",
+          failing: [],
+          prNumber: 7,
+          prUrl: "https://github.test/o/r/pull/7",
+          head: "sha7",
+          event: "APPROVE",
+          body: "**harnessd QA**: approved.",
+          done: false,
+        },
+      ],
+      done: [],
+    },
+  };
+  return qa;
+}
+
+test("a pending QA retry drops a verdict whose PR head moved before it posts (MET-233)", async () => {
+  const fx = reviewFixture();
+  const qa = pendingQaApproval(fx);
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  const pr = t.gh.prs[fx.part.key];
+  assert.ok(pr);
+  pr.headRefOid = "sha8";
+  qa.state = "In Progress";
+
+  await t.loop.tick();
+
+  assert.deepEqual(t.gh.reviews, [], "the stale verdict is never posted");
+  assert.equal(qa.state, "Ready", "QA is re-queued");
+  assert.deepEqual(store.state.qaFailures, { [fx.parent.id]: 1 }, "the count is unchanged");
+  assert.equal(store.state.pendingQa, undefined, "the settled record is dropped");
+  assert.deepEqual(store.state.merges, [], "nothing is pinned to the stale head");
+  assert.ok(
+    t.logs.some((line) => line.includes("moved from sha7 to sha8")),
+    "the moved head is logged",
+  );
+});
+
+test("a network error on the pending QA head read keeps the record for the next tick (MET-233)", async () => {
+  const fx = reviewFixture();
+  const qa = pendingQaApproval(fx);
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  qa.state = "In Progress";
+  const read = t.gh.github.findPrForIssue.bind(t.gh.github);
+  let fail = true;
+  t.gh.github.findPrForIssue = async (key) => {
+    if (fail) {
+      fail = false;
+      throw new Error("read ECONNRESET");
+    }
+    return read(key);
+  };
+
+  await t.loop.tick();
+
+  assert.deepEqual(t.gh.reviews, [], "nothing is posted while the head is unknown");
+  assert.equal(qa.state, "In Progress", "the QA ticket waits");
+  assert.deepEqual(store.state.qaFailures, { [fx.parent.id]: 1 }, "the count is unchanged");
+  assert.ok(store.state.pendingQa?.[qa.id], "the record is kept for the next tick");
+
+  await t.loop.tick();
+
+  assert.equal(t.gh.reviews.length, 1, "the unchanged head posts on the retry");
+  assert.equal(store.state.pendingQa, undefined, "the record is settled");
+  assert.deepEqual(store.state.qaFailures, {}, "the approval clears the count");
 });
 
 test("an approved head is skipped and a new head gets a review (MET-224)", async () => {
@@ -6599,6 +6742,9 @@ test("a ticket with an in-flight entry or a pending QA verdict is not swept (MET
     },
   };
   const gh = fakeGitHub();
+  // The saved head is still the PR's head, so the retry tries the post and only the
+  // network error keeps the record waiting (MET-233).
+  gh.open(pending.part.key, 7);
   const down: GitHub = {
     ...gh.github,
     async postReview() {
