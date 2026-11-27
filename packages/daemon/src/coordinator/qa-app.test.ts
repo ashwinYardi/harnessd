@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -55,6 +56,33 @@ async function gone(pid: number, timeoutMs = 3_000): Promise<boolean> {
   return false;
 }
 
+/** Waits for a stopped app's port to refuse connections; its socket closes just after the kill. */
+async function refused(port: number, timeoutMs = 3_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const accepted = await new Promise<boolean>((resolve) => {
+      const socket = connect({ host: "127.0.0.1", port });
+      socket.setTimeout(250);
+      socket.once("connect", () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once("timeout", () => {
+        // A silent listener still owns the port; not refused yet.
+        socket.destroy();
+        resolve(true);
+      });
+      socket.once("error", (error: NodeJS.ErrnoException) => {
+        socket.destroy();
+        resolve(error.code !== "ECONNREFUSED");
+      });
+    });
+    if (!accepted) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
+}
+
 test("the qa table parses, and a bad table is rejected with its key (MET-177)", () => {
   const qa = {
     setup_command: "",
@@ -78,12 +106,15 @@ test("the qa table parses, and a bad table is rejected with its key (MET-177)", 
   );
 });
 
-test("health by path: a 2xx or 3xx answer passes, and the app stops", async () => {
+test("health by path: a 2xx or 3xx answer passes, and the app stops", {
+  timeout: 15_000,
+}, async () => {
   const dir = await mkdtemp(join(tmpdir(), "harnessd-qa-app-"));
   try {
     for (const path of ["/ok", "/go"]) {
       const started = await startQaApp({
-        qa: qaApp({ health: path }),
+        // An api app keeps the port and health by path but runs no browser step, so no Chrome.
+        qa: qaApp({ kind: "api", health: path }),
         cwd: dir,
         area: "backend",
         env: baseEnv(),
@@ -99,7 +130,10 @@ test("health by path: a 2xx or 3xx answer passes, and the app stops", async () =
         `http://127.0.0.1:${started.app.port}`,
         "{port} is replaced with the picked port",
       );
+      const port = started.app.port;
+      assert.ok(port !== undefined, `${path}: the app gets a port`);
       await started.app.stop();
+      assert.equal(await refused(port), true, `${path}: the stopped app refuses connections`);
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
