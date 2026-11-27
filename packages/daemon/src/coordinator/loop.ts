@@ -1309,6 +1309,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
               },
             }),
         ...(record.notJudged === undefined ? {} : { notJudged: record.notJudged }),
+        ...(record.escalation === undefined ? {} : { escalation: record.escalation }),
         ...(record.error === undefined ? {} : { error: record.error }),
         ...(record.reviewUrl === undefined ? {} : { reviewUrl: record.reviewUrl }),
       },
@@ -1321,6 +1322,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           done: record.done,
           async mark(step: string) {
             record.done.push(step);
+            await save();
+          },
+          async decide(escalation) {
+            // Save the escalation before the first Linear write, so a restart replays it
+            // instead of counting the run again from an empty map (MET-232).
+            record.escalation = escalation;
             await save();
           },
         },

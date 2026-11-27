@@ -3218,6 +3218,65 @@ test("a head that moves during QA re-queues the round and runs a delta review (M
   assert.equal(t.wt.checkouts.at(-1)?.sha, "sha7-pushed");
 });
 
+test("a reloaded stale pending QA result re-queues QA and counts no failure (MET-232)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-stale-qa-"));
+  roots.push(root);
+  const fx = reviewFixture();
+  assert.ok(fx.qa);
+  const qa = fx.qa;
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.qaFailures = { [fx.parent.id]: 1 };
+  fx.state.pendingQa = {
+    [qa.id]: {
+      parentId: fx.parent.id,
+      qaKey: qa.key,
+      reviews: [
+        {
+          partId: fx.part.id,
+          partKey: fx.part.key,
+          decision: "error",
+          failing: [],
+          prNumber: 7,
+          prUrl: "https://github.test/o/r/pull/7",
+          head: "sha7",
+          event: "COMMENT",
+          body: "**harnessd QA**: re-queued.",
+          done: true,
+          stale: true,
+          error: "the PR head moved from sha7 to sha8 during QA",
+        },
+      ],
+      done: [],
+    },
+  };
+  const store = createFileLoopStore(root);
+  await store.save(fx.state);
+  assert.equal((await store.load()).pendingQa?.[qa.id]?.reviews[0]?.stale, true, "reloaded stale");
+
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  await t.loop.tick();
+
+  assert.equal(qa.state, "Ready", "the stale round is re-queued");
+  const after = await store.load();
+  assert.deepEqual(after.qaFailures, { [fx.parent.id]: 1 }, "the count is unchanged");
+  assert.deepEqual(t.pings, [], "no notice is sent");
+  assert.equal(fx.parent.state, "In Progress", "no escalation");
+  assert.equal(after.pendingQa, undefined, "the settled record is dropped");
+  assert.deepEqual(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key),
+    [],
+    "no parent comment",
+  );
+});
+
 test("an approved head is skipped and a new head gets a review (MET-224)", async () => {
   const fx = reviewFixture({ withQa: false });
   const state = fx.state;
@@ -3660,6 +3719,115 @@ test("a timed-out part move in a not-judged escalation is retried to Needs input
     t.pings.filter((ping) => ping.includes("review not judged twice")).length,
     1,
     "the notice goes out after the retried move",
+  );
+});
+
+test("a restart finishes a not-judged escalation saved before its writes (MET-232)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-resettle-"));
+  roots.push(root);
+  const fx = reviewFixture({ withQa: false });
+  const store = createFileLoopStore(root);
+  await store.save(fx.state);
+  const first = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  first.gh.open(fx.part.key, 7);
+
+  await first.loop.tick();
+  first.adapter.pending[0]?.finish("timeout", "budget of 1000ms exceeded");
+  await first.loop.idle();
+  assert.equal(fx.part.state, "In Review", "the first timeout re-queues the same head");
+
+  // The second not-judged run on the same head escalates. The parent comment lands, then the
+  // parent move times out, so the saved record holds the decision and one done step.
+  const moveTo = fx.linear.moveTo.bind(fx.linear);
+  let down = true;
+  fx.linear.moveTo = async (id, state) => {
+    if (down && id === fx.parent.id && state === "Needs input") {
+      down = false;
+      throw new Error("fetch failed");
+    }
+    return moveTo(id, state);
+  };
+
+  assert.deepEqual(
+    (await first.loop.tick()).dispatched,
+    [fx.part.key],
+    "the same head reviews again",
+  );
+  first.adapter.pending.at(-1)?.finish("timeout", "budget of 1000ms exceeded");
+  await first.loop.idle();
+
+  const saved = await store.load();
+  const pending = saved.pendingReviewSettle?.[fx.part.id];
+  assert.ok(pending, "the unfinished escalation is saved");
+  assert.deepEqual(pending.escalation, { reasons: ["timed out", "timed out"] });
+  assert.deepEqual(
+    pending.done,
+    [`comment on ${fx.parent.key}`],
+    "the comment is the only done step",
+  );
+  assert.equal(fx.parent.state, "In Progress", "the parent move did not land");
+  assert.equal(fx.part.state, "In Review", "the part move did not run");
+
+  // The daemon restarts: the in-memory count is empty and a new loop reads loop.json.
+  resetReviewNotJudged();
+  const second = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  await second.loop.tick();
+
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(fx.part.state, "Needs input");
+  assert.equal(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key).length,
+    1,
+    "the parent comment is posted once",
+  );
+  assert.equal(
+    second.pings.filter((ping) => ping.includes("review not judged twice")).length,
+    1,
+    "the notice is sent once after the restart",
+  );
+  assert.equal((await store.load()).pendingReviewSettle, undefined, "the record goes when done");
+});
+
+test("a restart replays a saved not-judged escalation with no writes done (MET-232)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-resettle-"));
+  roots.push(root);
+  const fx = reviewFixture({ withQa: false });
+  fx.state.pendingReviewSettle = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      notJudged: "timeout",
+      escalation: { reasons: ["timed out", "timed out"] },
+      done: [],
+    },
+  };
+  const store = createFileLoopStore(root);
+  await store.save(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+
+  await t.loop.tick();
+
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(fx.part.state, "Needs input");
+  assert.equal(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key).length,
+    1,
+    "the saved escalation posts the parent comment once",
+  );
+  assert.equal(
+    t.pings.filter((ping) => ping.includes("review not judged twice")).length,
+    1,
+    "the saved escalation sends one notice",
+  );
+  assert.equal(
+    (await store.load()).pendingReviewSettle,
+    undefined,
+    "the replayed record is dropped",
   );
 });
 

@@ -9,7 +9,10 @@ import {
   buildReviewTask,
   formatReviewComment,
   parseReviewVerdict,
+  type ReviewEscalation,
   type ReviewFinding,
+  type ReviewSettleDeps,
+  resetReviewNotJudged,
   settleReview,
 } from "./review.ts";
 import { partMarker } from "./split.ts";
@@ -381,4 +384,79 @@ test("an approval keeps review failures and QA feedback that is not a review sen
     "the count still waits for Done or escalation",
   );
   assert.equal(reviewState.qaFeedback[part.id], undefined, "its own review send-back is cleared");
+});
+
+test("a not-judged escalation decides before its first write and a replay applies it (MET-232)", async () => {
+  resetReviewNotJudged();
+  const calls: string[] = [];
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment(issueId) {
+        calls.push(`comment ${issueId}`);
+        return "comment-1";
+      },
+      async moveTo(issueId, state) {
+        calls.push(`move ${issueId} ${state}`);
+      },
+    },
+    notifier: {
+      async notify() {
+        calls.push("notice");
+      },
+    },
+    maxFailures: 2,
+  };
+  const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
+  const input = { part, parent, pr: pr(), notJudged: "timeout" as const, error: "timed out" };
+
+  assert.equal(await settleReview(state, input, deps), "requeued");
+  assert.equal(calls.length, 0, "the first run writes nothing");
+
+  let decided: ReviewEscalation | undefined;
+  const steps = {
+    done: [] as string[],
+    async mark(step: string) {
+      steps.done.push(step);
+    },
+    async decide(escalation: ReviewEscalation) {
+      decided = escalation;
+      calls.push("decide");
+    },
+  };
+  assert.equal(await settleReview(state, input, { ...deps, steps }), "escalated");
+  assert.deepEqual(decided, { reasons: ["timed out", "timed out"] });
+  assert.equal(calls[0], "decide", "the decision is saved before the first write");
+  assert.deepEqual(calls.slice(1), [
+    `comment ${parent.id}`,
+    `move ${parent.id} Needs input`,
+    `move ${part.id} Needs input`,
+    "notice",
+  ]);
+
+  // A restart emptied the in-memory count. The saved decision finishes the escalation
+  // without counting the run again or deciding twice.
+  resetReviewNotJudged();
+  calls.length = 0;
+  const replaySteps = {
+    done: [`comment on ${parent.key}`],
+    async mark(step: string) {
+      replaySteps.done.push(step);
+    },
+    async decide() {
+      throw new Error("a replay must not decide again");
+    },
+  };
+  assert.equal(
+    await settleReview(
+      { reviewFailures: {}, qaFeedback: {} },
+      { ...input, escalation: decided },
+      { ...deps, steps: replaySteps },
+    ),
+    "escalated",
+  );
+  assert.deepEqual(calls, [
+    `move ${parent.id} Needs input`,
+    `move ${part.id} Needs input`,
+    "notice",
+  ]);
 });

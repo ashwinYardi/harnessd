@@ -13,7 +13,7 @@ import {
 } from "@harnessd/shared";
 import type { ReviewEvent } from "../github/client.ts";
 import type { WorktreeKeepReason } from "../worktrees/index.ts";
-import type { ReviewFinding, ReviewNotJudged } from "./review.ts";
+import type { ReviewEscalation, ReviewFinding, ReviewNotJudged } from "./review.ts";
 
 /** A sub-issue an agent is working on. */
 export interface InFlightRun {
@@ -232,6 +232,11 @@ export interface PendingReviewSettle {
   findings?: ReviewFinding[];
   /** Why the review could not judge the head. */
   notJudged?: ReviewNotJudged;
+  /**
+   * The not-judged escalation this settle already decided, with its reasons in order
+   * (MET-232, D-052). A replay applies it instead of counting the run again.
+   */
+  escalation?: ReviewEscalation;
   /** The run's error, for a failed review. */
   error?: string;
   /** The posted review, when there is one. */
@@ -736,6 +741,8 @@ function pendingReviewSettles(value: unknown): Record<string, PendingReviewSettl
     if (!optionalString(r.error) || !optionalString(r.reviewUrl)) continue;
     const findings = r.findings === undefined ? undefined : reviewFindings(r.findings);
     if (r.findings !== undefined && findings === undefined) continue;
+    const escalation = r.escalation === undefined ? undefined : reviewEscalation(r.escalation);
+    if (r.escalation !== undefined && escalation === undefined) continue;
     if (!Array.isArray(r.done) || !r.done.every((step) => typeof step === "string")) continue;
     out[id] = {
       partId: r.partId,
@@ -747,12 +754,21 @@ function pendingReviewSettles(value: unknown): Record<string, PendingReviewSettl
       ...(r.verdict === undefined ? {} : { verdict: r.verdict }),
       ...(findings === undefined ? {} : { findings }),
       ...(r.notJudged === undefined ? {} : { notJudged: r.notJudged }),
+      ...(escalation === undefined ? {} : { escalation }),
       ...(r.error === undefined ? {} : { error: r.error }),
       ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
       done: r.done,
     };
   }
   return out;
+}
+
+function reviewEscalation(value: unknown): ReviewEscalation | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const e = value as Partial<ReviewEscalation>;
+  if (!Array.isArray(e.reasons) || e.reasons.length === 0) return undefined;
+  if (!e.reasons.every((reason) => typeof reason === "string" && reason !== "")) return undefined;
+  return { reasons: e.reasons };
 }
 
 function isReviewNotJudged(value: unknown): value is ReviewNotJudged {
@@ -832,6 +848,7 @@ function pendingQaReview(value: unknown): PendingQaReview | undefined {
     !optionalEvent(r.event) ||
     !optionalEvent(r.postedAs) ||
     (r.setup !== undefined && typeof r.setup !== "boolean") ||
+    (r.stale !== undefined && typeof r.stale !== "boolean") ||
     (r.notJudged !== undefined &&
       r.notJudged !== "turn_cap" &&
       r.notJudged !== "timeout" &&
@@ -861,6 +878,7 @@ function pendingQaReview(value: unknown): PendingQaReview | undefined {
   if (r.event !== undefined) out.event = r.event;
   if (r.body !== undefined) out.body = r.body;
   if (r.setup !== undefined) out.setup = r.setup;
+  if (r.stale !== undefined) out.stale = r.stale;
   if (r.notJudged !== undefined) out.notJudged = r.notJudged;
   if (r.error !== undefined) out.error = r.error;
   if (r.testTail !== undefined) out.testTail = r.testTail;

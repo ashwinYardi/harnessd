@@ -540,10 +540,24 @@ export type ReviewSettlement = "approved" | "sent_back" | "escalated" | "requeue
 /** The Linear calls a review settle makes. A LinearClient satisfies it. */
 export type ReviewLinear = Pick<LinearClient, "comment" | "moveTo">;
 
+/**
+ * A not-judged escalation a settle decided, with the reasons in order (MET-232, D-052). The
+ * caller saves it before the first write, so a restart finishes the escalation instead of
+ * counting the run again from an empty in-memory map.
+ */
+export interface ReviewEscalation {
+  reasons: string[];
+}
+
 /** The settle writes a retry may skip, kept across ticks (D-058). */
 export interface ReviewSettleSteps {
   done: string[];
   mark(step: string): void | Promise<void>;
+  /**
+   * Called with a not-judged escalation before its first comment or move (MET-232). The
+   * caller saves the decision so a restart can finish it.
+   */
+  decide?(escalation: ReviewEscalation): void | Promise<void>;
 }
 
 export interface ReviewSettleInput {
@@ -554,6 +568,8 @@ export interface ReviewSettleInput {
   verdict?: ReviewVerdict;
   /** Why the run could not judge the head, when it could not (D-052). */
   notJudged?: ReviewNotJudged;
+  /** A not-judged escalation a previous tick already decided (MET-232). */
+  escalation?: ReviewEscalation;
   /** The run's error, for the log line of a failed review. */
   error?: string;
   /** The GitHub review comment, when it was posted. */
@@ -721,6 +737,25 @@ export async function settleReview(
   );
   const design = blocking.filter((finding) => finding.kind === "design");
 
+  /** The comment, detail and reason a not-judged escalation sends, from its saved reasons. */
+  const notJudgedEscalation = (reasons: readonly string[]) => {
+    const head = pr.headRefOid.slice(0, 7);
+    const both = reasons.join("; ");
+    return {
+      reason: "review not judged twice",
+      detail: `review was not judged twice on ${part.key} PR #${pr.number} at ${head}: ${both}. No review failure counted.`,
+      comment: `the review was not judged twice on ${part.key} [PR #${pr.number}](${pr.url}) at \`${head}\`: ${both}. No review failure counted. A human decides (D-052).`,
+    };
+  };
+
+  // A previous tick decided this not-judged escalation and saved it before its writes
+  // (MET-232). Apply the saved reasons; a restart emptied the in-memory count, so counting
+  // again would drop the escalation.
+  if (input.escalation !== undefined) {
+    const saved = notJudgedEscalation(input.escalation.reasons);
+    return escalate(saved.reason, saved.detail, saved.comment);
+  }
+
   // The design rule wins in a mixed verdict: nothing goes back to the builder (D-059).
   if (design.length > 0) {
     return escalate(
@@ -739,12 +774,11 @@ export async function settleReview(
     const reason = notJudgedReason(input.notJudged, input.error);
     const counted = nextNotJudged(part.id, pr.headRefOid, reason);
     if (counted.count >= 2) {
-      const head = counted.head.slice(0, 7);
-      return escalate(
-        "review not judged twice",
-        `review was not judged twice on ${part.key} PR #${pr.number} at ${head}: ${counted.reasons.join("; ")}. No review failure counted.`,
-        `the review was not judged twice on ${part.key} [PR #${pr.number}](${pr.url}) at \`${head}\`: ${counted.reasons.join("; ")}. No review failure counted. A human decides (D-052).`,
-      );
+      const escalation: ReviewEscalation = { reasons: counted.reasons };
+      // Save the decision before the first write, so a restart replays it (MET-232).
+      await steps?.decide?.(escalation);
+      const saved = notJudgedEscalation(escalation.reasons);
+      return escalate(saved.reason, saved.detail, saved.comment);
     }
     reviewNotJudgedRuns.set(part.id, counted);
     log(`${part.key}: review not judged (${reason}), re-queued`);
