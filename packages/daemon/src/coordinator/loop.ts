@@ -2417,6 +2417,19 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     l.done = (async () => {
       let result: ReviewRunResult;
       const recorded = s.reviewerHeads?.[part.id];
+      const savedBlocking = (recorded?.findings ?? []).filter(
+        (finding) => finding.severity === "blocking",
+      );
+      const failures = s.reviewFailures[part.id] ?? 0;
+      // A re-review checks only the saved findings and the delta (MET-234, D-061).
+      const reReview =
+        recorded?.verdict === "changes_requested" &&
+        savedBlocking.length > 0 &&
+        recorded.sha !== pr.headRefOid &&
+        failures > 0;
+      // An escalated review cleared its failure count, so the next review after the head
+      // moves is a full first review, not a delta from the rejected head (D-061).
+      const useSince = recorded !== undefined && (recorded.verdict === "approved" || failures > 0);
       try {
         result = await runReview(
           {
@@ -2425,9 +2438,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             pr,
             budgetMs: budget,
             maxTurns: maxTurnsFor("reviewer", part.size, config.limits),
-            ...(recorded === undefined
-              ? {}
-              : { since: { sha: recorded.sha, findings: recorded.findings } }),
+            ...(useSince && recorded !== undefined
+              ? { since: { sha: recorded.sha, findings: recorded.findings } }
+              : {}),
+            ...(reReview ? { reReview: true } : {}),
           },
           {
             github,

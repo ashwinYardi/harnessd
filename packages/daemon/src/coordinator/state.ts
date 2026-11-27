@@ -636,13 +636,18 @@ function reviewFinding(value: unknown): ReviewFinding | undefined {
   if (f.severity !== "blocking" && f.severity !== "nit") return undefined;
   if (f.kind !== "code" && f.kind !== "design") return undefined;
   if (typeof f.text !== "string" || f.text.trim() === "") return undefined;
-  return {
+  const finding: ReviewFinding = {
     file: f.file,
     line: f.line,
     severity: f.severity,
     kind: f.kind,
     text: f.text,
   };
+  if (typeof f.item === "string" && f.item.trim() !== "") finding.item = f.item.trim();
+  if (typeof f.evidence === "string" && f.evidence.trim() !== "") {
+    finding.evidence = f.evidence.trim();
+  }
+  return finding;
 }
 
 function reviewFindings(value: unknown): ReviewFinding[] | undefined {
