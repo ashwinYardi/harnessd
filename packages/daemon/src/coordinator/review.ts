@@ -2,6 +2,9 @@
 // The reviewer reads the diff, the parent issue and the part brief in a read-only PR-head
 // checkout, then returns a strict JSON verdict. A blocking finding sends the PR back; a nit
 // does not. See D-060.
+
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import {
   emptyTokenUsage,
   type HarnessAdapter,
@@ -12,12 +15,17 @@ import {
   type TokenUsage,
 } from "@harnessd/shared";
 import type { GitHub, PullRequest } from "../github/client.ts";
+import type { LinearClient } from "../linear/client.ts";
 import type { TaskWorktrees } from "../worktrees/index.ts";
 import { agentPromptHeader, partBrief } from "./dispatch.ts";
 import { runForReply } from "./grill.ts";
+import type { Notifier } from "./notifier.ts";
 import { type AgentMemory, memorySection } from "./prompt.ts";
 import { cutDiff, MAX_PROMPT_DIFF, parseStrictJson } from "./qa.ts";
 import { extractSection } from "./split.ts";
+import type { LoopState, QaFeedback } from "./state.ts";
+
+const runGit = promisify(execFile);
 
 /** One finding of a review verdict. */
 export interface ReviewFinding {
@@ -283,6 +291,30 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function oneLine(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+/** Reads the delta `base..head` from the PR-head checkout; undefined when base is not its ancestor. */
+async function gitDelta(worktree: string, base: string, head: string): Promise<string | undefined> {
+  try {
+    await runGit("git", ["-C", worktree, "merge-base", "--is-ancestor", base, head], {
+      timeout: 30_000,
+    });
+  } catch {
+    return undefined;
+  }
+  try {
+    const { stdout } = await runGit("git", ["-C", worktree, "diff", `${base}..${head}`], {
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 30_000,
+    });
+    return stdout;
+  } catch {
+    return undefined;
+  }
+}
+
 export interface ReviewCommentInput {
   part: LinkedIssue;
   parent: Issue;
@@ -322,6 +354,8 @@ export interface ReviewRunInput {
   budgetMs: number;
   /** The reviewer turn cap for the part's size (D-045, D-047). */
   maxTurns?: number;
+  /** The last judged head, so a new head gets a delta review (MET-225, D-060). */
+  since?: { sha: string; findings: readonly ReviewFinding[] };
 }
 
 export interface ReviewRunDeps {
@@ -333,6 +367,8 @@ export interface ReviewRunDeps {
   prepare?: (worktree: string, runId: string) => Promise<Record<string, string>>;
   /** Told the checkout in use ("" once removed), so a crash can clean it up. */
   onWorktree?: (path: string) => void;
+  /** Reads `base..head` from the checkout, or undefined when base is not an ancestor. */
+  deltaDiff?: (worktree: string, base: string, head: string) => Promise<string | undefined>;
   memory?: AgentMemory;
   /** Aborted by a pause: the reviewer is stopped and the checkout removed (D-041). */
   signal?: AbortSignal;
@@ -351,6 +387,8 @@ export interface ReviewRunResult {
   limited?: boolean;
   /** `signal` stopped the run. Nothing is posted and no verdict is recorded. */
   cancelled?: boolean;
+  /** A turn cap, timeout, stall or invalid JSON: not judged, so no review failure (MET-225). */
+  notJudged?: "turn_cap" | "timeout" | "stalled" | "not_json";
   error?: string;
 }
 
@@ -395,14 +433,26 @@ export async function runReview(
     if (current?.number !== pr.number || current.headRefOid !== pr.headRefOid) {
       throw new Error(`PR #${pr.number} changed while reading its diff`);
     }
+    let delta: string | undefined;
+    if (input.since !== undefined && input.since.sha !== pr.headRefOid) {
+      const read = deps.deltaDiff ?? gitDelta;
+      try {
+        delta = await read(path, input.since.sha, pr.headRefOid);
+      } catch (error) {
+        log(`${part.key}: could not read the review delta: ${message(error)}`);
+      }
+    }
     const prompt = buildReviewPrompt({
       agent,
       part,
       parent,
       pr,
       diff,
+      ...(delta === undefined ? {} : { delta }),
+      ...(input.since === undefined ? {} : { earlierFindings: input.since.findings }),
       ...(deps.memory === undefined ? {} : { memory: deps.memory }),
     });
+
     const task = buildReviewTask({
       id,
       title: `Review ${part.key}: PR #${pr.number}`,
@@ -421,12 +471,19 @@ export async function runReview(
     if (cancelled())
       return { pr, tokens, cancelled: true, ...(turns === undefined ? {} : { turns }) };
     if (!reply.ok) {
+      const notJudged =
+        reply.reason === "turn_cap" || reply.reason === "stalled"
+          ? reply.reason
+          : reply.timeout === true
+            ? "timeout"
+            : undefined;
       return {
         pr,
         tokens,
         ...(turns === undefined ? {} : { turns }),
         ...(usageUnknown === undefined ? {} : { usageUnknown }),
         ...(reply.limited ? { limited: true } : {}),
+        ...(notJudged === undefined ? {} : { notJudged }),
         error: reply.error,
       };
     }
@@ -437,6 +494,7 @@ export async function runReview(
         tokens,
         ...(turns === undefined ? {} : { turns }),
         ...(usageUnknown === undefined ? {} : { usageUnknown }),
+        ...(parsed.kind === "not_json" ? { notJudged: "not_json" as const } : {}),
         error: `the review verdict was unusable: ${parsed.error}`,
       };
     }
@@ -468,4 +526,247 @@ export async function runReview(
       }
     }
   }
+}
+
+// --- settling a review verdict (MET-225, D-014, D-046, D-052, D-059) ------------
+
+/** A review that gave no usable verdict (MET-225, D-052). */
+export type ReviewNotJudged = "turn_cap" | "timeout" | "stalled" | "not_json";
+
+/** What a review settle did: send back, approve, ask a human, or retry. */
+export type ReviewSettlement = "approved" | "sent_back" | "escalated" | "requeued";
+
+/** The Linear calls a review settle makes. A LinearClient satisfies it. */
+export type ReviewLinear = Pick<LinearClient, "comment" | "moveTo">;
+
+export interface ReviewSettleInput {
+  part: LinkedIssue;
+  parent: Issue;
+  pr: PullRequest;
+  /** The judged verdict; unset when the run gave no verdict. */
+  verdict?: ReviewVerdict;
+  /** Why the run could not judge the head, when it could not (D-052). */
+  notJudged?: ReviewNotJudged;
+  /** The run's error, for the log line of a failed review. */
+  error?: string;
+  /** The GitHub review comment, when it was posted. */
+  reviewUrl?: string;
+}
+
+export interface ReviewSettleDeps {
+  linear: ReviewLinear;
+  notifier: Notifier;
+  /** `limits.qa_max_failures`: failed reviews on one part before a human is asked (D-014). */
+  maxFailures: number;
+  log?: (line: string) => void;
+}
+
+/**
+ * In-memory not-judged reviews per part, with the head they happened on and why (MET-225,
+ * like D-052 for QA). A restart resets it, which costs at most one extra review run.
+ */
+const reviewNotJudgedRuns = new Map<string, { head: string; count: number; reasons: string[] }>();
+
+/** Forgets the counted not-judged reviews; tests start clean with it. */
+export function resetReviewNotJudged(): void {
+  reviewNotJudgedRuns.clear();
+}
+
+function nextNotJudged(
+  partId: string,
+  head: string,
+  reason: string,
+): { head: string; count: number; reasons: string[] } {
+  const previous = reviewNotJudgedRuns.get(partId);
+  const sameHead = previous?.head === head;
+  return {
+    head,
+    count: sameHead ? (previous?.count ?? 0) + 1 : 1,
+    reasons: sameHead ? [...(previous?.reasons ?? []), reason] : [reason],
+  };
+}
+
+function clearNotJudged(partId: string): void {
+  reviewNotJudgedRuns.delete(partId);
+}
+
+function times(n: number): string {
+  return n === 1 ? "once" : n === 2 ? "twice" : `${n} times`;
+}
+
+function notJudgedReason(notJudged: ReviewNotJudged, error: string | undefined): string {
+  switch (notJudged) {
+    case "timeout":
+      return "timed out";
+    case "stalled":
+      return "stalled";
+    case "turn_cap": {
+      const cap = /turn cap \(\d+ turns\)/.exec(error ?? "");
+      return cap?.[0] ?? "turn cap";
+    }
+    case "not_json": {
+      const text = error ?? "unknown";
+      const at = text.indexOf("not JSON: ");
+      return `verdict not JSON: ${at === -1 ? oneLine(text) : text.slice(at + 10)}`;
+    }
+  }
+}
+
+/** One numbered blocking fix for the builder: `R1 (file:line) text` (MET-225). */
+export function reviewFindingList(findings: readonly ReviewFinding[]): string[] {
+  return findings
+    .filter((finding) => finding.severity === "blocking")
+    .map((finding, i) => `R${i + 1} (${finding.file}:${finding.line}) ${finding.text}`);
+}
+
+/**
+ * Applies one review. A blocking design finding moves the part and parent to Needs input
+ * with one parent comment and one notice: the coordinator cannot re-plan by itself (D-059).
+ * A blocking code finding sets `qaFeedback` with source `review` and moves the part to
+ * Ready, so its next run resumes the builder (D-046). An approve sends nothing back and
+ * leaves nits only in the PR comment. Two failed reviews, or two not-judged reviews on one
+ * head, move the part and parent to Needs input (D-014, D-052).
+ */
+export async function settleReview(
+  state: Pick<LoopState, "reviewFailures" | "qaFeedback"> & {
+    harnessSwitch?: LoopState["harnessSwitch"];
+  },
+  input: ReviewSettleInput,
+  deps: ReviewSettleDeps,
+): Promise<ReviewSettlement> {
+  const { part, parent, pr } = input;
+  const log = deps.log ?? (() => {});
+  const safely = async (what: string, fn: () => Promise<unknown>): Promise<void> => {
+    try {
+      await fn();
+    } catch (error) {
+      log(`could not ${what}: ${message(error)}`);
+    }
+  };
+  const escalate = async (
+    reason: string,
+    detail: string,
+    comment: string,
+  ): Promise<ReviewSettlement> => {
+    await safely(`comment on ${parent.key}`, () =>
+      deps.linear.comment(parent.id, `**harnessd review**: ${comment}\n`),
+    );
+    await safely(`move ${parent.key} to Needs input`, () =>
+      deps.linear.moveTo(parent.id, "Needs input"),
+    );
+    await safely(`move ${part.key} to Needs input`, () =>
+      deps.linear.moveTo(part.id, "Needs input"),
+    );
+    await safely("send the notice", () =>
+      deps.notifier.notify({
+        kind: "needs_input",
+        issue: { key: parent.key, url: parent.url },
+        prs: [{ number: pr.number, url: pr.url }],
+        reason,
+        detail,
+      }),
+    );
+    delete state.reviewFailures[part.id];
+    delete state.qaFeedback[part.id];
+    if (state.harnessSwitch !== undefined) {
+      // Needs input ends any harness switch for the part and the parent (D-048).
+      delete state.harnessSwitch[part.id];
+      delete state.harnessSwitch[parent.id];
+    }
+    clearNotJudged(part.id);
+    log(`${part.key}: ${detail}, Needs input`);
+    return "escalated";
+  };
+
+  const blocking = (input.verdict?.findings ?? []).filter(
+    (finding) => finding.severity === "blocking",
+  );
+  const design = blocking.filter((finding) => finding.kind === "design");
+
+  // The design rule wins in a mixed verdict: nothing goes back to the builder (D-059).
+  if (design.length > 0) {
+    return escalate(
+      "reviewer found a design fault",
+      `review found a design fault on ${part.key} PR #${pr.number}`,
+      [
+        `the review found ${design.length} blocking design finding${design.length === 1 ? "" : "s"} on ${part.key} [PR #${pr.number}](${pr.url}).`,
+        "A human decides; nothing was sent back to the builder (D-059).",
+        "",
+        ...design.map(findingLine),
+      ].join("\n"),
+    );
+  }
+
+  if (input.notJudged !== undefined) {
+    const reason = notJudgedReason(input.notJudged, input.error);
+    const counted = nextNotJudged(part.id, pr.headRefOid, reason);
+    if (counted.count >= 2) {
+      const head = counted.head.slice(0, 7);
+      return escalate(
+        "review not judged twice",
+        `review was not judged twice on ${part.key} PR #${pr.number} at ${head}: ${counted.reasons.join("; ")}. No review failure counted.`,
+        `the review was not judged twice on ${part.key} [PR #${pr.number}](${pr.url}) at \`${head}\`: ${counted.reasons.join("; ")}. No review failure counted. A human decides (D-052).`,
+      );
+    }
+    reviewNotJudgedRuns.set(part.id, counted);
+    log(`${part.key}: review not judged (${reason}), re-queued`);
+    return "requeued";
+  }
+
+  if (input.verdict === undefined) {
+    const failures = (state.reviewFailures[part.id] ?? 0) + 1;
+    if (failures >= deps.maxFailures) {
+      return escalate(
+        `review failed ${times(failures)}`,
+        `review failed ${times(failures)} on ${part.key}`,
+        `the review failed ${times(failures)} on ${part.key} [PR #${pr.number}](${pr.url}), so this needs a human (D-014). ${part.key} and ${parent.key} are in Needs input.\n\n${oneLine(input.error ?? "no verdict")}`,
+      );
+    }
+    state.reviewFailures[part.id] = failures;
+    log(`${part.key}: review failed (${oneLine(input.error ?? "no verdict")}), re-queued`);
+    return "requeued";
+  }
+
+  // A judged verdict clears the not-judged count for this part (D-052).
+  clearNotJudged(part.id);
+
+  if (input.verdict.decision === "approve") {
+    delete state.reviewFailures[part.id];
+    delete state.qaFeedback[part.id];
+    log(`${part.key}: review approved, PR #${pr.number}`);
+    return "approved";
+  }
+
+  const failures = (state.reviewFailures[part.id] ?? 0) + 1;
+  if (failures >= deps.maxFailures) {
+    return escalate(
+      `review failed ${times(failures)}`,
+      `review failed ${times(failures)} on ${part.key}`,
+      [
+        `the review found blocking findings ${times(failures)} on ${part.key} [PR #${pr.number}](${pr.url}), so this needs a human (D-014). ${part.key} and ${parent.key} are in Needs input, and nothing is sent back again.`,
+        "",
+        ...blocking.map(findingLine),
+      ].join("\n"),
+    );
+  }
+
+  const feedback: QaFeedback = {
+    source: "review",
+    prUrl: pr.url,
+    failing: reviewFindingList(blocking),
+  };
+  if (input.reviewUrl !== undefined) feedback.reviewUrl = input.reviewUrl;
+  const body = [
+    `**harnessd review**: changes requested on [PR #${pr.number}](${pr.url}) (round ${failures} of ${deps.maxFailures}, D-014). Back to Ready so the builder fixes these findings.`,
+    "",
+    ...reviewFindingList(blocking).map((line) => `- ${line}`),
+  ].join("\n");
+  await safely(`comment on ${part.key}`, () => deps.linear.comment(part.id, `${body}\n`));
+  await safely(`re-queue ${part.key}`, () => deps.linear.moveTo(part.id, "Ready"));
+  state.qaFeedback[part.id] = feedback;
+  state.reviewFailures[part.id] = failures;
+  log(
+    `${part.key}: review changes requested, sent back with ${blocking.length} finding${blocking.length === 1 ? "" : "s"}`,
+  );
+  return "sent_back";
 }

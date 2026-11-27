@@ -51,6 +51,7 @@ const state: LoopState = {
   ],
   attempts: { "id-1": 1 },
   qaFailures: { "parent-1": 1 },
+  reviewFailures: { "id-1": 1 },
   qaFeedback: { "id-1": { prUrl: "https://github.test/pull/7", failing: ["Works: no test"] } },
   merges: [
     {
@@ -204,6 +205,7 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
     interrupted: state.interrupted,
     attempts: { a: 1 },
     qaFailures: { p: 1 },
+    reviewFailures: {},
     qaFeedback: { a: { failing: ["x"], reviewUrl: "u" } },
     merges: state.merges,
     gateFailures: { p: 2 },
@@ -549,6 +551,41 @@ test("reviewerHeads is optional, keeps a valid entry and drops a malformed one (
   state.reviewerHeads = parsed.reviewerHeads ?? {};
   await store.save(state);
   assert.deepEqual((await store.load()).reviewerHeads, state.reviewerHeads);
+});
+
+test("reviewFailures is optional, keeps positive counts and drops a malformed one (MET-225)", async () => {
+  assert.deepEqual(parseLoopState('{"inFlight":[]}').reviewFailures, {}, "old files still load");
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { a: 1, b: 2, c: 0, d: -1, e: 1.5, f: "2" },
+    }),
+  );
+  assert.deepEqual(parsed.reviewFailures, { a: 1, b: 2 });
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.reviewFailures = parsed.reviewFailures;
+  await store.save(state);
+  assert.deepEqual((await store.load()).reviewFailures, state.reviewFailures);
+});
+
+test("qaFeedback keeps the review send-back source and drops an unknown one (MET-225)", async () => {
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      qaFeedback: {
+        a: { source: "review", failing: ["R1 (src/a.ts:1) Fix it."] },
+        b: { source: "qa", failing: ["Works: no test"] },
+        c: { source: "other", failing: ["Works: no test"] },
+      },
+    }),
+  );
+  assert.deepEqual(parsed.qaFeedback, {
+    a: { source: "review", failing: ["R1 (src/a.ts:1) Fix it."] },
+    b: { source: "qa", failing: ["Works: no test"] },
+    c: { failing: ["Works: no test"] },
+  });
 });
 
 test("pendingReview is optional, keeps a valid entry and drops a malformed one (MET-224, D-058)", async () => {

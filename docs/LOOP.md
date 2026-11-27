@@ -20,7 +20,7 @@ harnessd run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
 1. **Re-queue.** Any run recorded in `loop.json` that this process does not own was left by a previous process. Its worktree is removed unless it holds unshipped work; then it is kept and the sub-issue resumes in it. Its sub-issue goes back to Ready, with no attempt counted. A run a pause had already marked keeps its worktree (see Pause).
 2. **Pause check.** The pause flag is re-read. If it is set, anything still running is cancelled and the tick stops.
 3. **Release holds.** A usage-limit hold whose time has passed ends (see Usage limits).
-4. **Retry pending QA.** Post unfinished GitHub reviews and finish the Linear writes for verdicts in `pendingQa`. Each retry skips completed writes.
+4. **Retry pending QA and reviews.** Post unfinished GitHub reviews and finish the Linear writes for verdicts in `pendingQa` or `pendingReview`. Each retry skips completed writes.
 5. **State repair.** A shipped part that Linear moved back to In Progress goes to In Review again, before dispatch (see Ship). A split record whose parent is Done or Canceled is dropped (see Split).
 6. **Orphan sweep.** The first tick after the daemon starts moves each part or QA sub-issue listed in a split record that Linear shows In Progress with no run in flight, no `pendingQa` record and no `shipped` record back to Ready, with one line: `<key>: In Progress with no run after restart, back to Ready` (MET-214, D-039, D-057, D-058). A split parent is never moved, because it is In Progress by design. A failed move is logged and kept in memory, and later ticks retry it until it succeeds; the sweep itself does not run again.
 7. **Merge.** Every QA approval recorded in `loop.json` goes one step through the merge gate (see Merge).
@@ -243,6 +243,37 @@ harnessd resume                    # "Resumed."
 - **A cancelled QA round** stops its tests and its QA agent, keeps the PR checkout in use and is recorded the same way. It posts no review, counts no QA failure and sends no part back. When QA runs again, the kept checkout is removed and the PR head is checked out afresh, in the same round.
 - **Resume.** The next dispatch of that sub-issue **reuses** the kept worktree: same branch and path, with the earlier work, committed or not. The prompt then says so, after any QA feedback. This is also how a worktree kept for unshipped work resumes. The kept worktree is removed only if the branch name changed in the meantime (the issue was renamed), and the guard still keeps it when it holds unshipped work. Once the resumed run finishes, its worktree is removed when it holds no unshipped work.
 - **Restart.** Paused survives a restart. `harnessd run` while paused starts the API and the loop in the paused state and prints `harnessd run: paused since … Run "harnessd resume" to dispatch again.`
+
+## Review
+The reviewer judges each part PR's code before QA (D-060). It runs read-only in a scratch checkout of the PR head, holds one `max_concurrent` slot, and uses the part's size budget and reviewer turn cap. Code: `packages/daemon/src/coordinator/review.ts`.
+
+A review starts when a shipped part is In Review and `reviewerHeads` in `loop.json` has no verdict for the current PR head. Only an admitted parent's parts get a review, and a parent in Needs input keeps its slot with no new review (D-050, D-057). A head equal to an approved or sent-back sha gets no new review.
+
+The reviewer returns strict JSON:
+
+```json
+{
+  "decision": "approve" | "changes_requested",
+  "findings": [
+    { "file": "string", "line": 1, "severity": "blocking" | "nit", "kind": "code" | "design", "text": "string" }
+  ]
+}
+```
+
+The daemon posts one GitHub `COMMENT` review at the head with every blocking finding and nit, each with its file and line. Nits stay on the PR: they never send a part back, never reach `qaFeedback` and never start the builder.
+
+After the verdict:
+
+| Result | What happens |
+|---|---|
+| approved | Nothing is sent back. `reviewerHeads` records the approved head, and QA may start on it. |
+| blocking code finding | `qaFeedback[part.id]` gets `source: "review"` and a numbered fix list, `R1 (file:line) text`. The part goes to Ready, and its next run is a send-back: it resumes the builder's own session when D-046 allows it, otherwise it starts cold. The prompt says to fix only these findings, run focused tests and the Verify commands, and not commit. Nothing goes to the coordinator (D-059). |
+| blocking design finding | The part and the parent move to Needs input. One parent comment lists the design findings, and one `needs_input` notice goes out with the reason `reviewer found a design fault`. Nothing is sent back to the builder. In a mixed verdict, the design rule wins (D-059). |
+| review failed twice on one part | The part and the parent move to Needs input with one comment and one notice, and nothing is sent back again. `reviewFailures` counts failed reviews per part, apart from QA and gate failures, and reuses `limits.qa_max_failures` (default 2, D-014). It is cleared at Done and on escalation. |
+| not judged | A turn cap, a timeout, a stall or a reply that is not JSON after the backslash repair is not judged (D-052). The same head is re-queued with no review failure and no `reviewerHeads` entry, and one log line says `<part key>: review not judged (<reason>), re-queued`. A timeout or stall also moves the next run to the next harness (D-048). |
+| not judged twice on one head | The part and the parent move to Needs input. One comment on the parent states both reasons and one notice goes out with the reason `review not judged twice`. No review failure is counted. The in-memory count clears on a judged verdict, a new head and an escalation. |
+
+**Delta review (D-060).** `reviewerHeads[part.id]` holds `{ sha, verdict, findings, at }`. On a new head, the review diffs the recorded `sha..head` when the recorded sha is an ancestor of the head, and otherwise reviews the full PR diff, for example after a gate conflict merge. Either prompt lists the earlier blocking findings so the reviewer checks that they are fixed.
 
 ## QA
 QA reviews one PR, when that part reaches In Review (D-040, D-049). It checks the part's own "Done when" and "Verify" sections against the running product before anything merges (D-013, D-051). A part body from before D-049 has no such sections; QA then falls back to the parent's checklist. QA does not read the whole repo.
