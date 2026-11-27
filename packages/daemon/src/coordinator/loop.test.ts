@@ -4167,6 +4167,172 @@ test("a blocking code finding sends the part back and the next run resumes the b
   await t.loop.idle();
 });
 
+test("a re-review checks only the saved findings and sends back only the open one (MET-234, D-061)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-rereview-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
+  await writeFile(join(repo, "README.md"), "hi\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+  const branch = "met-234-api";
+  git(repo, "checkout", "-q", "-b", branch);
+  await writeFile(join(repo, "api.ts"), "export const cache = [];\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "round 1");
+  const sha7 = git(repo, "rev-parse", "HEAD");
+  await writeFile(join(repo, "api.ts"), "export const cache = new Map();\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "round 2");
+  const sha8 = git(repo, "rev-parse", "HEAD");
+  const worktrees = createGitWorktrees({ repoDir: repo, root: join(root, "worktrees") });
+
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const part = linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: "In Review",
+    description: [
+      partMarker("backend"),
+      "",
+      "**Goal**",
+      "Ship the API.",
+      "",
+      "**Done when**",
+      "- [ ] Works",
+      "",
+      "**Size**: S",
+    ].join("\n"),
+  });
+  const state = emptyLoopState();
+  state.splits = {
+    [parent.id]: {
+      key: parent.key,
+      parts: [part.id],
+      qa: "qa-1",
+      at: "2026-11-23T10:00:00.000Z",
+    },
+  };
+  state.shipped = {
+    [part.id]: {
+      key: part.key,
+      branch,
+      prUrl: "https://github.test/o/r/pull/7",
+      at: "2026-11-23T10:01:00.000Z",
+    },
+  };
+  const blocking: ReviewFinding = {
+    file: "api.ts",
+    line: 1,
+    severity: "blocking",
+    kind: "code",
+    text: "The cache grows without a limit.",
+  };
+  state.reviewerHeads = {
+    [part.id]: {
+      sha: sha7,
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  state.reviewFailures = { [part.id]: 1 };
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 1, qa_max_failures: 3 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const store = memoryStore(state);
+  const t = setup({ config, linear, worktrees, store });
+  const opened = t.gh.open(part.key, 7, branch);
+  opened.headRefOid = sha8;
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+  let pending = t.adapter.pending[0];
+  for (let i = 0; i < 200 && pending === undefined; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    pending = t.adapter.pending[0];
+  }
+  assert.ok(pending, "the re-review run started");
+  const run = pending.task;
+  assert.match(run.prompt, /## Delta since the last review/, "the re-review prompt");
+  assert.match(run.prompt, /R1 \(api\.ts:1\) The cache grows without a limit\./);
+  assert.match(
+    run.prompt,
+    /Raise a new blocking finding only for code in the delta that breaks a named Done-when item/,
+  );
+  assert.doesNotMatch(run.prompt, /src\/x\.ts/, "the full PR diff is left out");
+  assert.doesNotMatch(run.prompt, /## Senior-dev rubric/, "the rubric is left out");
+
+  pending.finish(
+    "ok",
+    undefined,
+    JSON.stringify({
+      decision: "changes_requested",
+      saved: [{ id: "R1", fixed: false, evidence: "The cache is still unbounded." }],
+      findings: [],
+    }),
+  );
+  await t.loop.idle();
+
+  assert.equal(part.state, "Ready", "the part is sent back");
+  assert.equal(store.state.reviewFailures[part.id], 2, "the re-review counts one failure");
+  assert.deepEqual(store.state.qaFeedback[part.id]?.failing, [
+    "R1 (api.ts:1) The cache grows without a limit.",
+  ]);
+  assert.equal(store.state.reviewerHeads?.[part.id]?.sha, sha8, "the new head is saved");
+  assert.deepEqual(store.state.reviewerHeads?.[part.id]?.findings, [blocking]);
+  assert.match(
+    t.gh.reviews.at(-1)?.body ?? "",
+    /R1 \(api\.ts:1\): not fixed: The cache is still unbounded\./,
+  );
+});
+
+test("a re-review with no readable delta falls back to the full review (MET-234, D-061)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.reviewFailures = { [fx.part.id]: 1 };
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store: memoryStore(fx.state) });
+  const opened = t.gh.open(fx.part.key, 7);
+  opened.headRefOid = "sha8";
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [fx.part.key]);
+  const pending = await nextRun(t.adapter);
+  assert.match(pending.task.prompt, /## Diff/, "the full review keeps the full diff");
+  assert.match(pending.task.prompt, /## Earlier blocking findings \(1\)/);
+  assert.match(pending.task.prompt, /src\/api\.ts:12/, "the earlier finding is listed");
+  assert.ok(
+    t.logs.includes(`${fx.part.key}: no review delta, full review`),
+    "the fallback is logged once",
+  );
+
+  pending.finish("ok", undefined, JSON.stringify({ decision: "approve", findings: [] }));
+  await t.loop.idle();
+  assert.equal(t.gh.reviews.at(-1)?.commitId, "sha8");
+});
+
 test("a nit never sends a part back (MET-225)", async () => {
   const fx = reviewFixture({ withQa: false });
   const store = memoryStore(fx.state);

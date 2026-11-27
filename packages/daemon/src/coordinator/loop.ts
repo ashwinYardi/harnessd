@@ -2417,6 +2417,15 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     l.done = (async () => {
       let result: ReviewRunResult;
       const recorded = s.reviewerHeads?.[part.id];
+      const savedBlocking = (recorded?.findings ?? []).filter(
+        (finding) => finding.severity === "blocking",
+      );
+      // A re-review checks only the saved findings and the delta (MET-234, D-061).
+      const reReview =
+        recorded?.verdict === "changes_requested" &&
+        savedBlocking.length > 0 &&
+        recorded.sha !== pr.headRefOid &&
+        (s.reviewFailures[part.id] ?? 0) > 0;
       try {
         result = await runReview(
           {
@@ -2428,6 +2437,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             ...(recorded === undefined
               ? {}
               : { since: { sha: recorded.sha, findings: recorded.findings } }),
+            ...(reReview ? { reReview: true } : {}),
           },
           {
             github,

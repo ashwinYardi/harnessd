@@ -5,9 +5,11 @@ import { mergeLayers } from "../config/merge.ts";
 import type { PullRequest } from "../github/client.ts";
 import { maxTurns } from "./dispatch.ts";
 import {
+  buildReReviewPrompt,
   buildReviewPrompt,
   buildReviewTask,
   formatReviewComment,
+  parseReReviewVerdict,
   parseReviewVerdict,
   type ReviewEscalation,
   type ReviewFinding,
@@ -152,6 +154,312 @@ test("a delta replaces the full diff and earlier blocking findings are listed (M
   assert.ok(!prompt.includes("FULL DIFF"));
   assert.ok(prompt.includes("src/cache.ts:42"));
   assert.ok(prompt.includes("The cache grows without a limit."));
+});
+
+const savedFindings: ReviewFinding[] = [
+  {
+    file: "src/cache.ts",
+    line: 42,
+    severity: "blocking",
+    kind: "code",
+    text: "The cache grows without a limit.",
+  },
+  {
+    file: "src/api.ts",
+    line: 7,
+    severity: "blocking",
+    kind: "design",
+    text: "The seam sits in the wrong module.",
+  },
+];
+
+const doneWhen = ["The review run works", "A re-review checks only the saved findings"];
+
+const reReviewDelta = [
+  "diff --git a/src/cache.ts b/src/cache.ts",
+  "@@ -1 +1 @@",
+  "-const cache = [];",
+  "+const cache = new Map();",
+  "diff --git a/src/new.ts b/src/new.ts",
+  "@@ -0,0 +1 @@",
+  "+export const reviewed = true;",
+].join("\n");
+
+test("a re-review prompt lists the saved findings and the delta-only rules (MET-234, D-061)", () => {
+  const prompt = buildReReviewPrompt({
+    agent,
+    part,
+    pr: pr(),
+    delta: reReviewDelta,
+    savedFindings,
+  });
+  for (const text of [
+    "You are reviewer, the harnessd reviewer agent.",
+    "## PR under review",
+    "sha223",
+    "## Delta since the last review",
+    "+export const reviewed = true;",
+    "- R1 (src/cache.ts:42) The cache grows without a limit.",
+    "- R2 (src/api.ts:7) The seam sits in the wrong module.",
+    "Judge only the saved findings above and the delta since the last review.",
+    "Raise a new blocking finding only for code in the delta that breaks a named Done-when item.",
+    "Mark any other new finding as a nit.",
+    "**Goal**\nBuild the review run.",
+    "**Done when**\n- [ ] The review run works",
+    "**Verify**\n- `pnpm --filter @harnessd/daemon test` → exit 0",
+    '"id": "R1"',
+    "exactly one entry for each saved id (R1, R2)",
+  ]) {
+    assert.ok(prompt.includes(text), text);
+  }
+  assert.ok(!prompt.includes("## Diff"), "no full-diff heading");
+  assert.ok(
+    !prompt.includes("Parent body: the reviewer reviews each PR before QA."),
+    "no parent body",
+  );
+  assert.ok(!prompt.includes("## Senior-dev rubric"), "no senior-dev rubric");
+});
+
+test("parseReReviewVerdict carries open saved findings and drops out-of-delta blocking findings (MET-234, D-061)", () => {
+  const log: string[] = [];
+  const value = {
+    decision: "changes_requested",
+    saved: [
+      { id: "R1", fixed: true, evidence: "The cache is bounded now." },
+      { id: "R2", fixed: false, evidence: "The seam still sits in the wrong module." },
+    ],
+    findings: [
+      {
+        file: "src/new.ts",
+        line: 3,
+        severity: "blocking",
+        kind: "code",
+        text: "It breaks the second item.",
+        item: "A re-review checks only the saved findings",
+      },
+      {
+        file: "src/out.ts",
+        line: 4,
+        severity: "blocking",
+        kind: "code",
+        text: "Outside the delta.",
+        item: "The review run works",
+      },
+      {
+        file: "src/new.ts",
+        line: 5,
+        severity: "blocking",
+        kind: "design",
+        text: "No Done-when item.",
+      },
+      {
+        file: "src/new.ts",
+        line: 6,
+        severity: "nit",
+        kind: "code",
+        text: "Polish.",
+      },
+    ],
+  };
+  const parsed = parseReReviewVerdict(
+    JSON.stringify(value),
+    savedFindings,
+    doneWhen,
+    reReviewDelta,
+    (line) => log.push(line),
+  );
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  assert.deepEqual(parsed.verdict.saved, value.saved);
+  assert.deepEqual(parsed.verdict.findings, [
+    savedFindings[1],
+    {
+      file: "src/new.ts",
+      line: 3,
+      severity: "blocking",
+      kind: "code",
+      text: "It breaks the second item.",
+      item: "A re-review checks only the saved findings",
+    },
+    { file: "src/out.ts", line: 4, severity: "nit", kind: "code", text: "Outside the delta." },
+    { file: "src/new.ts", line: 5, severity: "nit", kind: "design", text: "No Done-when item." },
+    { file: "src/new.ts", line: 6, severity: "nit", kind: "code", text: "Polish." },
+  ]);
+  assert.equal(log.length, 2, "one line per new blocking finding changed to a nit");
+
+  const approved = parseReReviewVerdict(
+    JSON.stringify({
+      decision: "approve",
+      saved: [
+        { id: "R1", fixed: true, evidence: "Fixed." },
+        { id: "R2", fixed: true, evidence: "Fixed too." },
+      ],
+      findings: [
+        {
+          file: "src/out.ts",
+          line: 4,
+          severity: "blocking",
+          kind: "code",
+          text: "Outside the delta.",
+          item: "The review run works",
+        },
+      ],
+    }),
+    savedFindings,
+    doneWhen,
+    reReviewDelta,
+  );
+  assert.equal(
+    approved.ok,
+    true,
+    "an out-of-delta blocking finding becomes a nit, so approve holds",
+  );
+  assert.deepEqual(approved.ok ? approved.verdict.findings : undefined, [
+    { file: "src/out.ts", line: 4, severity: "nit", kind: "code", text: "Outside the delta." },
+  ]);
+});
+
+test("parseReReviewVerdict is strict about saved ids and the decision (MET-234, D-061)", () => {
+  const savedOk = [
+    { id: "R1", fixed: true, evidence: "Fixed." },
+    { id: "R2", fixed: false, evidence: "Not fixed." },
+  ];
+  const finding = {
+    file: "src/new.ts",
+    line: 1,
+    severity: "blocking",
+    kind: "code",
+    text: "It breaks an item.",
+    item: "The review run works",
+  };
+  const bad = (value: unknown) => {
+    const r = parseReReviewVerdict(JSON.stringify(value), savedFindings, doneWhen, reReviewDelta);
+    assert.equal(r.ok, false, JSON.stringify(value));
+    return r.ok ? "" : r.error;
+  };
+  const notJson = parseReReviewVerdict("not json", savedFindings, doneWhen, reReviewDelta);
+  assert.equal(!notJson.ok && notJson.kind, "not_json");
+  assert.match(!notJson.ok ? notJson.error : "", /not JSON/);
+  assert.match(bad([]), /expected a JSON object/);
+  assert.match(
+    bad({ decision: "approve", saved: savedOk, findings: [], extra: true }),
+    /unknown key "extra"/,
+  );
+  assert.match(bad({ decision: "approved", saved: savedOk, findings: [] }), /decision: expected/);
+  assert.match(bad({ decision: "approve", findings: [] }), /saved: expected an array/);
+  assert.match(bad({ decision: "approve", saved: savedOk }), /findings: expected an array/);
+  assert.match(
+    bad({ decision: "approve", saved: [savedOk[0]], findings: [] }),
+    /saved: missing saved finding "R2"/,
+  );
+  assert.match(
+    bad({ decision: "approve", saved: [savedOk[0], savedOk[0]], findings: [] }),
+    /saved\[1\]\.id: duplicate "R1"/,
+  );
+  assert.match(
+    bad({ decision: "approve", saved: [savedOk[0], { ...savedOk[1], id: "R9" }], findings: [] }),
+    /saved\[1\]\.id: not a saved finding "R9"/,
+  );
+  assert.match(
+    bad({ decision: "approve", saved: [savedOk[0], { ...savedOk[1], extra: true }], findings: [] }),
+    /saved\[1\]: unknown key "extra"/,
+  );
+  assert.match(
+    bad({
+      decision: "approve",
+      saved: [savedOk[0], { ...savedOk[1], evidence: " " }],
+      findings: [],
+    }),
+    /saved\[1\]\.evidence: expected a non-empty string/,
+  );
+  assert.match(
+    bad({
+      decision: "approve",
+      saved: [savedOk[0], { ...savedOk[1], fixed: "no" }],
+      findings: [],
+    }),
+    /saved\[1\]\.fixed: expected true or false/,
+  );
+  assert.match(
+    bad({ decision: "approve", saved: savedOk, findings: [{ ...finding, severity: "nit" }] }),
+    /findings\[0\]\.item: only a new blocking finding names an item/,
+  );
+  assert.match(
+    bad({ decision: "approve", saved: savedOk, findings: [finding] }),
+    /approve had a blocking finding/,
+  );
+  assert.match(
+    bad({
+      decision: "changes_requested",
+      saved: savedOk.map((s) => ({ ...s, fixed: true })),
+      findings: [],
+    }),
+    /changes_requested needs at least one blocking finding/,
+  );
+  assert.match(
+    bad({ decision: "changes_requested", saved: savedOk, findings: [{ ...finding, note: "x" }] }),
+    /findings\[0\]: unknown key "note"/,
+  );
+});
+
+test("a re-review settle sends back only the open blocking findings and counts one failure (MET-234, D-061)", async () => {
+  const comments: string[] = [];
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment(_issueId, body) {
+        comments.push(body);
+        return "comment-1";
+      },
+      async moveTo() {},
+    },
+    notifier: { async notify() {} },
+    maxFailures: 3,
+  };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: { [part.id]: 1 },
+    qaFeedback: {},
+  };
+  const open: ReviewFinding = {
+    file: "src/api.ts",
+    line: 7,
+    severity: "blocking",
+    kind: "code",
+    text: "The seam sits in the wrong module.",
+  };
+  const verdict = {
+    decision: "changes_requested" as const,
+    saved: [
+      { id: "R1", fixed: true, evidence: "The cache is bounded now." },
+      { id: "R2", fixed: false, evidence: "The seam still sits in the wrong module." },
+    ],
+    findings: [
+      open,
+      {
+        file: "src/new.ts",
+        line: 3,
+        severity: "blocking" as const,
+        kind: "code" as const,
+        text: "It breaks the second item.",
+      },
+      {
+        file: "src/new.ts",
+        line: 6,
+        severity: "nit" as const,
+        kind: "code" as const,
+        text: "Polish.",
+      },
+    ],
+  };
+
+  assert.equal(await settleReview(state, { part, parent, pr: pr(), verdict }, deps), "sent_back");
+  assert.equal(state.reviewFailures[part.id], 2, "one more review failure");
+  assert.deepEqual(state.qaFeedback[part.id]?.failing, [
+    "R1 (src/api.ts:7) The seam sits in the wrong module.",
+    "R2 (src/new.ts:3) It breaks the second item.",
+  ]);
+  assert.match(comments[0] ?? "", /R1 \(src\/api\.ts:7\) The seam sits in the wrong module\./);
+  assert.match(comments[0] ?? "", /R2 \(src\/new\.ts:3\) It breaks the second item\./);
+  assert.doesNotMatch(comments[0] ?? "", /Polish\./, "nits are not sent back");
 });
 
 test("parseReviewVerdict accepts an approve or a changes_requested verdict", () => {
