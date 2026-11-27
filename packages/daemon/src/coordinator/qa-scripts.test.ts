@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -196,4 +197,61 @@ test("an unreadable plist is skipped and both scripts still run", (t) => {
   assert.equal(seeded.status, 0, seeded.stderr);
   const started = run(s, "start.sh", { HARNESSD_QA_AREA: "backend" });
   assert.equal(started.status, 0, started.stderr);
+});
+
+/** Writes the launchd plist under temp $HOME, so the guard reads the service's home. */
+function writePlist(s: Sandbox, home: string): void {
+  const agents = join(s.home, "Library", "LaunchAgents");
+  mkdirSync(agents, { recursive: true });
+  writeFileSync(
+    join(agents, "dev.harnessd.daemon.plist"),
+    [
+      '<plist version="1.0">',
+      "<dict>",
+      "  <key>EnvironmentVariables</key>",
+      "  <dict>",
+      "    <key>HARNESSD_HOME</key>",
+      `    <string>${home}</string>`,
+      "  </dict>",
+      "</dict>",
+      "</plist>",
+      "",
+    ].join("\n"),
+  );
+}
+
+test("a leading newline and a trailing space are trimmed before the guard and the export", (t) => {
+  const s = sandbox(t);
+  const real = realHome(join(s.home, ".harnessd"));
+
+  const refused = run(s, "seed.sh", { HARNESSD_QA_HOME: `\n${real} ` });
+  assert.equal(refused.status, 1, "a newline-padded override is refused");
+  assert.match(refused.stderr, GUARD);
+  kept(real);
+
+  const scratch = join(s.temp, "scratch-home");
+  const started = run(s, "start.sh", {
+    HARNESSD_QA_HOME: `\n${scratch} `,
+    HARNESSD_QA_AREA: "backend",
+  });
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(readFileSync(s.out, "utf8"), scratch, "the export carries no padding");
+  assert.equal(existsSync(join(scratch, "config.toml")), true);
+});
+
+test("a configured home with a symlink followed by .. still matches the sandbox", (t) => {
+  const s = sandbox(t);
+  const real = realHome(s.root);
+  mkdirSync(join(s.root, "target", "real"), { recursive: true });
+  symlinkSync(join(s.root, "target", "real"), join(s.root, "link"));
+
+  // The daemon's path.resolve() collapses "link/.." to s.root, the real home.
+  writePlist(s, `${s.root}/link/..`);
+
+  for (const name of SCRIPTS) {
+    const result = run(s, name, { HARNESSD_QA_HOME: s.root, HARNESSD_QA_AREA: "backend" });
+    assert.equal(result.status, 1, `${name}: the symlinked .. home is refused`);
+    assert.match(result.stderr, GUARD);
+  }
+  kept(real);
 });
