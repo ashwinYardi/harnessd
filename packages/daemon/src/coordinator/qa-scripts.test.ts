@@ -245,12 +245,46 @@ test("U+00A0 padding is trimmed before the guard and the export", (t) => {
   assert.equal(readFileSync(s.out, "utf8"), scratch, "the export carries no padding");
 });
 
-test("/var/.. canonicalizes to the same home for the sandbox and the caller", (t) => {
+test("a symlink followed by .. resolves as the daemon does for both homes", (t) => {
   const s = sandbox(t);
+  const real = realHome(join(s.root, "real-home"));
+  mkdirSync(join(real, "target", "real"), { recursive: true });
+  symlinkSync(join(real, "target", "real"), join(real, "link"));
 
+  // The shell reaches real/target; path.resolve() reaches real, which is the daemon's home.
+  const both = `${real}/link/..`;
   for (const name of SCRIPTS) {
-    const result = run(s, name, { HARNESSD_HOME: "/var/..", HARNESSD_QA_HOME: "/var/.." });
+    const result = run(s, name, { HARNESSD_HOME: both, HARNESSD_QA_HOME: both });
     assert.equal(result.status, 1, `${name}: refused before any cleanup`);
     assert.match(result.stderr, GUARD);
   }
+  kept(real);
+});
+
+test("a space before a trailing /. is refused", (t) => {
+  const s = sandbox(t);
+  const real = realHome(join(s.home, ".harnessd"));
+  const dotted = `${real} /.`;
+
+  for (const name of SCRIPTS) {
+    const result = run(s, name, { HARNESSD_QA_HOME: dotted });
+    assert.equal(result.status, 1, `${name}: refused before any cleanup`);
+    assert.match(result.stderr, GUARD);
+    assert.ok(
+      result.stderr.includes(`the sandbox home ${realpathSync(real)} is the real harnessd home`),
+    );
+  }
+  kept(real);
+});
+
+test("a trailing slash and space after the real home are refused", (t) => {
+  const s = sandbox(t);
+  const real = realHome(join(s.home, ".harnessd"));
+
+  for (const name of SCRIPTS) {
+    const result = run(s, name, { HARNESSD_QA_HOME: `${real}/ ` });
+    assert.equal(result.status, 1, `${name}: refused before any cleanup`);
+    assert.match(result.stderr, GUARD);
+  }
+  kept(real);
 });

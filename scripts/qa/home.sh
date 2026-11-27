@@ -68,23 +68,46 @@ physical_home() {
   printf '%s' "$_home"
 }
 
-# The daemon's own resolution: path.resolve() lexically, then the folder physically.
+# The daemon's resolution, in order: trim, path.resolve() lexically, trim again, then the
+# physical folder. Sets _canonical and _canonical_changed. A second trim that changes the
+# path would let the daemon's own trim land elsewhere, so that value is refused, never used.
 canonical_home() {
-  physical_home "$(lexical_home "$(absolute_home "$1")")"
+  _path=$(trim_home "$1")
+  if [ -z "$_path" ]; then
+    _canonical=
+    _canonical_changed=0
+    return 0
+  fi
+  _path=$(lexical_home "$(absolute_home "$_path")")
+  _strip=$(trim_home "$_path")
+  if [ "$_strip" = "$_path" ]; then
+    _canonical_changed=0
+  else
+    _canonical_changed=1
+  fi
+  _canonical=$(physical_home "$_strip")
 }
 
-SANDBOX_HOME=$(canonical_home "$SANDBOX_HOME")
-sandbox_home=$SANDBOX_HOME
+refuse_home() {
+  echo "scripts/qa/$(basename "$0"): the sandbox home $sandbox_home is the real harnessd home; set HARNESSD_QA_HOME to a scratch folder" >&2
+  exit 1
+}
 
-# The daemon trims HARNESSD_HOME, so a padded value still names that home.
+# The daemon trims HARNESSD_HOME, so a padded or space-revealing value still names that home.
 guard_home() {
-  _candidate=$(trim_home "$1")
-  [ -n "$_candidate" ] || return 0
-  if [ "$(canonical_home "$_candidate")" = "$sandbox_home" ]; then
-    echo "scripts/qa/$(basename "$0"): the sandbox home $sandbox_home is the real harnessd home; set HARNESSD_QA_HOME to a scratch folder" >&2
-    exit 1
+  canonical_home "$1"
+  [ -n "$_canonical" ] || return 0
+  if [ "$_canonical_changed" = 1 ] || [ "$_canonical" = "$sandbox_home" ]; then
+    refuse_home
   fi
 }
+
+canonical_home "$SANDBOX_HOME"
+SANDBOX_HOME=$_canonical
+sandbox_home=$_canonical
+if [ "$_canonical_changed" = 1 ]; then
+  refuse_home
+fi
 
 if [ -n "${HOME:-}" ]; then
   guard_home "$HOME/.harnessd"
