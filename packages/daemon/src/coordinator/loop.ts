@@ -1026,6 +1026,69 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     if (records === undefined) return;
     for (const [qaId, record] of Object.entries(records)) {
       if (live.has(qaId)) continue;
+      // Before the first post or settle step, re-read each review's PR head (MET-233, D-041).
+      // A head that moved, or a PR that closed, makes the saved verdict stale: it is not
+      // posted, and the settle re-queues the round with no QA failure. A read error keeps the
+      // record for the next tick (D-058), as the Linear reads below do. Once a settle step is
+      // done the record finishes as saved, so Linear is never left half-written.
+      if (record.done.length === 0) {
+        let pendingHead = false;
+        let changed = false;
+        for (const review of record.reviews) {
+          if (review.stale === true || review.prNumber === undefined || review.head === undefined) {
+            continue;
+          }
+          let current: PullRequest | undefined;
+          try {
+            current = await github.findPrForIssue(review.partKey);
+          } catch (error) {
+            log(
+              `${record.qaKey ?? qaId}: could not re-read the PR head of ${review.partKey}: ${message(error)}`,
+            );
+            pendingHead = true;
+            break;
+          }
+          if (
+            current !== undefined &&
+            current.number === review.prNumber &&
+            current.headRefOid === review.head
+          ) {
+            continue;
+          }
+          // The verdict names one PR at one head. A saved PR that closed, even when a new PR
+          // carries the same sha, must not receive it (MET-233).
+          let what: string;
+          let reason: string;
+          if (current === undefined) {
+            what = `PR #${review.prNumber} closed before the pending QA retry`;
+            reason = what;
+          } else if (current.number !== review.prNumber) {
+            what = `PR #${review.prNumber} closed before the pending QA retry (PR #${current.number} is open now)`;
+            reason = `PR #${review.prNumber} closed before the pending QA retry`;
+          } else {
+            const moved = `moved from ${review.head.slice(0, 7)} to ${current.headRefOid.slice(0, 7)}`;
+            what = `head ${moved} before the pending QA retry`;
+            reason = `the PR head ${moved} before the pending QA retry`;
+          }
+          log(`${record.qaKey ?? qaId}: ${review.partKey} ${what}, re-queued`);
+          review.decision = "error";
+          review.stale = true;
+          review.done = true;
+          review.error = reason;
+          // A saved not-judged marker would drive the D-052 count on a stale verdict and
+          // escalate the part before the re-queue (MET-233, D-052).
+          delete review.notJudged;
+          // The live round recorded its verdict in reviewedHeads before the pending post and
+          // settle finished. A discarded verdict must not leave that head looking approved,
+          // or dispatch would skip QA when the PR returns to it (MET-233).
+          if (s.reviewedHeads?.[review.partId]?.sha === review.head) {
+            delete s.reviewedHeads[review.partId];
+          }
+          changed = true;
+        }
+        if (changed) await save();
+        if (pendingHead) continue;
+      }
       let pending = false;
       for (const review of record.reviews) {
         if (review.done) continue;
@@ -2542,15 +2605,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             log(`${issue.key}: could not read the PR of ${part.key}: ${message(error)}`);
             continue;
           }
-          const reviewed = s.reviewedHeads?.[part.id];
-          if (
-            reviewed?.verdict === "approved" &&
-            pr !== undefined &&
-            reviewed.sha === pr.headRefOid
-          ) {
-            continue;
-          }
-          // QA runs only after the reviewer approved the current PR head (MET-226, D-060).
+          // The reviewer judges the head before QA (MET-226, D-060). Check it first: an old
+          // part whose head QA already approved, but which no reviewer has judged, must get
+          // its review instead of being skipped (MET-233).
           const reviewer = s.reviewerHeads?.[part.id];
           if (
             pr === undefined ||
@@ -2561,6 +2618,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             if (pr !== undefined) pendingPrs.set(part.id, pr);
             continue;
           }
+          // Skip the QA run only when both approved the same current head. The merge entry
+          // stays pinned to the head QA reviewed, so the gate merges once the reviewer
+          // approves that same head (D-040, D-060).
+          const reviewed = s.reviewedHeads?.[part.id];
+          if (reviewed?.verdict === "approved" && reviewed.sha === pr.headRefOid) continue;
           parts.push(part);
           approvedHeads[part.id] = pr.headRefOid;
         }
