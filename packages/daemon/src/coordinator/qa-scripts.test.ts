@@ -20,9 +20,9 @@ import { fileURLToPath } from "node:url";
 // The scripts run from a copied ROOT with a stub daemon, so a run never builds or starts
 // a real harnessd (MET-239).
 const REPO = fileURLToPath(new URL("../../../../", import.meta.url));
-/** The scripts each case runs; home.sh is copied too, because both source it. */
+/** The scripts each case runs; home.sh and its resolver are copied too, because both use them. */
 const SCRIPTS = ["start.sh", "seed.sh"];
-const COPIES = [...SCRIPTS, "home.sh"];
+const COPIES = [...SCRIPTS, "home.sh", "resolve-home.mjs"];
 
 /** A stub `harnessd run`: it records its HARNESSD_HOME instead of starting a daemon. */
 const STUB = `const { writeFileSync } = require("node:fs");\nwriteFileSync(process.env.STUB_OUT, process.env.HARNESSD_HOME ?? "");\n`;
@@ -275,6 +275,35 @@ test("a space before a trailing /. is refused", (t) => {
     );
   }
   kept(real);
+});
+
+test("a symlink to a padded real home is refused", (t) => {
+  const s = sandbox(t);
+  const real = realHome(join(s.home, ".harnessd"));
+  const padded = join(s.home, ".harnessd ");
+  mkdirSync(padded);
+  const link = join(s.root, "padded-link");
+  symlinkSync(padded, link);
+
+  for (const name of SCRIPTS) {
+    const result = run(s, name, { HARNESSD_QA_HOME: link });
+    assert.equal(result.status, 1, `${name}: refused before any cleanup`);
+    assert.match(result.stderr, GUARD);
+  }
+  kept(real);
+});
+
+test("a padded caller HARNESSD_HOME with an unrelated sandbox still runs", (t) => {
+  const s = sandbox(t);
+  const real = realHome(join(s.root, "real-home"));
+
+  const seeded = run(s, "seed.sh", { HARNESSD_HOME: `${real} /.` });
+  assert.equal(seeded.status, 0, seeded.stderr);
+  const started = run(s, "start.sh", { HARNESSD_HOME: `${real} /.`, HARNESSD_QA_AREA: "backend" });
+  assert.equal(started.status, 0, started.stderr);
+
+  kept(real);
+  assert.equal(dirname(readFileSync(s.out, "utf8")), realpathSync(s.temp));
 });
 
 test("a trailing slash and space after the real home are refused", (t) => {
