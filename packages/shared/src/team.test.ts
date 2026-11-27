@@ -24,7 +24,7 @@ test("validateTeam names each bad field by row and key", () => {
   assert.deepEqual(errors, {
     "0.name": "Enter a name.",
     "1.name": "Use lowercase letters, digits, - and _, starting with a letter.",
-    "2.role": "Pick a role: coordinator, backend, frontend, qa.",
+    "2.role": "Pick a role: coordinator, backend, frontend, qa, reviewer.",
     "3.name": "Another agent has this name.",
     "3.harness": "Pick a harness: claude-code, codex, antigravity, opencode, cursor, grok.",
     "4.model": "Use one line of at most 100 characters.",

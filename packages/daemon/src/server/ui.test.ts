@@ -100,6 +100,7 @@ test("agentsView lists every agent in role order with its runs", () => {
       ["backend", "backend", "claude-code", ["MET-41"]],
       ["frontend", "frontend", "claude-code", []],
       ["qa", "qa", "claude-code", []],
+      ["reviewer", "reviewer", "codex", []],
     ],
   );
   assert.deepEqual(view.agents[1]?.runs[0], {

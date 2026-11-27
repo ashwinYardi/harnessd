@@ -272,39 +272,49 @@ test("a committed skill folder is withheld from a non-UI run and git stays clean
   assert.equal(git(backend, ["status", "--porcelain", "--untracked-files=all"], env), "");
 });
 
-test("each role gets only the skills its work needs (D-040, D-043, D-044)", () => {
-  // The frontend run keeps impeccable and drops the coordinator's four skills, the
-  // grill and the review (QA reviews).
+test("each role gets only the skills its work needs (D-040, D-043, D-044, MET-222)", () => {
+  // The frontend run keeps impeccable and domain-modeling, and drops the grill, the
+  // reading skill and the review.
   assert.deepEqual(withheldSkills("frontend"), [
     "grilling",
-    "domain-modeling",
     "research",
     "prototype",
     "grill-with-docs",
     "code-review",
   ]);
-  // The coordinator keeps those four and grill-with-docs, and drops the UI skill and review.
+  // The coordinator keeps domain-modeling and grill-with-docs, and drops the UI skill
+  // and review.
   assert.deepEqual(withheldSkills("coordinator"), ["impeccable", "code-review"]);
-  // A builder drops everything but keeps its own build skills.
+  // A builder drops everything but keeps its own build skills and domain-modeling.
   assert.deepEqual(withheldSkills("backend"), [
     "impeccable",
     "grilling",
-    "domain-modeling",
     "research",
     "prototype",
     "grill-with-docs",
     "code-review",
   ]);
-  // QA keeps code-review and drops the grill.
+  // QA no longer reviews; it drops code-review like a builder.
   assert.deepEqual(withheldSkills("qa"), [
     "impeccable",
     "grilling",
-    "domain-modeling",
+    "research",
+    "prototype",
+    "grill-with-docs",
+    "code-review",
+  ]);
+  // The reviewer keeps code-review, codebase-design, tdd, diagnosing-bugs and
+  // domain-modeling, and drops the UI, grill and reading skills.
+  assert.deepEqual(withheldSkills("reviewer"), [
+    "impeccable",
+    "grilling",
     "research",
     "prototype",
     "grill-with-docs",
   ]);
-  assert.equal(withheldSkills("qa").includes("code-review"), false);
+  assert.equal(withheldSkills("qa").includes("code-review"), true);
+  assert.equal(withheldSkills("reviewer").includes("code-review"), false);
+  assert.equal(withheldSkills("reviewer").includes("domain-modeling"), false);
   assert.equal(withheldSkills("coordinator").includes("grill-with-docs"), false);
 });
 

@@ -310,7 +310,7 @@ test("run serves the UI and its read routes next to the pause API", async () => 
   assert.equal(page, "<!doctype html><title>harnessd</title>");
   assert.deepEqual(
     (agents as { agents: { name: string }[] }).agents.map((a) => a.name),
-    ["coordinator", "backend", "frontend", "qa"],
+    ["coordinator", "backend", "frontend", "qa", "reviewer"],
   );
   assert.deepEqual(
     (logs as { lines: { text: string }[] }).lines.map(({ text }) => text),

@@ -45,6 +45,10 @@ async function machine(opts: { claudeSignedIn?: boolean } = {}) {
         code: signedIn ? 0 : 1,
       },
     }),
+    codex: script({
+      "--version": { out: "codex-cli 0.171.0" },
+      "login status": { out: "Logged in using an API key - sk-proj-***SECRET" },
+    }),
     gh: script({
       "--version": { out: "gh version 2.89.0" },
       "auth status --active": { out: "Logged in to github.com" },

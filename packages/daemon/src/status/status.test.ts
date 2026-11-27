@@ -150,6 +150,10 @@ test("a working machine reports every check ok, with a one-line detail each", as
       "harness.claude-code.auth",
       "harness.claude-code.version",
       "harness.claude-code.worktree_write",
+      "harness.codex.cli",
+      "harness.codex.auth",
+      "harness.codex.version",
+      "harness.codex.worktree_write",
       "github.cli",
       "github.auth",
       "github.push",
@@ -1025,7 +1029,9 @@ test("the worktree-write check is missing, not checked, when the harness is not 
 });
 
 test("no worktree-write check runs for a harness no agent uses", async () => {
-  const w = await world('[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "claude-code"\n');
+  const w = await world(
+    '[linear]\nteam_id = "MET"\n\n[agents.backend]\nharness = "claude-code"\n\n[agents.reviewer]\nharness = "claude-code"\n',
+  );
   const checks = await runStatus(w.options);
   assert.ok(checks.some((c) => c.id === "harness.claude-code.worktree_write"));
   assert.ok(!checks.some((c) => c.id === "harness.codex.worktree_write"));

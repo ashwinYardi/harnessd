@@ -32,8 +32,24 @@ test("no layers gives the defaults", () => {
   assert.equal(merged.daemon.port, 4747);
   assert.equal(merged.daemon.self_update, true);
   assert.deepEqual(merged.merge.protected_paths, DEFAULT_SETTINGS.merge.protected_paths);
-  assert.deepEqual(Object.keys(merged.agents), ["coordinator", "backend", "frontend", "qa"]);
-  for (const agent of Object.values(merged.agents)) assert.equal(agent.harness, "claude-code");
+  assert.deepEqual(Object.keys(merged.agents), [
+    "coordinator",
+    "backend",
+    "frontend",
+    "qa",
+    "reviewer",
+  ]);
+  for (const agent of Object.values(merged.agents)) {
+    if (agent.name === "reviewer") continue;
+    assert.equal(agent.harness, "claude-code");
+  }
+  assert.deepEqual(merged.agents.reviewer, {
+    name: "reviewer",
+    role: "reviewer",
+    harness: "codex",
+    model: "gpt-6.2-sol",
+    instructions: [],
+  });
   assert.deepEqual(merged.instructions, []);
 });
 
@@ -157,6 +173,32 @@ test("agent fields override per layer and instructions accumulate", () => {
     backend?.instructions.map((b) => b.text),
     ["global backend", "ws backend"],
   );
+});
+
+test("a layer overrides the reviewer's harness, model and fallbacks (MET-222)", () => {
+  const merged = mergeLayers([
+    layer("workspace", {
+      agents: {
+        reviewer: {
+          harness: "claude-code",
+          model: "opus",
+          fallback_harness: "codex",
+          fallback_model: "gpt-5",
+          label: "w",
+          keyPrefix: "",
+        },
+      },
+    }),
+  ]);
+  assert.deepEqual(merged.agents.reviewer, {
+    name: "reviewer",
+    role: "reviewer",
+    harness: "claude-code",
+    model: "opus",
+    fallback_harness: "codex",
+    fallback_model: "gpt-5",
+    instructions: [],
+  });
 });
 
 test("custom agents need a role", () => {

@@ -93,46 +93,50 @@ export function excludesFileFor(globalDir: string, runId: string): string {
 export const SKILLS_WITHHELD_FROM_NON_UI_RUNS = ["impeccable"] as const;
 
 /**
- * Skills only the coordinator uses (D-043). Builder and QA runs never grill, model the
- * domain, research or prototype, so their turn does not carry those bodies.
+ * Skills only the coordinator uses (D-043). Builder, QA and reviewer runs never grill,
+ * research or prototype, so their turn does not carry those bodies. Domain modeling is
+ * no longer coordinator-only (MET-222).
  */
 export const SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS = [
   "grilling",
-  "domain-modeling",
   "research",
   "prototype",
 ] as const;
 
-/** Builder and QA runs do not grill; the coordinator does (D-044). */
+/** Builder, QA and reviewer runs do not grill; the coordinator does (D-044). */
 export const SKILLS_WITHHELD_FROM_NON_COORDINATOR_READING = ["grill-with-docs"] as const;
 
-/** QA reviews; every other role drops code-review (D-044). */
-export const SKILLS_WITHHELD_FROM_NON_QA_RUNS = ["code-review"] as const;
+/** The reviewer reviews; every other role drops code-review (D-044, MET-222). */
+export const SKILLS_WITHHELD_FROM_NON_REVIEWER_RUNS = ["code-review"] as const;
 
 /** Every skill a worktree run can leave out, so a run that does not withhold it can put it back. */
 const RESTORABLE_SKILLS = [
   ...SKILLS_WITHHELD_FROM_NON_UI_RUNS,
   ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS,
   ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_READING,
-  ...SKILLS_WITHHELD_FROM_NON_QA_RUNS,
+  ...SKILLS_WITHHELD_FROM_NON_REVIEWER_RUNS,
 ];
 
 /** The skills a run with this role omits (D-040, D-043, D-044). No config key: `enabled = false` still wins. */
 export function withheldSkills(role: ResolvedAgentConfig["role"] | undefined): string[] {
   // D-040: only the frontend role does UI work. D-043: only the coordinator grills.
-  // D-044: only QA reviews; builders and the coordinator do not carry code-review.
+  // MET-222: only the reviewer carries code-review, and domain-modeling is not withheld.
   if (role === "frontend") {
     return [
       ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS,
       ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_READING,
-      ...SKILLS_WITHHELD_FROM_NON_QA_RUNS,
+      ...SKILLS_WITHHELD_FROM_NON_REVIEWER_RUNS,
     ];
   }
   if (role === "coordinator") {
-    return [...SKILLS_WITHHELD_FROM_NON_UI_RUNS, ...SKILLS_WITHHELD_FROM_NON_QA_RUNS];
+    return [...SKILLS_WITHHELD_FROM_NON_UI_RUNS, ...SKILLS_WITHHELD_FROM_NON_REVIEWER_RUNS];
   }
-  if (role === "qa") {
-    return RESTORABLE_SKILLS.filter((name) => name !== "code-review");
+  if (role === "reviewer") {
+    return [
+      ...SKILLS_WITHHELD_FROM_NON_UI_RUNS,
+      ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_RUNS,
+      ...SKILLS_WITHHELD_FROM_NON_COORDINATOR_READING,
+    ];
   }
   return [...RESTORABLE_SKILLS];
 }

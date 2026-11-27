@@ -9,8 +9,8 @@
 import { HARNESSES, type HarnessId, isHarnessId } from "./index.ts";
 import { isSecretReference } from "./secrets.ts";
 
-/** Roles an agent can play (D-010). */
-export const AGENT_ROLES = ["coordinator", "backend", "frontend", "qa"] as const;
+/** Roles an agent can play (D-010). The reviewer is the fifth role (MET-222). */
+export const AGENT_ROLES = ["coordinator", "backend", "frontend", "qa", "reviewer"] as const;
 export type AgentRole = (typeof AGENT_ROLES)[number];
 
 export function isAgentRole(value: string): value is AgentRole {
@@ -411,12 +411,19 @@ export const DEFAULT_SETTINGS: Settings = {
   harnesses: {},
 };
 
-/** The default team (D-010): every agent on Claude Code. */
-export const DEFAULT_AGENTS: Record<string, { role: AgentRole; harness: HarnessId }> = {
+/**
+ * The default team (D-010): every agent on Claude Code, except the reviewer on Codex
+ * with `gpt-6.2-sol` (MET-222), so Claude quota stays with the coordinator.
+ */
+export const DEFAULT_AGENTS: Record<
+  string,
+  { role: AgentRole; harness: HarnessId; model?: string }
+> = {
   coordinator: { role: "coordinator", harness: "claude-code" },
   backend: { role: "backend", harness: "claude-code" },
   frontend: { role: "frontend", harness: "claude-code" },
   qa: { role: "qa", harness: "claude-code" },
+  reviewer: { role: "reviewer", harness: "codex", model: "gpt-6.2-sol" },
 };
 
 /** A config problem, always naming the file and, when known, the key. */
