@@ -37,6 +37,7 @@ if (env.FAKE_OC_RECORD) {
     configDirEntries: dir && fs.existsSync(dir) ? fs.readdirSync(dir) : null,
     disableClaudeCode: env.OPENCODE_DISABLE_CLAUDE_CODE ?? null,
     disableAutoupdate: env.OPENCODE_DISABLE_AUTOUPDATE ?? null,
+    configContent: env.OPENCODE_CONFIG_CONTENT ?? null,
     xdgConfig: env.XDG_CONFIG_HOME ?? null,
     xdgData: env.XDG_DATA_HOME ?? null,
     pwd: env.PWD ?? null,
@@ -72,6 +73,7 @@ interface Record_ {
   configDirEntries: string[] | null;
   disableClaudeCode: string | null;
   disableAutoupdate: string | null;
+  configContent: string | null;
   xdgConfig: string | null;
   xdgData: string | null;
   pwd: string | null;
@@ -138,6 +140,32 @@ test("a resumed run adds --session and keeps --standalone and --auto", () => {
   const argv = openCodeArgs(task({ resumeSessionId: "ses_1" }));
   assert.deepEqual(argv, [...BASE, "--session", "ses_1", "--", "Say hi"]);
   assert.equal(createOpenCodeAdapter().canResume, true);
+});
+
+test("a readOnly task denies edit, bash and the other write tools inline (MET-219)", async () => {
+  const { run: r, record } = run({ fixture: "success" }, task({ readOnly: true }));
+  await r.result;
+  const rec = readRecord(record);
+  assert.deepEqual(rec.argv, openCodeArgs(task()), "read-only changes env, not argv");
+  assert.deepEqual(JSON.parse(rec.configContent ?? "{}"), {
+    permission: {
+      edit: "deny",
+      bash: "deny",
+      webfetch: "deny",
+      websearch: "deny",
+      task: "deny",
+      external_directory: "deny",
+      question: "deny",
+    },
+  });
+});
+
+test("a task without readOnly keeps today's argv and sets no inline config", async () => {
+  const { run: r, record } = run({ fixture: "success" });
+  await r.result;
+  const rec = readRecord(record);
+  assert.deepEqual(rec.argv, [...BASE, "--", "Say hi"]);
+  assert.equal(rec.configContent, null);
 });
 
 test("openCodeArgs keeps a prompt that starts with a dash after --", () => {

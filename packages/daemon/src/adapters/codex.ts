@@ -41,6 +41,8 @@ export interface CodexOptions {
  */
 export function codexArgs(task: Task, options: CodexOptions = {}, cwd?: string): string[] {
   const resume = task.resumeSessionId;
+  // MET-219: a coordinator run gets the read-only sandbox in place of full access.
+  const sandbox = task.readOnly === true ? "read-only" : "danger-full-access";
   const args = [
     "exec",
     ...(resume === undefined ? [] : ["resume", resume]),
@@ -50,11 +52,10 @@ export function codexArgs(task: Task, options: CodexOptions = {}, cwd?: string):
     "--ignore-rules",
     // The synced .codex/hooks.json comes from the skill pack, so the run need not trust it.
     "--dangerously-bypass-hook-trust",
-    // D-032 (amended): no OS sandbox, as for Claude runs. The seatbelt sandbox hides the
-    // keychain (so gh has no login) and keeps .git read-only (so git commit fails).
-    ...(resume === undefined
-      ? ["--sandbox", "danger-full-access"]
-      : ["-c", 'sandbox_mode="danger-full-access"']),
+    // D-032 (amended): a normal run gets no OS sandbox, as for Claude runs. The seatbelt
+    // sandbox hides the keychain (so gh has no login) and keeps .git read-only (so git commit
+    // fails). MET-219: a read-only coordinator needs neither writes nor gh, so it uses it.
+    ...(resume === undefined ? ["--sandbox", sandbox] : ["-c", `sandbox_mode="${sandbox}"`]),
     // Nobody is there to answer a prompt.
     "-c",
     'approval_policy="never"',

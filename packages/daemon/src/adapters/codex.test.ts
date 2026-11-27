@@ -116,6 +116,33 @@ test("a resumed run uses exec resume and keeps every isolation flag", () => {
   assert.equal(createCodexAdapter().canResume, true);
 });
 
+test("a readOnly task gets --sandbox read-only and keeps every isolation flag (MET-219)", () => {
+  const argv = codexArgs(task({ readOnly: true }), {}, repo);
+  assert.equal(argv[argv.indexOf("--sandbox") + 1], "read-only");
+  assert.ok(!argv.includes("danger-full-access"));
+  for (const flag of [
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--dangerously-bypass-hook-trust",
+  ]) {
+    assert.ok(argv.includes(flag), flag);
+  }
+  assert.ok(argv.includes('approval_policy="never"'));
+  assert.ok(argv.includes("tool_output_token_limit=5000"));
+  assert.deepEqual(argv.slice(-2), ["--", "Say hi"]);
+});
+
+test("a readOnly resume sets sandbox_mode read-only through -c", () => {
+  const argv = codexArgs(task({ readOnly: true, resumeSessionId: "thread-1" }), {}, repo);
+  assert.ok(argv.includes('sandbox_mode="read-only"'));
+  assert.ok(!argv.includes("--sandbox"), "the subcommand refuses it");
+  assert.ok(!argv.includes('sandbox_mode="danger-full-access"'));
+});
+
+test("readOnly: false keeps today's danger-full-access argv", () => {
+  assert.deepEqual(codexArgs(task({ readOnly: false }), {}, repo), [...BASE, "--", "Say hi"]);
+});
+
 test("codexArgs passes --model from the task, then the options, and omits it when unset", () => {
   const tail = (argv: string[]) => argv.slice(BASE.length);
   assert.deepEqual(tail(codexArgs(task({ model: "gpt-5.5" }), { model: "o3" }, repo)), [

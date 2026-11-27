@@ -33,6 +33,24 @@ export interface OpenCodeOptions {
 }
 
 /**
+ * MET-219: the inline config a readOnly run passes through OPENCODE_CONFIG_CONTENT. It denies
+ * every tool that writes, leaves the worktree or asks a question. `--auto` approves only
+ * pending requests and never overrides a deny. Checked on OpenCode 2.3.2: the inline document
+ * is applied after the project opencode.json, so its denies win.
+ */
+export const READ_ONLY_CONFIG_CONTENT = JSON.stringify({
+  permission: {
+    edit: "deny",
+    bash: "deny",
+    webfetch: "deny",
+    websearch: "deny",
+    task: "deny",
+    external_directory: "deny",
+    question: "deny",
+  },
+});
+
+/**
  * Builds the argv for `opencode run --format json` (D-036). The model keeps its `#variant`:
  * OpenCode 2.x reads the thinking level from it. MET-156: a QA send-back continues the part's
  * own session with `--session <id>`; `--standalone` and the temp config dir stay.
@@ -65,6 +83,8 @@ export function createOpenCodeAdapter(options: OpenCodeOptions = {}): HarnessAda
         ...(task.maxTurns === undefined ? {} : { maxTurns: task.maxTurns }),
         env: {
           ...options.env,
+          // MET-219: a readOnly run denies writes, leaving the worktree and input requests.
+          ...(task.readOnly === true ? { OPENCODE_CONFIG_CONTENT: READ_ONLY_CONFIG_CONTENT } : {}),
           OPENCODE_CONFIG_DIR: configDir,
           // OpenCode 1.x switch for ~/.claude files; 2.0.20 ignores it (D-036 gap).
           OPENCODE_DISABLE_CLAUDE_CODE: "1",

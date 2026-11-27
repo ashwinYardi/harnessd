@@ -17,6 +17,11 @@ export interface Task {
   model?: string;
   /** Continue the part's earlier session on a QA send-back (MET-156). */
   resumeSessionId?: string;
+  /**
+   * Coordinator runs get read-only tools only: no edits, commits or pushes (MET-219).
+   * Each adapter maps it to its harness's own flags or env; unset means a normal run.
+   */
+  readOnly?: boolean;
   /** Extra environment for this run, over the adapter's own (e.g. git config for the worktree). */
   env?: Record<string, string>;
 }

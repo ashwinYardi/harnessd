@@ -160,6 +160,46 @@ test("adds --max-turns and the bash output cap to every run", async () => {
   assert.equal(result.status, "ok");
 });
 
+test("a readOnly task gets read-only tools and no skip-permissions or auto mode (MET-219)", () => {
+  const argv = claudeArgs(
+    task({ readOnly: true, maxTurns: 12 }),
+    { permissionMode: "auto", skipPermissions: true },
+    scratch,
+  );
+  assert.equal(argv[argv.indexOf("--tools") + 1], "Read,Grep,Glob");
+  assert.equal(
+    argv[argv.indexOf("--disallowedTools") + 1],
+    "Edit,Write,NotebookEdit,Bash,mcp__harnessd-memory__write_note",
+  );
+  assert.ok(!argv.includes("--dangerously-skip-permissions"));
+  assert.ok(!argv.includes("--permission-mode"));
+  for (const flag of ["--setting-sources", "--strict-mcp-config", "--mcp-config"]) {
+    assert.ok(argv.includes(flag), flag);
+  }
+  assert.deepEqual(argv.slice(-2), ["--max-turns", "12"]);
+});
+
+test("a task without readOnly keeps today's argv and gains no tool limits", () => {
+  const argv = claudeArgs(task(), { permissionMode: "auto", skipPermissions: true }, scratch);
+  assert.deepEqual(argv, [
+    "-p",
+    "Say hi",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--setting-sources",
+    "project",
+    "--strict-mcp-config",
+    "--mcp-config",
+    NO_MCP_SERVERS,
+    "--permission-mode",
+    "auto",
+    "--dangerously-skip-permissions",
+  ]);
+  assert.ok(!argv.includes("--tools"));
+  assert.ok(!argv.includes("--disallowedTools"));
+});
+
 test("a resumed run adds --resume and keeps every isolation flag and the turn cap", () => {
   const argv = claudeArgs(task({ resumeSessionId: "sess-1", maxTurns: 80 }), {}, scratch);
   assert.equal(argv[argv.indexOf("--resume") + 1], "sess-1");
