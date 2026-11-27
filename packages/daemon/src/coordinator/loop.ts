@@ -232,6 +232,7 @@ type KeptRun = Pick<
 interface QaContext {
   parent: Issue;
   parts: LinkedIssue[];
+  approvedHeads: Record<string, string>;
 }
 
 /** A run this process started. */
@@ -1974,6 +1975,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             qa: issue,
             parent: qa.parent,
             parts: qa.parts,
+            approvedHeads: qa.approvedHeads,
             budgetMs: budget,
             maxTurns: maxTurnsFor("qa", qa.parent.size, config.limits),
             round: (s.qaFailures[qa.parent.id] ?? 0) + 1,
@@ -2381,12 +2383,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     waiting: Set<string>,
   ): Promise<void> {
     const max = config.limits.max_concurrent;
-    if (pausedNow || s.inFlight.length >= max) return;
+    if (pausedNow) return;
     const candidates = await linear.listReadyContaining(team, PART_MARKER_PREFIX);
     const { ids: admitted, parents: holders } = admittedParents(await inFlightParents(s));
     const needsInput = new Set(holders.filter((p) => p.needsInput).map((p) => p.id));
     for (const issue of candidates) {
-      if (pausedNow || s.inFlight.length >= max) break;
+      if (pausedNow) break;
       if (s.inFlight.some((e) => e.issueId === issue.id)) continue;
       // A review whose settlement is unfinished still owns the part: a Ready move may have
       // landed before a timeout, so do not start its builder without the findings (MET-230).
@@ -2403,7 +2405,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       )
         continue;
       const marker = readPartMarker(issue.description);
-      if (marker === undefined) continue;
+      if (marker === undefined || (marker.role !== "qa" && s.inFlight.length >= max)) continue;
       const parentRecord = issue.parentId === undefined ? undefined : s.splits?.[issue.parentId];
       // A child the parent's split record does not list belongs to an older plan: leave it
       // alone, with no move and no comment (MET-217). A parent without a record keeps D-050's
@@ -2439,6 +2441,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           record === undefined ? isWorkPart(child) : record.parts.includes(child.id),
         );
         const parts: LinkedIssue[] = [];
+        const pendingReview: LinkedIssue[] = [];
+        const approvedHeads: Record<string, string> = {};
         for (const part of children) {
           if (part.state.toLowerCase() !== "in review") continue;
           let pr: { headRefOid: string } | undefined;
@@ -2456,9 +2460,24 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           ) {
             continue;
           }
+          // QA runs only after the reviewer approved the current PR head (MET-226, D-060).
+          const reviewer = s.reviewerHeads?.[part.id];
+          if (
+            pr === undefined ||
+            reviewer?.verdict !== "approved" ||
+            reviewer.sha !== pr.headRefOid
+          ) {
+            pendingReview.push(part);
+            continue;
+          }
           parts.push(part);
+          approvedHeads[part.id] = pr.headRefOid;
         }
-        if (parts.length === 0) continue;
+        if (pendingReview.length > 0) {
+          noteReviewWait(issue.id, issue.key, pendingReview, waiting);
+          continue;
+        }
+        if (parts.length === 0 || s.inFlight.length >= max) continue;
         let parent: Issue;
         try {
           parent = await linear.getIssue(issue.parentId);
@@ -2466,7 +2485,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           log(`${issue.key}: could not read the parent, retrying next tick: ${message(error)}`);
           continue;
         }
-        qa = { parent, parts };
+        qa = { parent, parts, approvedHeads };
       } else if (issue.blockedBy.length > 0) {
         continue;
       }
@@ -2758,6 +2777,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
    */
   const waited = new Map<string, string>();
 
+  /**
+   * The parts whose review was still pending when QA last looked, by QA sub-issue id. One
+   * log line per wait and once per change, like the queue wait (D-050, MET-226).
+   */
+  const reviewWaits = new Map<string, string>();
+
   /** The holders as a dedup key, with each holder's Needs-input flag (D-057). */
   function holdersKey(holders: readonly InFlightParent[]): string {
     return holders
@@ -2797,6 +2822,25 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   /** Forgets the waits that ended since the last tick. */
   function clearWaits(seen: Set<string>): void {
     for (const id of [...waited.keys()]) if (!seen.has(id)) waited.delete(id);
+    for (const id of [...reviewWaits.keys()]) if (!seen.has(id)) reviewWaits.delete(id);
+  }
+
+  /**
+   * Logs `<QA key> waits, <part key> review pending` once per wait and once per change of
+   * the pending parts (MET-226, D-050).
+   */
+  function noteReviewWait(
+    id: string,
+    key: string,
+    parts: readonly LinkedIssue[],
+    seen: Set<string>,
+  ): void {
+    seen.add(id);
+    const ordered = [...parts].sort((a, b) => a.key.localeCompare(b.key));
+    const next = ordered.map((part) => part.key).join("|");
+    if (reviewWaits.get(id) === next) return;
+    reviewWaits.set(id, next);
+    log(`${key} waits, ${ordered.map((part) => `${part.key} review pending`).join(", ")}`);
   }
 
   async function splitReady(report: TickReport, waiting: Set<string>): Promise<void> {

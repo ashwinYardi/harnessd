@@ -723,14 +723,23 @@ test("grill and plan runs are read-only; part and QA runs are not (D-059)", asyn
   assert.equal(partRun?.id, `${backend.key}-1`);
   assert.notEqual(partRun?.readOnly, true, "a builder keeps full access");
 
-  // The part reaches In Review, so the reviewer runs before QA (MET-224). Neither is a
-  // coordinator run. The reviewer is read-only; QA keeps full access.
+  // The part reaches In Review, so the reviewer runs before QA (MET-224, MET-226). Neither
+  // is a coordinator run. The reviewer is read-only; QA keeps full access.
   adapter.pending[0]?.finish("ok");
   await t.loop.idle();
   t.gh.open(backend.key, 7);
-  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key, qa.key]);
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key], "the review starts before QA");
   const reviewRun = adapter.tasks.find((task) => task.role === "reviewer");
   assert.equal(reviewRun?.readOnly, true, "the reviewer is read-only");
+  adapter.pending
+    .find((pending) => pending.task.role === "reviewer")
+    ?.finish("ok", undefined, JSON.stringify({ decision: "approve", findings: [] }));
+  await t.loop.idle();
+  assert.deepEqual(
+    (await t.loop.tick()).dispatched,
+    [qa.key],
+    "QA starts only after the review approves the head",
+  );
   const qaRun = adapter.tasks.at(-1);
   assert.match(qaRun?.id ?? "", /-qa-1-pr7$/);
   assert.notEqual(qaRun?.readOnly, true, "QA keeps full access");
@@ -740,9 +749,6 @@ test("grill and plan runs are read-only; part and QA runs are not (D-059)", asyn
     "no coordinator run starts for a part or QA round",
   );
 
-  adapter.pending
-    .find((pending) => pending.task.role === "reviewer")
-    ?.finish("ok", undefined, JSON.stringify({ decision: "approve", findings: [] }));
   adapter.pending
     .find((pending) => pending.task.id.endsWith("-qa-1-pr7"))
     ?.finish("ok", undefined, verdict(true, true));
@@ -2184,9 +2190,10 @@ test("a hold that starts during QA checkout prevents the reviewer from starting"
   });
   const work = t.linear.add({ title: "Work", state: "In Progress" });
   const first = part(t, work.id, "backend", "First");
+  const { backend, qa } = qaFixture(t, "In Progress");
   assert.deepEqual((await t.loop.tick()).dispatched, [first.key]);
 
-  const { backend, qa } = qaFixture(t);
+  backend.state = "In Review";
   t.gh.open(backend.key, 7);
   await t.loop.tick();
   await preparing.promise;
@@ -2779,7 +2786,34 @@ function qaFixture(t: ReturnType<typeof setup>, partState = "In Review") {
     description: `${partMarker("qa")}\n**Size**: M`,
   });
   t.linear.relations.push({ blocker: backend.id, blocked: qa.id });
+  // MET-226: QA starts only after the reviewer approved the current PR head. These tests
+  // use PR #7 at sha7, so the part is review-approved unless a test says otherwise.
+  t.memory.state.reviewerHeads ??= {};
+  t.memory.state.reviewerHeads[backend.id] = {
+    sha: "sha7",
+    verdict: "approved",
+    findings: [],
+    at: "2026-11-23T10:00:00.000Z",
+  };
   return { parent, backend, qa };
+}
+
+/** Give a synthetic QA fixture the records a real shipped part would already have. */
+function trackShippedPart(
+  t: ReturnType<typeof setup>,
+  { parent, backend, qa }: ReturnType<typeof qaFixture>,
+) {
+  t.memory.state.splits = {
+    [parent.id]: { key: parent.key, parts: [backend.id], qa: qa.id, at: "2026-11-23T10:00:00Z" },
+  };
+  t.memory.state.shipped = {
+    [backend.id]: {
+      key: backend.key,
+      branch: backend.key.toLowerCase(),
+      prUrl: "https://github.test/o/r/pull/7",
+      at: "2026-11-23T10:00:00Z",
+    },
+  };
 }
 
 const verdict = (...pass: boolean[]) => {
@@ -2834,6 +2868,15 @@ test("QA reviews one part as soon as it reaches In Review, at its PR head", asyn
     { blocker: frontend.id, blocked: qa.id },
   );
   t.gh.open(backend.key, 7);
+  // MET-226: the reviewer approved this head, so QA may start.
+  t.memory.state.reviewerHeads = {
+    [backend.id]: {
+      sha: "sha7",
+      verdict: "approved",
+      findings: [],
+      at: "2026-11-23T10:00:00.000Z",
+    },
+  };
 
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
   assert.equal(qa.state, "In Progress");
@@ -2856,7 +2899,8 @@ test("QA reviews one part as soon as it reaches In Review, at its PR head", asyn
   assert.match(run?.prompt ?? "", /diff --git a\/src\/x\.ts/);
   assert.match(run?.prompt ?? "", /## CI\n- CI \/ test: success/);
   assert.match(run?.prompt ?? "", /## Part brief\nharnessd part: backend/);
-  assert.match(run?.prompt ?? "", /Open a file only to check a line the diff touches/);
+  assert.match(run?.prompt ?? "", /Judge each item only from the test results/);
+  assert.doesNotMatch(run?.prompt ?? "", /code style|code quality|Open a file only/);
   assert.doesNotMatch(run?.prompt ?? "", /Read the diff and the code/);
   assert.equal(
     t.memory.state.inFlight[0]?.worktree,
@@ -3034,6 +3078,42 @@ test("a shipped part in In Review gets one review before QA, at its PR head (MET
   t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
 });
+
+for (const mode of ["agent", "tests"]) {
+  test(`QA in ${mode} mode stays Ready until the reviewer approves the PR head (MET-226)`, async () => {
+    const t = setup({ config: ONE_AT_A_TIME });
+    const fx = qaFixture(t);
+    const { backend, qa } = fx;
+    trackShippedPart(t, fx);
+    t.memory.state.reviewerHeads = {};
+    if (mode === "tests") {
+      backend.description += "\n\n**Verify**\n- `pnpm test` → exits 0\n\n**QA**: tests";
+    }
+    t.gh.open(backend.key, 7);
+
+    assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+    assert.equal(qa.state, "Ready");
+    assert.deepEqual(t.commands, [], "QA tests have not started");
+    const line = `${qa.key} waits, ${backend.key} review pending`;
+    assert.equal(t.logs.filter((entry) => entry === line).length, 1);
+
+    assert.deepEqual((await t.loop.tick()).dispatched, [], "the same pending set waits quietly");
+    assert.equal(t.logs.filter((entry) => entry === line).length, 1);
+
+    (await nextRun(t.adapter)).finish(
+      "ok",
+      undefined,
+      JSON.stringify({ decision: "approve", findings: [] }),
+    );
+    await t.loop.idle();
+    assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+    if (mode === "agent")
+      (await nextRun(t.adapter, 2)).finish("ok", undefined, verdict(true, true));
+    await t.loop.idle();
+    assert.equal(t.adapter.runs().length, mode === "tests" ? 1 : 2);
+    assert.equal(t.memory.state.merges[0]?.prs[0]?.sha, "sha7");
+  });
+}
 
 test("an approved head is skipped and a new head gets a review (MET-224)", async () => {
   const fx = reviewFixture({ withQa: false });
@@ -3870,6 +3950,9 @@ test("per-part QA reviews only the split record's parts, not an older marked chi
       at: "2026-11-23T10:00:00.000Z",
     },
   };
+  state.reviewerHeads = {
+    [backend.id]: { sha: "sha7", verdict: "approved", findings: [], at: "2026-11-23T10:00:00Z" },
+  };
   const t = setup({ linear, store: memoryStore(state) });
   t.gh.open(backend.key, 7);
   t.gh.open(old.key, 8);
@@ -4061,7 +4144,9 @@ test("a re-QA approves on the saved cases, writes no cases and goes to merges (D
 
 test("a re-QA send-back keeps only the failing case; the second failed re-QA clears the cases (D-056)", async () => {
   const t = setup();
-  const { parent, backend, qa } = qaFixture(t);
+  const fx = qaFixture(t);
+  const { parent, backend, qa } = fx;
+  trackShippedPart(t, fx);
   t.gh.open(backend.key, 7);
   const saved = [
     {
@@ -4125,6 +4210,14 @@ test("a re-QA send-back keeps only the failing case; the second failed re-QA cle
   reworked.headRefOid = "sha7-fixed";
 
   // Re-QA 2 still fails: the second failure sends the parent to Needs input and clears the cases.
+  const reviewRunCount = t.adapter.pending.length + 1;
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  (await nextRun(t.adapter, reviewRunCount)).finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "approve", findings: [] }),
+  );
+  await t.loop.idle();
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
   await settle();
   t.adapter.pending.at(-1)?.finish(
@@ -4288,8 +4381,9 @@ test("a failed resume counts no attempt, drops the session and runs cold next", 
 // --- merge gate (MET-14) ----------------------------------------------------
 
 /** A parent with one backend part whose PR #7 QA has approved at sha7. */
-async function approved(t: ReturnType<typeof setup>) {
+async function approved(t: ReturnType<typeof setup>, trackReview = false) {
   const fx = qaFixture(t);
+  if (trackReview) trackShippedPart(t, fx);
   t.gh.open(fx.backend.key, 7);
   await t.loop.tick();
   await settle();
@@ -4356,7 +4450,7 @@ test("pending CI or no checks yet waits for a later tick", async () => {
 
 test("failed CI sends the part back once with the failing checks; the second failure escalates", async () => {
   const t = setup();
-  const { parent, backend, qa } = await approved(t);
+  const { parent, backend, qa } = await approved(t, true);
   const failed = {
     checks: [
       {
@@ -4395,10 +4489,18 @@ test("failed CI sends the part back once with the failing checks; the second fai
   reworked.headRefOid = "sha7-fixed";
   t.gh.statuses[7] = { ...failed, headRefOid: "sha7-fixed" };
 
+  // The reviewer approves the new head before QA may judge it (MET-226).
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key], "the delta review comes first");
+  await nextRun(t.adapter, 3);
+  t.adapter.pending
+    .find((pending) => pending.task.role === "reviewer")
+    ?.finish("ok", undefined, JSON.stringify({ decision: "approve", findings: [] }));
+  await t.loop.idle();
+
   // QA approves again (a QA approval does not reset the gate count), CI fails again.
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
   await settle();
-  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  (await nextRun(t.adapter, 4)).finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
   assert.equal(qa.state, "Ready");
   await t.loop.tick();
@@ -4500,9 +4602,9 @@ test("no merge while paused, even when the pause lands between the CI check and 
   assert.deepEqual((await t.loop.tick()).merged, [backend.key]);
 });
 
-test("a head that moved after QA approved is never merged: QA runs again on the new head", async () => {
+test("a head that moved after QA approved is never merged: the delta review then QA run on the new head", async () => {
   const t = setup();
-  const { backend, qa } = await approved(t);
+  const { backend, qa } = await approved(t, true);
   t.gh.statuses[7] = { headRefOid: "sha7-pushed-later" };
   const pr = t.gh.prs[backend.key];
   assert.ok(pr);
@@ -4510,15 +4612,29 @@ test("a head that moved after QA approved is never merged: QA runs again on the 
 
   const report = await t.loop.tick();
   assert.deepEqual(t.gh.merges, []);
-  assert.deepEqual(report.dispatched, [qa.key], "QA is back in Ready and runs again at once");
+  assert.deepEqual(
+    report.dispatched,
+    [backend.key],
+    "the delta review runs before QA on the new head",
+  );
   assert.match(
     t.linear.comments.find((c) => c.key === qa.key && /moved from/.test(c.body))?.body ?? "",
     /moved from `sha7` to `sha7-pu` after QA approved it/,
   );
   assert.deepEqual(t.memory.state.qaFailures, {}, "no QA failure counted");
-  await settle();
+  assert.equal(qa.state, "Ready", "QA waits for the review approval");
+
+  await nextRun(t.adapter, 2);
+  t.adapter.pending
+    .find((pending) => pending.task.role === "reviewer")
+    ?.finish("ok", undefined, JSON.stringify({ decision: "approve", findings: [] }));
+  await t.loop.idle();
+  assert.equal(t.memory.state.reviewerHeads?.[backend.id]?.sha, "sha7-pushed-later");
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key], "QA runs after the delta review");
+  await nextRun(t.adapter, 3);
   assert.equal(t.wt.checkouts.at(-1)?.sha, "sha7-pushed-later");
-  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  (await nextRun(t.adapter, 3)).finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
 
   assert.deepEqual((await t.loop.tick()).merged, [backend.key]);
@@ -5524,6 +5640,13 @@ test("a default branch update outside the merge queue waits for the run to finis
 function seededMerge(t: ReturnType<typeof setup>) {
   const fx = qaFixture(t);
   fx.qa.state = "In Review";
+  t.memory.state.reviewerHeads ??= {};
+  t.memory.state.reviewerHeads[fx.backend.id] = {
+    sha: "sha9",
+    verdict: "approved",
+    findings: [],
+    at: "2026-11-21T08:00:00.000Z",
+  };
   t.memory.state.merges.push({
     qaId: fx.qa.id,
     qaKey: fx.qa.key,
@@ -5788,6 +5911,8 @@ test("a merge in a pass the pause flag stops is checked after resume, with its t
     entry.prs[0].number = 10;
     entry.prs[0].url = "https://github.test/o/r/pull/10";
     entry.prs[0].sha = "sha10";
+    const reviewer = t.memory.state.reviewerHeads?.[second.backend.id];
+    if (reviewer !== undefined) reviewer.sha = "sha10";
   }
   t.gh.statuses[10] = t.gh.statuses[9] ?? {};
   await t.loop.tick();
@@ -6475,7 +6600,9 @@ test("part 2 waits while part 1 is In Review, and starts after part 1 is merged"
 
 test("an approved part with an unchanged head gets no second QA run; a new head runs QA once", async () => {
   const t = setup();
-  const { parent, backend, qa } = qaFixture(t);
+  const fx = qaFixture(t);
+  const { parent, backend, qa } = fx;
+  trackShippedPart(t, fx);
   t.gh.open(backend.key, 7);
   await t.loop.tick();
   await settle();
@@ -6500,6 +6627,14 @@ test("an approved part with an unchanged head gets no second QA run; a new head 
   assert.ok(pr);
   pr.headRefOid = "sha7-pushed-later";
   t.gh.statuses[7] = { headRefOid: "sha7-pushed-later", checks: [] };
+  const reviewRunCount = t.adapter.pending.length + 1;
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  (await nextRun(t.adapter, reviewRunCount)).finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "approve", findings: [] }),
+  );
+  await t.loop.idle();
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
   await settle();
   t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));

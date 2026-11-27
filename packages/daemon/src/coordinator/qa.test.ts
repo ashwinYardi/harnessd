@@ -472,7 +472,8 @@ test("every item and the tests pass: approve at the PR head, then QA stays Ready
   assert.match(prompt, /## CI\n- CI \/ test: success/);
   assert.match(prompt, /Read this part's brief, the decision IDs it names/);
   assert.match(prompt, /Do not read docs\/SPEC\.md or every decision record/);
-  assert.match(prompt, /Open a file only to check a line the diff touches/);
+  assert.match(prompt, /Judge each item only from the test results/);
+  assert.doesNotMatch(prompt, /code style|code quality|Open a file only|Judge from this diff/);
   assert.doesNotMatch(prompt, /Read the diff and the code/);
   assert.match(prompt, /`pnpm test` passed/);
   assert.match(prompt, /exactly 2 item\(s\)/);
@@ -2199,6 +2200,19 @@ test("a failed prepare is a setup error: no agent runs, nothing is posted", asyn
   assert.deepEqual(s.comments, []);
 });
 
+test("QA requeues without testing when the approved PR head moved before checkout", async () => {
+  const h = harness();
+  const result = await runQa(
+    { ...h.input, approvedHeads: { [backend.id]: "previous-head" } },
+    h.deps,
+  );
+  assert.equal(result.outcome, "error");
+  assert.equal(result.reviews[0]?.setup, true);
+  assert.deepEqual(h.checkouts, []);
+  assert.deepEqual(h.tasks, []);
+  assert.deepEqual(h.reviews, []);
+});
+
 test("a round whose budget ran out before the agent is a setup error", async () => {
   const h = harness();
   let clock = 0;
@@ -2338,8 +2352,8 @@ test("the QA prompt names the live app's url and kind, and the app stops after t
   assert.match(prompt, /qa-browser/);
   assert.match(prompt, /390x844/);
   assert.match(prompt, /1280x800/);
-  assert.match(prompt, /Read the diff only to find what to test\./);
-  assert.match(prompt, /Do not judge code style/);
+  assert.doesNotMatch(prompt, /code style|code quality|Read the diff only/);
+  assert.match(prompt, /The diff shows what changed and where to look\. It is not evidence/);
   assert.match(prompt, /command you ran, the response you got, or the screenshot path/);
   assert.equal(stopped, 1, "the app stops after an approval");
   assert.doesNotMatch(h.reviews[0]?.body ?? "", /not run live:/, "a live review is not marked");
@@ -2368,7 +2382,7 @@ test("the live prompt judges an item the product cannot reach from its tests (ME
     app: { kind: "web", url: "http://127.0.0.1:4321" },
   });
   assert.match(live, /not reachable live: <reason>;/);
-  assert.match(live, /judge the item from the tests and the diff/);
+  assert.match(live, /judge the item from the tests\./);
   assert.match(live, /fails only when no test proves it/);
   assert.match(live, /case's `actual` says which test is missing/);
   assert.match(live, /never asks for a secret, an account or a different sandbox/);
@@ -2611,8 +2625,9 @@ test("without a [qa] table no app starts, and the review says it did not run liv
   );
   const prompt = h.tasks[0]?.prompt ?? "";
   assert.doesNotMatch(prompt, /## App/);
-  // With no kind, the prompt keeps the diff, CI and tests wording (MET-180).
-  assert.match(prompt, /Judge from this diff, the CI result and the tests\./);
-  assert.match(prompt, /An item passes only with concrete evidence: a file and line/);
+  // With no kind, the prompt judges each item from the tests only (MET-226).
+  assert.match(prompt, /Judge each item only from the test results/);
+  assert.match(prompt, /An item is about behaviour/);
+  assert.doesNotMatch(prompt, /code style|code quality|Judge from this diff|file and line/);
   assert.doesNotMatch(prompt, /qa-browser|390x844|Call the api with curl/);
 });
