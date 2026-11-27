@@ -2,29 +2,16 @@
 # Resolve the QA sandbox home and refuse the user's real harnessd home (MET-239).
 #
 # Sourced by scripts/qa/start.sh and scripts/qa/seed.sh after they set ROOT. It sets
-# SANDBOX_HOME. A caller's HARNESSD_HOME names a real home here, never the sandbox: only
-# start.sh exports HARNESSD_HOME, and only for the sandbox daemon.
+# SANDBOX_HOME to one canonical path: the guard, every cleanup command and the backend's
+# HARNESSD_HOME export all use it. A caller's HARNESSD_HOME names a real home here, never
+# the sandbox.
 
 # Resolve relative values against the caller's cwd, before start.sh cds to ROOT.
 caller_cwd=$(pwd -P)
 
-# Strip leading and trailing whitespace, newlines included, the way String.trim() does:
-# a padded HARNESSD_HOME still names the home the daemon resolves.
+# String.trim() exactly, so Unicode padding such as U+00A0 cannot hide a real home.
 trim_home() {
-  _trimmed=$1
-  while :; do
-    case $_trimmed in
-      *[[:space:]]) _trimmed=${_trimmed%?} ;;
-      *) break ;;
-    esac
-  done
-  while :; do
-    case $_trimmed in
-      [[:space:]]*) _trimmed=${_trimmed#?} ;;
-      *) break ;;
-    esac
-  done
-  printf '%s' "$_trimmed"
+  HOME_TO_TRIM=$1 node -e 'process.stdout.write((process.env.HOME_TO_TRIM ?? "").trim())'
 }
 
 # The caller's own HARNESSD_HOME is the home a daemon in this shell would use.
@@ -55,17 +42,6 @@ absolute_home() {
   printf '%s' "$_home"
 }
 
-# The directory a path reaches on disk: cd -P follows a symlink where it appears, so the
-# result matches where a cleanup command would land.
-physical_home() {
-  _home=$1
-  if [ -d "$_home" ]; then
-    _resolved=$(cd -P "$_home" 2>/dev/null && pwd -P) || _resolved=$_home
-    _home=$_resolved
-  fi
-  printf '%s' "$_home"
-}
-
 # Collapse . and .. without touching the filesystem, as Node's path.resolve() does.
 lexical_home() {
   P=$1 awk 'BEGIN {
@@ -82,24 +58,33 @@ lexical_home() {
   }'
 }
 
-# A daemon home, resolved as the daemon resolves it: path.resolve() first, then the
-# folder. A symlink followed by .. can then never name a different home than it seems.
-candidate_home() {
+# The on-disk directory a path reaches: cd -P follows a symlink where it appears.
+physical_home() {
+  _home=$1
+  if [ -d "$_home" ]; then
+    _resolved=$(cd -P "$_home" 2>/dev/null && pwd -P) || _resolved=$_home
+    _home=$_resolved
+  fi
+  printf '%s' "$_home"
+}
+
+# The daemon's own resolution: path.resolve() lexically, then the folder physically.
+canonical_home() {
   physical_home "$(lexical_home "$(absolute_home "$1")")"
 }
+
+SANDBOX_HOME=$(canonical_home "$SANDBOX_HOME")
+sandbox_home=$SANDBOX_HOME
 
 # The daemon trims HARNESSD_HOME, so a padded value still names that home.
 guard_home() {
   _candidate=$(trim_home "$1")
   [ -n "$_candidate" ] || return 0
-  if [ "$(candidate_home "$_candidate")" = "$sandbox_home" ]; then
+  if [ "$(canonical_home "$_candidate")" = "$sandbox_home" ]; then
     echo "scripts/qa/$(basename "$0"): the sandbox home $sandbox_home is the real harnessd home; set HARNESSD_QA_HOME to a scratch folder" >&2
     exit 1
   fi
 }
-
-SANDBOX_HOME=$(absolute_home "$SANDBOX_HOME")
-sandbox_home=$(physical_home "$SANDBOX_HOME")
 
 if [ -n "${HOME:-}" ]; then
   guard_home "$HOME/.harnessd"

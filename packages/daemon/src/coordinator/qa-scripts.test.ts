@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -80,6 +81,27 @@ function kept(home: string): void {
   assert.equal(existsSync(join(home, "state", "paused.json")), true, "the pause survives");
 }
 
+/** Writes the launchd plist under temp $HOME, so the guard reads the service's home. */
+function writePlist(s: Sandbox, home: string): void {
+  const agents = join(s.home, "Library", "LaunchAgents");
+  mkdirSync(agents, { recursive: true });
+  writeFileSync(
+    join(agents, "dev.harnessd.daemon.plist"),
+    [
+      '<plist version="1.0">',
+      "<dict>",
+      "  <key>EnvironmentVariables</key>",
+      "  <dict>",
+      "    <key>HARNESSD_HOME</key>",
+      `    <string>${home}</string>`,
+      "  </dict>",
+      "</dict>",
+      "</plist>",
+      "",
+    ].join("\n"),
+  );
+}
+
 const GUARD = /is the real harnessd home; set HARNESSD_QA_HOME to a scratch folder/;
 
 test("case (a): with HARNESSD_QA_HOME unset, the scripts use a scratch home under TMPDIR", (t) => {
@@ -95,11 +117,11 @@ test("case (a): with HARNESSD_QA_HOME unset, the scripts use a scratch home unde
   assert.equal(existsSync(join(real, "fixtures")), false, "no fixtures land in the real home");
 
   const scratch = readFileSync(s.out, "utf8");
-  assert.equal(dirname(scratch), s.temp, "the daemon's home is the scratch folder under TMPDIR");
+  assert.equal(dirname(scratch), realpathSync(s.temp), "the daemon's home is under TMPDIR");
   assert.match(basename(scratch), /^harnessd-qa-\d+$/);
 
   const seededHome = dirname(seeded.stdout.trim().replace(/^seeded /, ""));
-  assert.equal(seededHome, scratch, "seed and start agree on the scratch home");
+  assert.equal(realpathSync(seededHome), scratch, "seed and start reach the same scratch home");
 });
 
 test("case (b): HARNESSD_QA_HOME equal to $HOME/.harnessd is refused and left alone", (t) => {
@@ -121,23 +143,7 @@ test("case (c): HARNESSD_QA_HOME equal to the plist's HARNESSD_HOME is refused",
   const s = sandbox(t);
   const service = join(s.root, "service-home");
   mkdirSync(service, { recursive: true });
-  const agents = join(s.home, "Library", "LaunchAgents");
-  mkdirSync(agents, { recursive: true });
-  writeFileSync(
-    join(agents, "dev.harnessd.daemon.plist"),
-    [
-      '<plist version="1.0">',
-      "<dict>",
-      "  <key>EnvironmentVariables</key>",
-      "  <dict>",
-      "    <key>HARNESSD_HOME</key>",
-      `    <string>${service}</string>`,
-      "  </dict>",
-      "</dict>",
-      "</plist>",
-      "",
-    ].join("\n"),
-  );
+  writePlist(s, service);
 
   for (const name of SCRIPTS) {
     const result = run(s, name, { HARNESSD_QA_HOME: service, HARNESSD_QA_AREA: "backend" });
@@ -173,52 +179,14 @@ test("the guard resolves homes as the daemon does: trimmed, relative and physica
 
 test("an unreadable plist is skipped and both scripts still run", (t) => {
   const s = sandbox(t);
-  const agents = join(s.home, "Library", "LaunchAgents");
-  mkdirSync(agents, { recursive: true });
-  const plist = join(agents, "dev.harnessd.daemon.plist");
-  writeFileSync(
-    plist,
-    [
-      '<plist version="1.0">',
-      "<dict>",
-      "  <key>EnvironmentVariables</key>",
-      "  <dict>",
-      "    <key>HARNESSD_HOME</key>",
-      `    <string>${join(s.root, "service-home")}</string>`,
-      "  </dict>",
-      "</dict>",
-      "</plist>",
-      "",
-    ].join("\n"),
-  );
-  chmodSync(plist, 0o000);
+  writePlist(s, join(s.root, "service-home"));
+  chmodSync(join(s.home, "Library", "LaunchAgents", "dev.harnessd.daemon.plist"), 0o000);
 
   const seeded = run(s, "seed.sh");
   assert.equal(seeded.status, 0, seeded.stderr);
   const started = run(s, "start.sh", { HARNESSD_QA_AREA: "backend" });
   assert.equal(started.status, 0, started.stderr);
 });
-
-/** Writes the launchd plist under temp $HOME, so the guard reads the service's home. */
-function writePlist(s: Sandbox, home: string): void {
-  const agents = join(s.home, "Library", "LaunchAgents");
-  mkdirSync(agents, { recursive: true });
-  writeFileSync(
-    join(agents, "dev.harnessd.daemon.plist"),
-    [
-      '<plist version="1.0">',
-      "<dict>",
-      "  <key>EnvironmentVariables</key>",
-      "  <dict>",
-      "    <key>HARNESSD_HOME</key>",
-      `    <string>${home}</string>`,
-      "  </dict>",
-      "</dict>",
-      "</plist>",
-      "",
-    ].join("\n"),
-  );
-}
 
 test("a leading newline and a trailing space are trimmed before the guard and the export", (t) => {
   const s = sandbox(t);
@@ -254,4 +222,35 @@ test("a configured home with a symlink followed by .. still matches the sandbox"
     assert.match(result.stderr, GUARD);
   }
   kept(real);
+});
+
+test("U+00A0 padding is trimmed before the guard and the export", (t) => {
+  const s = sandbox(t);
+  const real = realHome(join(s.home, ".harnessd"));
+
+  const refused = run(s, "seed.sh", {
+    HARNESSD_QA_HOME: `\u00a0${real}\u00a0`,
+    HARNESSD_HOME: `\u00a0${real}\u00a0`,
+  });
+  assert.equal(refused.status, 1, "a non-breaking-space-padded override is refused");
+  assert.match(refused.stderr, GUARD);
+  kept(real);
+
+  const scratch = join(s.temp, "scratch-home");
+  const started = run(s, "start.sh", {
+    HARNESSD_QA_HOME: `\u00a0${scratch}\u00a0`,
+    HARNESSD_QA_AREA: "backend",
+  });
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(readFileSync(s.out, "utf8"), scratch, "the export carries no padding");
+});
+
+test("/var/.. canonicalizes to the same home for the sandbox and the caller", (t) => {
+  const s = sandbox(t);
+
+  for (const name of SCRIPTS) {
+    const result = run(s, name, { HARNESSD_HOME: "/var/..", HARNESSD_QA_HOME: "/var/.." });
+    assert.equal(result.status, 1, `${name}: refused before any cleanup`);
+    assert.match(result.stderr, GUARD);
+  }
 });
