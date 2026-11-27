@@ -37,6 +37,7 @@ import type {
   ReviewEvent,
 } from "../github/client.ts";
 import type { LinearClient } from "../linear/client.ts";
+import { isNetworkError } from "../net-error.ts";
 import type { TaskWorktrees } from "../worktrees/index.ts";
 import { agentPromptHeader } from "./dispatch.ts";
 import { extractJson, runForReply } from "./grill.ts";
@@ -1040,6 +1041,11 @@ export interface PrReview {
   /** COMMENT when GitHub refused the real review event (e.g. on your own PR). */
   postedAs?: ReviewEvent;
   /**
+   * A network error stopped the review post: the loop keeps the verdict and posts it on a
+   * later tick (MET-213, D-058). The decision is still the real one.
+   */
+  pendingPost?: { event: ReviewEvent; body: string; head: string };
+  /**
    * Why this review ran without a live app: the third consecutive app setup error on this
    * head (D-051). It counts no QA failure; a later prompt part shows it.
    */
@@ -1281,21 +1287,27 @@ function clearAppSetupFailures(partId: string): void {
   appSetupFailures.delete(partId);
 }
 
-/** Counts one not-judged run for this part and head; a new head starts at one (D-052). */
-function countNotJudged(
+/** The not-judged count this round would make for this part and head (D-052). */
+function nextNotJudged(
   partId: string,
   head: string,
   reason: string,
 ): { head: string; count: number; reasons: string[] } {
   const previous = notJudgedRuns.get(partId);
   const sameHead = previous?.head === head;
-  const counted = {
+  return {
     head,
     count: sameHead ? (previous?.count ?? 0) + 1 : 1,
     reasons: sameHead ? [...(previous?.reasons ?? []), reason] : [reason],
   };
+}
+
+/** Counts one not-judged run; the settle commits it only once its writes are done (MET-213). */
+function commitNotJudged(
+  partId: string,
+  counted: { head: string; count: number; reasons: string[] },
+): void {
   notJudgedRuns.set(partId, counted);
-  return counted;
 }
 
 /** A judged verdict (or a new head) drops the earlier not-judged runs for this part. */
@@ -1390,6 +1402,40 @@ export interface QaRunResult {
   usageUnknown?: true;
 }
 
+/**
+ * Posts one PR review, falling back to a comment review when GitHub refuses the event (the
+ * norm on your own PR). A network error is thrown: the caller keeps the verdict and retries
+ * it on a later tick (MET-213, D-058).
+ */
+export async function postQaReview(
+  github: Pick<GitHub, "postReview">,
+  qaKey: string,
+  pr: { number: number; head: string },
+  review: { event: ReviewEvent; body: string },
+  log: (line: string) => void,
+): Promise<{ url: string; postedAs: ReviewEvent }> {
+  try {
+    const url = await github.postReview(pr.number, {
+      event: review.event,
+      body: review.body,
+      commitId: pr.head,
+    });
+    return { url, postedAs: review.event };
+  } catch (error) {
+    // A dead connection is not a refusal: retry it instead of posting a comment.
+    if (isNetworkError(error)) throw error;
+    log(
+      `${qaKey}: ${review.event} on PR #${pr.number} refused (${message(error)}), posting a comment`,
+    );
+    const url = await github.postReview(pr.number, {
+      event: "COMMENT",
+      body: review.body,
+      commitId: pr.head,
+    });
+    return { url, postedAs: "COMMENT" };
+  }
+}
+
 /** Reviews every part's PR. Never throws: a broken step is an `error` review. */
 export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunResult> {
   const { qa, parent } = input;
@@ -1414,20 +1460,13 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
   });
 
   async function post(pr: PullRequest, event: ReviewEvent, body: string) {
-    try {
-      const url = await deps.github.postReview(pr.number, { event, body, commitId: pr.headRefOid });
-      return { url, postedAs: event };
-    } catch (error) {
-      // GitHub refuses APPROVE and REQUEST_CHANGES on your own PR, which is the norm when
-      // every agent shares one `gh` login. A comment review still carries the verdict.
-      log(`${qa.key}: ${event} on PR #${pr.number} refused (${message(error)}), posting a comment`);
-      const url = await deps.github.postReview(pr.number, {
-        event: "COMMENT",
-        body,
-        commitId: pr.headRefOid,
-      });
-      return { url, postedAs: "COMMENT" as const };
-    }
+    return postQaReview(
+      deps.github,
+      qa.key,
+      { number: pr.number, head: pr.headRefOid },
+      { event, body },
+      log,
+    );
   }
 
   async function review(part: LinkedIssue): Promise<PrReview> {
@@ -1802,6 +1841,11 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
       result.postedAs = posted.postedAs;
     } catch (error) {
       log(`${qa.key}: could not post the review on PR #${pr.number}: ${message(error)}`);
+      // A network error says nothing about the verdict: keep it and post it later (D-058).
+      if (isNetworkError(error)) {
+        result.pendingPost = { event, body, head: pr.headRefOid };
+        return result;
+      }
       // Without a posted approval nothing may merge; changes requested still go back.
       if (decision.decision === "approve") {
         return {
@@ -1868,9 +1912,21 @@ export interface QaSettleDeps {
   /** `limits.qa_max_failures`: failed rounds before the human is asked (D-014). */
   maxFailures: number;
   log?: (line: string) => void;
+  /**
+   * The steps a retry already finished, by the name the log gives them (MET-213, D-058).
+   * A retry skips a done step and a network error leaves the rest for the next tick.
+   */
+  steps?: QaSettleSteps;
 }
 
-export type QaSettlement = "approved" | "sent_back" | "escalated" | "requeued";
+/** The settle writes a retry may skip, kept across ticks (MET-213, D-058). */
+export interface QaSettleSteps {
+  done: string[];
+  mark(step: string): void | Promise<void>;
+}
+
+/** `pending`: a network error stopped a write; the loop retries the rest next tick. */
+export type QaSettlement = "approved" | "sent_back" | "escalated" | "requeued" | "pending";
 
 function reviewLines(reviews: PrReview[]): string[] {
   const lines: string[] = [];
@@ -1909,7 +1965,7 @@ function clearSavedCases(
 }
 
 /**
- * Applies a QA round. Approved: QA moves to In Review (MET-14 merges). A round where no
+ * Applies a QA round. Approved: QA moves back to Ready (MET-14 merges). A round where no
  * part was judged and every failed review is a setup error, or gave no usable verdict
  * (turn cap, time limit, stall or invalid JSON), is re-queued with no failure counted
  * (D-041, D-052). Two not-judged runs in a row on one PR head go to the human instead,
@@ -1918,6 +1974,9 @@ function clearSavedCases(
  * the review, and QA waits in Ready for them. The `maxFailures`-th failure moves QA and
  * the parent to Needs input with one comment and one ping, and nothing is sent back again
  * (D-014).
+ *
+ * A network error stops the writes and returns `pending` without changing any state; the
+ * loop keeps the round for a retry and skips the steps already done (MET-213, D-058).
  */
 export async function settleQa(
   state: Pick<LoopState, "qaFailures" | "qaFeedback" | "sessions" | "reviewedHeads">,
@@ -1927,18 +1986,36 @@ export async function settleQa(
 ): Promise<QaSettlement> {
   const { qa, parent } = input;
   const log = deps.log ?? (() => {});
-  const safely = async (what: string, fn: () => Promise<unknown>) => {
+  const steps = deps.steps;
+  const done = new Set(steps?.done ?? []);
+  /** A network error stopped the writes: the rest waits for the next tick (D-058). */
+  let stopped = false;
+  const mark = async (step: string): Promise<void> => {
+    if (done.has(step)) return;
+    done.add(step);
+    await steps?.mark(step);
+  };
+  const safely = async (
+    what: string,
+    fn: () => Promise<unknown>,
+    retryNetwork = true,
+  ): Promise<void> => {
+    if (done.has(what) || stopped) return;
     try {
       await fn();
     } catch (error) {
       log(`could not ${what}: ${message(error)}`);
+      if (retryNetwork && isNetworkError(error)) {
+        stopped = true;
+        return;
+      }
+      // A non-network failure is logged and the round goes on, as `safely` always did.
     }
+    await mark(what);
   };
   const lines = reviewLines(result.reviews);
 
   if (result.outcome === "approved") {
-    delete state.qaFailures[parent.id];
-    for (const r of result.reviews) clearNotJudged(r.part.id);
     const body = [
       `**harnessd QA**: approved. Every "Done when" item of ${parent.key} passes and the tests pass.`,
       "",
@@ -1948,17 +2025,24 @@ export async function settleQa(
     // Per-part QA: the QA sub-issue stays Ready for the next part, and moves to Done after
     // the last part merges (D-040).
     await safely(`move ${qa.key} to Ready`, () => deps.linear.moveTo(qa.id, "Ready"));
+    if (stopped) return "pending";
+    delete state.qaFailures[parent.id];
+    for (const r of result.reviews) clearNotJudged(r.part.id);
     return "approved";
   }
 
   const failures = (state.qaFailures[parent.id] ?? 0) + 1;
   // A judged verdict clears the not-judged count; a setup error leaves it as it is (D-052).
-  for (const r of result.reviews) {
-    if (r.decision === "approve" || r.decision === "request_changes") clearNotJudged(r.part.id);
-  }
+  const clears = result.reviews
+    .filter((r) => r.decision === "approve" || r.decision === "request_changes")
+    .map((r) => r.part.id);
   // Count every not-judged run, even when another part in the round asks for changes, so
   // that a second timeout on one head still reaches a human (D-052).
-  const countedParts: string[] = [];
+  const counted: Array<{
+    part: LinkedIssue;
+    pr?: PullRequest;
+    counted: { head: string; count: number; reasons: string[] };
+  }> = [];
   let twice:
     | {
         part: LinkedIssue;
@@ -1968,12 +2052,16 @@ export async function settleQa(
     | undefined;
   for (const r of result.reviews) {
     if (r.notJudged === undefined) continue;
-    const counted = countNotJudged(r.part.id, r.pr?.headRefOid ?? "", notJudgedReason(r));
-    countedParts.push(r.part.id);
-    if (counted.count >= 2) {
-      twice = { part: r.part, ...(r.pr === undefined ? {} : { pr: r.pr }), counted };
-    }
+    const next = nextNotJudged(r.part.id, r.pr?.headRefOid ?? "", notJudgedReason(r));
+    const entry = { part: r.part, ...(r.pr === undefined ? {} : { pr: r.pr }), counted: next };
+    counted.push(entry);
+    if (next.count >= 2) twice = entry;
   }
+  /** Commits the not-judged counts once this round's writes are done (D-052). */
+  const commitCounts = (): void => {
+    for (const entry of counted) commitNotJudged(entry.part.id, entry.counted);
+    for (const partId of clears) clearNotJudged(partId);
+  };
   if (twice !== undefined) {
     // Two runs in a row gave no verdict: a human decides, and no QA failure is counted.
     const head = twice.counted.head.slice(0, 7);
@@ -1987,20 +2075,25 @@ export async function settleQa(
     await safely(`comment on ${parent.key}`, () =>
       deps.linear.comment(parent.id, `**harnessd QA**: ${detail}\n`),
     );
-    await safely(`move ${qa.key} to Needs input`, () => deps.linear.moveTo(qa.id, "Needs input"));
     await safely(`move ${parent.key} to Needs input`, () =>
       deps.linear.moveTo(parent.id, "Needs input"),
     );
-    await safely("send the notice", () =>
-      deps.notifier.notify({
-        kind: "needs_input",
-        issue: { key: parent.key, url: parent.url },
-        prs: twice.pr === undefined ? [] : [{ number: twice.pr.number, url: twice.pr.url }],
-        reason: "QA not judged twice",
-        detail,
-      }),
+    await safely(`move ${qa.key} to Needs input`, () => deps.linear.moveTo(qa.id, "Needs input"));
+    await safely(
+      "send the notice",
+      () =>
+        deps.notifier.notify({
+          kind: "needs_input",
+          issue: { key: parent.key, url: parent.url },
+          prs: twice.pr === undefined ? [] : [{ number: twice.pr.number, url: twice.pr.url }],
+          reason: "QA not judged twice",
+          detail,
+        }),
+      false,
     );
-    for (const partId of countedParts) clearNotJudged(partId);
+    if (stopped) return "pending";
+    for (const entry of counted) clearNotJudged(entry.part.id);
+    for (const partId of clears) clearNotJudged(partId);
     clearSavedCases(state, twice.part.id);
     return "escalated";
   }
@@ -2015,17 +2108,12 @@ export async function settleQa(
     );
     log(`${qa.key}: QA not judged (${reasons.join("; ")}), re-queued`);
     await safely(`re-queue ${qa.key}`, () => deps.linear.moveTo(qa.id, "Ready"));
+    if (stopped) return "pending";
+    commitCounts();
     return "requeued";
   }
 
   if (failures >= deps.maxFailures) {
-    delete state.qaFailures[parent.id];
-    for (const r of result.reviews) {
-      delete state.qaFeedback[r.part.id];
-      clearSavedCases(state, r.part.id);
-      if (state.sessions !== undefined) delete state.sessions[r.part.id];
-      clearNotJudged(r.part.id);
-    }
     const body = [
       `**harnessd QA**: QA failed ${times(failures)} for ${parent.key}, so this needs a human (D-014). ` +
         `${qa.key} and ${parent.key} are in Needs input, and nothing is sent back again.`,
@@ -2034,25 +2122,36 @@ export async function settleQa(
       ...lines,
     ].join("\n");
     await safely(`comment on ${parent.key}`, () => deps.linear.comment(parent.id, `${body}\n`));
-    await safely(`move ${qa.key} to Needs input`, () => deps.linear.moveTo(qa.id, "Needs input"));
     await safely(`move ${parent.key} to Needs input`, () =>
       deps.linear.moveTo(parent.id, "Needs input"),
     );
     const failing = result.reviews.filter((r) => r.decision !== "approve");
     const keys = failing.map((r) => r.part.key);
-    await safely("send the notice", () =>
-      deps.notifier.notify({
-        kind: "needs_input",
-        issue: { key: parent.key, url: parent.url },
-        prs: failing.flatMap((r) => (r.pr ? [{ number: r.pr.number, url: r.pr.url }] : [])),
-        reason: `QA failed ${times(failures)}`,
-        detail: `${qa.key} could not approve ${keys.join(", ") || "the parts"}`,
-      }),
+    await safely(`move ${qa.key} to Needs input`, () => deps.linear.moveTo(qa.id, "Needs input"));
+    await safely(
+      "send the notice",
+      () =>
+        deps.notifier.notify({
+          kind: "needs_input",
+          issue: { key: parent.key, url: parent.url },
+          prs: failing.flatMap((r) => (r.pr ? [{ number: r.pr.number, url: r.pr.url }] : [])),
+          reason: `QA failed ${times(failures)}`,
+          detail: `${qa.key} could not approve ${keys.join(", ") || "the parts"}`,
+        }),
+      false,
     );
+    if (stopped) return "pending";
+    delete state.qaFailures[parent.id];
+    for (const r of result.reviews) {
+      delete state.qaFeedback[r.part.id];
+      clearSavedCases(state, r.part.id);
+      if (state.sessions !== undefined) delete state.sessions[r.part.id];
+      clearNotJudged(r.part.id);
+    }
     return "escalated";
   }
 
-  state.qaFailures[parent.id] = failures;
+  const feedbackEntries: Array<[(typeof state.qaFeedback)[string], PrReview]> = [];
   for (const r of result.reviews) {
     if (r.decision !== "request_changes") continue;
     const feedback: (typeof state.qaFeedback)[string] = { failing: r.failing };
@@ -2060,7 +2159,7 @@ export async function settleQa(
     if (r.reviewUrl) feedback.reviewUrl = r.reviewUrl;
     if (r.testTail !== undefined) feedback.testTail = r.testTail;
     if (r.cases !== undefined) feedback.cases = r.cases;
-    state.qaFeedback[r.part.id] = feedback;
+    feedbackEntries.push([feedback, r]);
     const role = readPartMarker(r.part.description)?.role ?? "part";
     const where = r.pr
       ? `on [PR #${r.pr.number}](${r.pr.url})${r.reviewUrl ? ` ([review](${r.reviewUrl}))` : ""}`
@@ -2085,5 +2184,9 @@ export async function settleQa(
   ].join("\n");
   await safely(`comment on ${qa.key}`, () => deps.linear.comment(qa.id, `${body}\n`));
   await safely(`re-queue ${qa.key}`, () => deps.linear.moveTo(qa.id, "Ready"));
+  if (stopped) return "pending";
+  state.qaFailures[parent.id] = failures;
+  for (const [feedback, r] of feedbackEntries) state.qaFeedback[r.part.id] = feedback;
+  commitCounts();
   return "sent_back";
 }

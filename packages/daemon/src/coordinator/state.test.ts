@@ -108,6 +108,27 @@ const state: LoopState = {
       at: "2026-11-19T10:05:00.000Z",
     },
   },
+  pendingQa: {
+    "qa-1": {
+      parentId: "parent-1",
+      qaKey: "MET-43",
+      reviews: [
+        {
+          partId: "id-1",
+          partKey: "MET-41",
+          decision: "approve",
+          failing: [],
+          prNumber: 7,
+          prUrl: "https://github.test/pull/7",
+          head: "abc123",
+          event: "APPROVE",
+          body: "**harnessd QA** (MET-43): approved.",
+          done: false,
+        },
+      ],
+      done: [],
+    },
+  },
 };
 
 test("a missing file loads as the empty state", async () => {
@@ -134,6 +155,7 @@ test("save writes loop.json atomically with a .gitignore, and load reads it back
   assert.deepEqual(loaded.limits, state.limits, "a harness hold survives a reload");
   assert.deepEqual(loaded.splits, state.splits, "a split record survives a reload");
   assert.deepEqual(loaded.sessions, state.sessions, "a part session survives a reload");
+  assert.deepEqual(loaded.pendingQa, state.pendingQa, "a pending QA verdict survives a reload");
   const files = (await readdir(join(dir, ".harnessd", "state"))).sort();
   assert.deepEqual(files, [".gitignore", "loop.json"], "no tmp files left behind");
   assert.equal(await readFile(join(dir, ".harnessd", "state", ".gitignore"), "utf8"), "*\n");
@@ -218,6 +240,25 @@ test("sessions are optional, and a malformed one is dropped", () => {
   );
   assert.deepEqual(parsed.sessions, { a: good });
   assert.equal(parsed.qaFeedback.a?.testTail, "not ok");
+});
+
+test("pendingQa is optional, and a malformed entry is dropped (MET-213)", () => {
+  assert.equal(parseLoopState('{"inFlight":[]}').pendingQa, undefined, "old files still load");
+  const good = state.pendingQa?.["qa-1"];
+  assert.ok(good);
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      pendingQa: {
+        "qa-1": good,
+        "qa-2": { ...good, reviews: [{ ...good.reviews[0], decision: "maybe" }] },
+        "qa-3": { ...good, parentId: "" },
+        "qa-4": { ...good, done: "comment" },
+        "qa-5": { ...good, reviews: [{ ...good.reviews[0], head: undefined }] },
+      },
+    }),
+  );
+  assert.deepEqual(parsed.pendingQa, { "qa-1": good }, "the well-formed record stays");
 });
 
 test("qaFeedback cases are optional, and a malformed case drops only the array (D-054)", async () => {

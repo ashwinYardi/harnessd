@@ -11,6 +11,7 @@ import {
   type SelfUpdateView,
   type TokenSum,
 } from "@harnessd/shared";
+import type { ReviewEvent } from "../github/client.ts";
 import type { WorktreeKeepReason } from "../worktrees/index.ts";
 
 /** A sub-issue an agent is working on. */
@@ -210,6 +211,44 @@ export interface HarnessSwitch {
   at: string;
 }
 
+/** One review of a QA round that a network error left to post (MET-213, D-058). */
+export interface PendingQaReview {
+  partId: string;
+  partKey: string;
+  decision: "approve" | "request_changes" | "error";
+  failing: string[];
+  cases?: QaCase[];
+  /** The PR and the head the review names. Unset when the review had no PR. */
+  prNumber?: number;
+  prUrl?: string;
+  head?: string;
+  /** The review event and body to post on the retry. */
+  event?: ReviewEvent;
+  body?: string;
+  /** True once the review is posted, or it had no post to make. */
+  done: boolean;
+  /** Kept for the settle: a setup error, a not-judged reason, its evidence. */
+  setup?: boolean;
+  notJudged?: "turn_cap" | "timeout" | "stalled" | "not_json" | "no_cases";
+  error?: string;
+  testTail?: string;
+  reviewUrl?: string;
+  postedAs?: ReviewEvent;
+}
+
+/**
+ * A QA verdict a network error left unfinished, per QA sub-issue id (MET-213, D-058).
+ * The loop posts each review not done, then runs the settle with its done steps skipped,
+ * early in every tick until nothing is left.
+ */
+export interface PendingQa {
+  parentId: string;
+  qaKey?: string;
+  reviews: PendingQaReview[];
+  /** The settle steps already done, by the name the log gives them. */
+  done: string[];
+}
+
 export interface LoopState {
   version: 1;
   /** ISO time of the last poll, null before the first. */
@@ -249,6 +288,8 @@ export interface LoopState {
   sessions?: Record<string, PartSession>;
   /** The next harness to try, per issue id (D-048). Optional for old files. */
   harnessSwitch?: Record<string, HarnessSwitch>;
+  /** QA verdicts a network error left to post and settle, per QA sub-issue id (MET-213). */
+  pendingQa?: Record<string, PendingQa>;
   /**
    * When a split note first warned that the repo runs no live app (MET-180). Optional, so a
    * file from before it loads; the warning comes again only when the key is removed.
@@ -556,6 +597,91 @@ function harnessSwitches(value: unknown): Record<string, HarnessSwitch> {
   return out;
 }
 
+function pendingQaReview(value: unknown): PendingQaReview | undefined {
+  const r = value as Partial<PendingQaReview> | null;
+  if (typeof r !== "object" || r === null) return undefined;
+  if (typeof r.partId !== "string" || r.partId === "") return undefined;
+  if (typeof r.partKey !== "string" || r.partKey === "") return undefined;
+  if (r.decision !== "approve" && r.decision !== "request_changes" && r.decision !== "error") {
+    return undefined;
+  }
+  if (!Array.isArray(r.failing) || !r.failing.every((line) => typeof line === "string")) {
+    return undefined;
+  }
+  if (typeof r.done !== "boolean") return undefined;
+  if (r.cases !== undefined && qaCases(r.cases) === undefined) return undefined;
+  const optionalEvent = (v: unknown): v is ReviewEvent | undefined =>
+    v === undefined || v === "APPROVE" || v === "REQUEST_CHANGES" || v === "COMMENT";
+  if (
+    !optionalString(r.prUrl) ||
+    !optionalString(r.head) ||
+    !optionalString(r.body) ||
+    !optionalString(r.error) ||
+    !optionalString(r.testTail) ||
+    !optionalString(r.reviewUrl) ||
+    !optionalEvent(r.event) ||
+    !optionalEvent(r.postedAs) ||
+    (r.setup !== undefined && typeof r.setup !== "boolean") ||
+    (r.notJudged !== undefined &&
+      r.notJudged !== "turn_cap" &&
+      r.notJudged !== "timeout" &&
+      r.notJudged !== "stalled" &&
+      r.notJudged !== "not_json" &&
+      r.notJudged !== "no_cases") ||
+    (r.prNumber !== undefined &&
+      (typeof r.prNumber !== "number" || !Number.isInteger(r.prNumber) || r.prNumber <= 0))
+  ) {
+    return undefined;
+  }
+  if (!r.done && (r.prNumber === undefined || !r.head || !r.event || r.body === undefined)) {
+    return undefined;
+  }
+  const out: PendingQaReview = {
+    partId: r.partId,
+    partKey: r.partKey,
+    decision: r.decision,
+    failing: r.failing,
+    done: r.done,
+  };
+  const cases = qaCases(r.cases);
+  if (cases !== undefined) out.cases = cases;
+  if (r.prNumber !== undefined) out.prNumber = r.prNumber;
+  if (r.prUrl !== undefined) out.prUrl = r.prUrl;
+  if (r.head !== undefined) out.head = r.head;
+  if (r.event !== undefined) out.event = r.event;
+  if (r.body !== undefined) out.body = r.body;
+  if (r.setup !== undefined) out.setup = r.setup;
+  if (r.notJudged !== undefined) out.notJudged = r.notJudged;
+  if (r.error !== undefined) out.error = r.error;
+  if (r.testTail !== undefined) out.testTail = r.testTail;
+  if (r.reviewUrl !== undefined) out.reviewUrl = r.reviewUrl;
+  if (r.postedAs !== undefined) out.postedAs = r.postedAs;
+  return out;
+}
+
+/** A half-readable pending QA record is dropped: its verdict cannot be replayed safely. */
+function pendingQaRecords(value: unknown): Record<string, PendingQa> {
+  const out: Record<string, PendingQa> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const p = raw as Partial<PendingQa> | null;
+    if (typeof p !== "object" || p === null) continue;
+    if (typeof p.parentId !== "string" || p.parentId === "") continue;
+    if (!Array.isArray(p.reviews)) continue;
+    const reviews = p.reviews.map(pendingQaReview);
+    if (reviews.some((review) => review === undefined)) continue;
+    if (!Array.isArray(p.done) || !p.done.every((step) => typeof step === "string")) continue;
+    const entry: PendingQa = {
+      parentId: p.parentId,
+      reviews: reviews as PendingQaReview[],
+      done: p.done,
+    };
+    if (typeof p.qaKey === "string") entry.qaKey = p.qaKey;
+    out[id] = entry;
+  }
+  return out;
+}
+
 function partSessions(value: unknown): Record<string, PartSession> {
   const out: Record<string, PartSession> = {};
   if (typeof value !== "object" || value === null) return out;
@@ -640,6 +766,7 @@ export function parseLoopState(text: string): LoopState {
     ...(raw.harnessSwitch === undefined
       ? {}
       : { harnessSwitch: harnessSwitches(raw.harnessSwitch) }),
+    ...(raw.pendingQa === undefined ? {} : { pendingQa: pendingQaRecords(raw.pendingQa) }),
     ...(typeof raw.qaLiveWarned === "string" && raw.qaLiveWarned !== ""
       ? { qaLiveWarned: raw.qaLiveWarned }
       : {}),

@@ -32,7 +32,7 @@ import type {
   PullRequestStatus,
   ReviewInput,
 } from "../github/client.ts";
-import type { CreateSubIssueInput, ListReadyOptions } from "../linear/client.ts";
+import { type CreateSubIssueInput, LinearError, type ListReadyOptions } from "../linear/client.ts";
 import { compareQueueOrder, parseLinkedIssue, type RawIssue } from "../linear/parse.ts";
 import type { SelfUpdateResult, SelfUpdateTarget } from "../selfupdate/index.ts";
 import { createGitWorktrees, type TaskWorktrees, type Worktree } from "../worktrees/index.ts";
@@ -230,6 +230,9 @@ class FakeLinear implements LoopLinear {
     const issue = this.issues.get(keyOrId) ?? this.byKey(keyOrId);
     return this.#linked(issue);
   }
+
+  /** A fake Linear has no pool; the loop's 3-tick reset test replaces this (MET-213). */
+  resetConnections(): void {}
 }
 
 // --- fake adapter ----------------------------------------------------------
@@ -2063,6 +2066,166 @@ test("a QA checkout error counts no failure, and the next tick runs QA again", a
   await t.loop.idle();
   assert.equal(t.gh.reviews.length, 1, "the retry really reviews the PR");
   assert.equal(backend.state, "In Review");
+});
+
+test("a Linear network error keeps the QA verdict and posts it after two failed ticks (MET-213)", async () => {
+  const linear = new FakeLinear();
+  let failComment = true;
+  let failMove = true;
+  const networkError = () => new LinearError("network", "Linear request failed: fetch failed");
+  const comment = linear.comment.bind(linear);
+  const moveTo = linear.moveTo.bind(linear);
+  linear.comment = async (id, body) => {
+    if (failComment) throw networkError();
+    return comment(id, body);
+  };
+  linear.moveTo = async (id, state) => {
+    if (failMove && state === "Ready") throw networkError();
+    return moveTo(id, state);
+  };
+  const t = setup({ linear });
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+
+  assert.equal(qa.state, "In Progress", "the QA ticket stays In Progress while the verdict waits");
+  assert.equal(parent.state, "In Progress");
+  assert.deepEqual(t.memory.state.qaFailures, {}, "no QA failure counted");
+  assert.ok(t.memory.state.pendingQa?.[qa.id], "the verdict is kept");
+  assert.equal(t.gh.reviews.length, 1, "the GitHub review posted");
+  assert.equal(t.linear.comments.length, 0, "the Linear comment did not");
+
+  failComment = false;
+  await t.loop.tick();
+  assert.ok(t.memory.state.pendingQa?.[qa.id], "the failed move keeps the verdict");
+  assert.equal(qa.state, "In Progress");
+  assert.equal(t.linear.comments.filter((c) => c.key === qa.key).length, 1);
+
+  failMove = false;
+  await t.loop.tick();
+  assert.equal(t.memory.state.pendingQa, undefined, "the third tick finishes the writes");
+  assert.equal(qa.state, "Done", "the merge gate takes the approval in the same tick");
+  assert.equal(t.linear.comments.filter((c) => c.key === qa.key).length, 1);
+  assert.equal(t.gh.reviews.length, 1);
+  assert.equal(t.linear.moves.filter((m) => m.state === "Needs input").length, 0);
+  assert.equal(parent.state, "Done");
+  assert.deepEqual(t.memory.state.qaFailures, {});
+  assert.deepEqual(
+    t.gh.merges.map((m) => m.number),
+    [7],
+    "the approved PR merged once after the retry",
+  );
+  assert.ok(t.logs.includes(`${qa.key}: QA verdict posted after retry`));
+});
+
+test("a GitHub network error keeps the QA verdict and posts it on the next tick (MET-213)", async () => {
+  const gh = fakeGitHub();
+  let fail = true;
+  const github: GitHub = {
+    ...gh.github,
+    async postReview(number, review) {
+      if (fail) {
+        fail = false;
+        throw new Error("read ECONNRESET");
+      }
+      return gh.github.postReview(number, review);
+    },
+  };
+  const t = setup({ extra: { github } });
+  const { backend, qa } = qaFixture(t);
+  gh.open(backend.key, 7);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+
+  assert.equal(gh.reviews.length, 0, "the review post failed");
+  assert.equal(qa.state, "In Progress");
+  assert.ok(t.memory.state.pendingQa?.[qa.id]);
+  assert.deepEqual(t.memory.state.qaFailures, {}, "no QA failure counted");
+  assert.deepEqual(t.memory.state.merges, []);
+
+  await t.loop.tick();
+  assert.equal(gh.reviews.length, 1);
+  assert.equal(gh.reviews[0]?.event, "APPROVE");
+  assert.equal(t.memory.state.pendingQa, undefined);
+  assert.equal(qa.state, "Done", "the merge gate takes the approval in the same tick");
+  assert.equal(gh.merges.length, 1, "the approval merged after the retry");
+  assert.ok(t.logs.includes(`${qa.key}: QA verdict posted after retry`));
+});
+
+test("retrying a QA send-back keeps its cases and counts the verdict once", async () => {
+  const t = setup();
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+  let down = true;
+  const comment = t.linear.comment.bind(t.linear);
+  t.linear.comment = async (id, body) => {
+    if (id === qa.id && down) throw new Error("fetch failed");
+    return comment(id, body);
+  };
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending[0]?.finish("ok", undefined, verdict(false, true));
+  await t.loop.idle();
+
+  assert.equal(backend.state, "Ready", "the part move succeeded before the outage");
+  const cases = t.memory.state.pendingQa?.[qa.id]?.reviews[0]?.cases;
+  assert.equal(cases?.length, 1);
+  assert.deepEqual((await t.loop.tick()).dispatched, [], "the fix waits for its QA feedback");
+  assert.deepEqual(t.memory.state.qaFailures, {});
+  assert.deepEqual(t.pings, []);
+
+  down = false;
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  assert.equal(t.memory.state.pendingQa, undefined);
+  assert.equal(t.memory.state.qaFailures[parent.id], 1);
+  assert.deepEqual(t.memory.state.qaFeedback[backend.id]?.cases, cases);
+  assert.equal(t.linear.comments.filter((c) => c.key === backend.key).length, 1);
+  assert.equal(t.gh.reviews.length, 1);
+  assert.deepEqual(t.pings, []);
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+});
+
+test("three failed Linear ticks in a row reset the connections once (MET-213)", async () => {
+  const linear = new FakeLinear();
+  let resets = 0;
+  linear.resetConnections = () => {
+    resets += 1;
+  };
+  let down = true;
+  linear.listReadyContaining = async () => {
+    if (down) throw new LinearError("network", "Linear request failed: fetch failed");
+    return [];
+  };
+  const t = setup({ linear });
+  const tick = () => t.loop.tick().catch(() => undefined);
+
+  await tick();
+  await tick();
+  assert.equal(resets, 0, "two failed ticks are not enough");
+  down = false;
+  await tick();
+  assert.equal(resets, 0, "a clean tick starts the count again");
+  down = true;
+  await tick();
+  await tick();
+  assert.equal(resets, 0);
+  await tick();
+  assert.equal(resets, 1, "the third failed tick in a row resets the pool");
+  await tick();
+  assert.equal(resets, 1, "the count starts again after a reset");
+  assert.equal(
+    t.logs.filter((line) => line === "Linear unreachable for 3 ticks, connections reset").length,
+    1,
+  );
 });
 
 // --- fallback harness (MET-81) ------------------------------------------------

@@ -29,8 +29,9 @@ import {
   weightedTokens,
 } from "@harnessd/shared";
 import { resolveAgentConfig } from "../config/merge.ts";
-import type { GitHub } from "../github/client.ts";
+import type { GitHub, PullRequest } from "../github/client.ts";
 import type { LinearClient, ListReadyOptions } from "../linear/client.ts";
+import { isNetworkError } from "../net-error.ts";
 import {
   lastLines,
   type SelfUpdateResult,
@@ -66,7 +67,14 @@ import { advanceMerges, pendingMerge } from "./merge.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
 import { planIssue, type SplitPlan } from "./plan.ts";
 import { type AgentMemory, type GrillContext, loadGrillContext } from "./prompt.ts";
-import { type CommandRunner, type QaRunResult, runQa, settleQa } from "./qa.ts";
+import {
+  type CommandRunner,
+  type PrReview,
+  postQaReview,
+  type QaRunResult,
+  runQa,
+  settleQa,
+} from "./qa.ts";
 import { type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import {
   formatSplitComment,
@@ -87,6 +95,8 @@ import type {
   LoopState,
   LoopStore,
   PartSession,
+  PendingQa,
+  PendingQaReview,
   ReviewedHead,
   SelfUpdateRecord,
   SelfUpdateTrigger,
@@ -104,7 +114,10 @@ export type LoopLinear = Pick<
   | "moveTo"
   | "comment"
   | "getIssue"
->;
+> & {
+  /** Drops the pooled connections after 3 failed ticks (MET-213); a fake may omit it. */
+  resetConnections?(): void;
+};
 
 export interface LoopClock {
   now(): Date;
@@ -373,8 +386,113 @@ export function tokenBudgetFor(
   return size === "S" ? limits.token_budget.S : limits.token_budget.M;
 }
 
+/** A review as the pending record keeps it; the part and PR are ids (MET-213, D-058). */
+function pendingQaReview(r: PrReview): PendingQaReview {
+  const out: PendingQaReview = {
+    partId: r.part.id,
+    partKey: r.part.key,
+    decision: r.decision,
+    failing: r.failing,
+    done: r.pendingPost === undefined,
+  };
+  if (r.cases !== undefined) out.cases = r.cases;
+  if (r.pr !== undefined) {
+    out.prNumber = r.pr.number;
+    out.prUrl = r.pr.url;
+    out.head = r.pr.headRefOid;
+  }
+  if (r.pendingPost !== undefined) {
+    out.event = r.pendingPost.event;
+    out.body = r.pendingPost.body;
+  }
+  if (r.setup !== undefined) out.setup = r.setup;
+  if (r.notJudged !== undefined) out.notJudged = r.notJudged;
+  if (r.error !== undefined) out.error = r.error;
+  if (r.testTail !== undefined) out.testTail = r.testTail;
+  if (r.reviewUrl !== undefined) out.reviewUrl = r.reviewUrl;
+  if (r.postedAs !== undefined) out.postedAs = r.postedAs;
+  return out;
+}
+
+/** The PR a pending review was judged at, or undefined when QA found none. */
+function prFromPending(r: PendingQaReview): PullRequest | undefined {
+  if (r.prNumber === undefined || r.head === undefined) return undefined;
+  return {
+    number: r.prNumber,
+    title: `${r.partKey}: review`,
+    url: r.prUrl ?? "",
+    headRefName: "",
+    headRefOid: r.head,
+    baseRefName: "",
+    isDraft: false,
+  };
+}
+
+/** The review a pending record replays into `settleQa`, on the fetched part issue. */
+function reviewFromPending(r: PendingQaReview, part: LinkedIssue): PrReview {
+  const pr = prFromPending(r);
+  return {
+    part,
+    ...(pr === undefined ? {} : { pr }),
+    decision: r.decision,
+    failing: r.failing,
+    ...(r.cases === undefined ? {} : { cases: r.cases }),
+    ...(r.setup === undefined ? {} : { setup: r.setup }),
+    ...(r.notJudged === undefined ? {} : { notJudged: r.notJudged }),
+    ...(r.error === undefined ? {} : { error: r.error }),
+    ...(r.testTail === undefined ? {} : { testTail: r.testTail }),
+    ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
+    ...(r.postedAs === undefined ? {} : { postedAs: r.postedAs }),
+  };
+}
+
+/** The round's outcome, from the decisions a pending record kept. */
+function outcomeFor(reviews: readonly PrReview[]): QaRunResult["outcome"] {
+  if (reviews.some((r) => r.decision === "request_changes")) return "changes_requested";
+  if (reviews.some((r) => r.decision === "error")) return "error";
+  return "approved";
+}
+
+/**
+ * Wraps the Linear calls so the loop can count a tick whose transport failed (MET-213, D-058).
+ * The error still reaches the caller; `safely` swallows it as before.
+ */
+function trackLinearErrors(target: LoopLinear, onError: () => void): LoopLinear {
+  return new Proxy(target, {
+    get(object, prop) {
+      const value = Reflect.get(object, prop);
+      if (typeof value !== "function" || prop === "resetConnections") return value;
+      const call = value as (...args: unknown[]) => unknown;
+      return (...args: unknown[]) => {
+        let result: unknown;
+        try {
+          result = call.apply(object, args);
+        } catch (error) {
+          if (isNetworkError(error)) onError();
+          throw error;
+        }
+        if (result instanceof Promise) {
+          return result.catch((error: unknown) => {
+            if (isNetworkError(error)) onError();
+            throw error;
+          });
+        }
+        return result;
+      };
+    },
+  }) as LoopLinear;
+}
+
 export function createCoordinatorLoop(options: CoordinatorLoopOptions): CoordinatorLoop {
-  const { config, linear, adapters, worktrees, github, store, repoDir, team } = options;
+  const { config, adapters, worktrees, github, store, repoDir, team } = options;
+  const linearClient = options.linear;
+  /** Linear runs can settle between ticks, so consume transport failures at the end of a tick. */
+  let linearNetworkThisTick = false;
+  /** Ticks in a row with a Linear network error; the pool resets at 3 (MET-213). */
+  let linearFailedTicks = 0;
+  const linear = trackLinearErrors(linearClient, () => {
+    linearNetworkThisTick = true;
+  });
   const clock = options.clock ?? systemClock;
   const notifier = options.notifier ?? new NullNotifier();
   const decisions = options.decisions ?? createFileDecisionSink(workspaceVaultDir(repoDir));
@@ -808,6 +926,113 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
     }
     if (changed) await save();
+  }
+
+  /**
+   * Retries the QA verdicts a network error left unfinished (MET-213, D-058). Each review
+   * not posted goes out, then the settle runs with the steps already done skipped. A
+   * network error stops the round and keeps the record for the next tick; nothing is
+   * counted, no Needs-input comment or notice goes out.
+   */
+  async function retryPendingQa(s: LoopState): Promise<void> {
+    const records = s.pendingQa;
+    if (records === undefined) return;
+    for (const [qaId, record] of Object.entries(records)) {
+      if (live.has(qaId)) continue;
+      let pending = false;
+      for (const review of record.reviews) {
+        if (review.done) continue;
+        if (
+          review.prNumber === undefined ||
+          review.event === undefined ||
+          review.body === undefined ||
+          review.head === undefined
+        ) {
+          review.done = true;
+          continue;
+        }
+        try {
+          const posted = await postQaReview(
+            github,
+            record.qaKey ?? qaId,
+            { number: review.prNumber, head: review.head },
+            { event: review.event, body: review.body },
+            log,
+          );
+          review.done = true;
+          review.reviewUrl = posted.url;
+          review.postedAs = posted.postedAs;
+        } catch (error) {
+          log(`could not post the review on PR #${review.prNumber}: ${message(error)}`);
+          if (isNetworkError(error)) {
+            pending = true;
+            break;
+          }
+          // Preserve runQa's rule: an approval that could not be posted cannot merge.
+          review.done = true;
+          if (review.decision === "approve") {
+            review.decision = "error";
+            review.error = `could not post the approval: ${message(error)}`;
+            if (s.reviewedHeads !== undefined) delete s.reviewedHeads[review.partId];
+          }
+        }
+        await save();
+      }
+      if (pending) continue;
+
+      let parent: Issue;
+      let qa: LinkedIssue;
+      const parts = new Map<string, LinkedIssue>();
+      try {
+        parent = await linear.getIssue(record.parentId);
+        const qaIssue = await linear.getIssue(qaId);
+        qa = { ...qaIssue, parentId: record.parentId, blockers: [] };
+        for (const review of record.reviews) {
+          if (parts.has(review.partId)) continue;
+          const part = await linear.getIssue(review.partId);
+          parts.set(review.partId, { ...part, parentId: record.parentId, blockers: [] });
+        }
+      } catch (error) {
+        log(
+          `${record.qaKey ?? qaId}: could not read it for the pending QA retry: ${message(error)}`,
+        );
+        continue;
+      }
+
+      const reviews = record.reviews.map((review) => {
+        const part = parts.get(review.partId);
+        if (part === undefined) throw new Error(`no part ${review.partId}`);
+        return reviewFromPending(review, part);
+      });
+      const result: QaRunResult = { outcome: outcomeFor(reviews), reviews };
+      const settled = await settleQa(s, { qa, parent }, result, {
+        linear,
+        notifier,
+        maxFailures: config.limits.qa_max_failures,
+        log,
+        steps: {
+          done: record.done,
+          async mark(step: string) {
+            record.done.push(step);
+            await save();
+          },
+        },
+      });
+      if (settled === "pending") {
+        await save();
+        continue;
+      }
+      delete records[qaId];
+      if (Object.keys(records).length === 0) delete s.pendingQa;
+      // Each approved part is its own merge entry, pinned to the head QA reviewed (D-040).
+      for (const r of reviews) {
+        if (r.decision !== "approve" || r.pr === undefined) continue;
+        s.merges = s.merges.filter((m) => !m.prs.some((p) => p.partId === r.part.id));
+        s.merges.push(pendingMerge(qa, parent, [r], clock.now()));
+      }
+      log(`${qa.key}: QA verdict posted after retry`);
+      await save();
+    }
   }
 
   // --- dispatch -----------------------------------------------------------
@@ -1446,8 +1671,6 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         if (abort.signal.aborted) result.cancelled = true;
       }
       if (result.cancelled === true) await requeueStopped(s, entry);
-      live.delete(issue.id);
-      syncWatch();
       recordUsage(
         s,
         qa.parent.id,
@@ -1491,12 +1714,41 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         }
         s.reviewedHeads[r.part.id] = head;
       }
+      const record: PendingQa = {
+        parentId: qa.parent.id,
+        qaKey: issue.key,
+        reviews: result.reviews.map(pendingQaReview),
+        done: [],
+      };
+      s.pendingQa ??= {};
+      s.pendingQa[issue.id] = record;
+      if (record.reviews.some((review) => !review.done)) {
+        log(`${issue.key}: QA ${result.outcome}, pending`);
+        await save();
+        return;
+      }
+
+      // Keep the verdict before starting Linear writes. The live run owns this first attempt.
+      await save();
       const settled = await settleQa(s, { qa: issue, parent: qa.parent }, result, {
         linear,
         notifier,
         maxFailures: maxRounds,
         log,
+        steps: {
+          done: record.done,
+          async mark(step: string) {
+            record.done.push(step);
+            await save();
+          },
+        },
       });
+      if (settled === "pending") {
+        log(`${issue.key}: QA ${result.outcome}, pending`);
+        return;
+      }
+      delete s.pendingQa[issue.id];
+      if (Object.keys(s.pendingQa).length === 0) delete s.pendingQa;
       log(`${issue.key}: QA ${result.outcome}, ${settled}`);
       // Each approved part is its own merge entry, pinned to the head QA reviewed (D-040).
       for (const r of result.reviews) {
@@ -1505,7 +1757,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         s.merges.push(pendingMerge(issue, qa.parent, [r], clock.now()));
       }
       await save();
-    })();
+    })().finally(() => {
+      live.delete(issue.id);
+      syncWatch();
+    });
     // Paused while this round was starting: stop it like the others.
     if (pausedNow) void pauseRuns();
   }
@@ -1524,6 +1779,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     for (const issue of candidates) {
       if (pausedNow || s.inFlight.length >= max) break;
       if (s.inFlight.some((e) => e.issueId === issue.id)) continue;
+      if (
+        s.pendingQa?.[issue.id] !== undefined ||
+        Object.values(s.pendingQa ?? {}).some((record) =>
+          record.reviews.some((review) => review.partId === issue.id),
+        )
+      )
+        continue;
       const marker = readPartMarker(issue.description);
       if (marker === undefined) continue;
       // Only an admitted in-flight parent's parts and QA start (D-050). A parent without a
@@ -2219,6 +2481,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       return report;
     }
     s.lastPollAt = clock.now().toISOString();
+    // Before dispatch, so the retried verdict can still merge or send back this tick (D-058).
+    await retryPendingQa(s);
     // Before dispatch, so QA can start on the same tick: a shipped part Linear moved back to
     // In Progress is In Review again (MET-128). It runs while a self-update waits: it starts nothing.
     await repairShipped(s);
@@ -2289,13 +2553,38 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     return report;
   }
 
+  /**
+   * Counts a tick whose Linear call failed in transport, and drops the pooled connections
+   * after 3 in a row (MET-213, D-058). A clean tick starts the count again.
+   */
+  function noteLinearTick(): void {
+    if (!linearNetworkThisTick) {
+      linearFailedTicks = 0;
+      return;
+    }
+    linearNetworkThisTick = false;
+    linearFailedTicks += 1;
+    if (linearFailedTicks < 3) return;
+    linearFailedTicks = 0;
+    linearClient.resetConnections?.();
+    log("Linear unreachable for 3 ticks, connections reset");
+  }
+
+  async function runPass(): Promise<TickReport> {
+    try {
+      return await pass();
+    } finally {
+      noteLinearTick();
+    }
+  }
+
   const safeTick = (): void => {
     loop.tick().catch((error) => log(`tick failed: ${message(error)}`));
   };
 
   const loop: CoordinatorLoop = {
     tick() {
-      ticking ??= pass().finally(() => {
+      ticking ??= runPass().finally(() => {
         ticking = undefined;
       });
       return ticking;
