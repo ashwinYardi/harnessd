@@ -1,7 +1,7 @@
 // Settings → Team (MET-28): one row per agent with its role, harness and model. Save writes
 // the workspace .harnessd/config.toml through the config validator, then runs harnessd sync.
 // An opencode row's model field suggests the ids `opencode models` lists (MET-93).
-import { AGENT_ROLES, HARNESSES, validateTeam } from "@harnessd/shared";
+import { HARNESSES, validateTeam } from "@harnessd/shared";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { ApiError, type Load } from "../../api.ts";
@@ -29,6 +29,7 @@ import {
   type TeamAgent,
 } from "../../setupApi.ts";
 import { ErrorState } from "../common.tsx";
+import { byRoleOrder, ROLE_OPTIONS } from "./team.ts";
 
 interface Row extends TeamAgent {
   key: string;
@@ -36,7 +37,7 @@ interface Row extends TeamAgent {
 }
 
 const toRows = (agents: TeamAgent[]): Row[] =>
-  agents.map((a) => ({ ...a, key: a.name, isNew: false }));
+  byRoleOrder(agents).map((a) => ({ ...a, key: a.name, isNew: false }));
 const strip = (rows: Row[]) =>
   rows.map(({ name, role, harness, model }) => ({ name, role, harness, model }));
 
@@ -296,7 +297,7 @@ export function Team() {
                           invalid={!!err("role")}
                           label={`Role of ${row.name || "the new agent"}`}
                           onChange={(v) => update(i, { role: v })}
-                          options={AGENT_ROLES}
+                          options={ROLE_OPTIONS}
                           value={row.role}
                         />
                       </Field>
@@ -363,7 +364,7 @@ export function Team() {
           )}
         </div>
         <p className="border-t px-4 py-2 text-muted-foreground text-xs">
-          The four default agents always stay. Change their harness or model here.
+          The five default agents always stay. Change their harness or model here.
         </p>
         {errors.team && (
           <p className="border-t px-4 py-2 text-destructive-foreground text-xs" role="alert">
