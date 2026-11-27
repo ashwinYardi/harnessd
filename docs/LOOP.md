@@ -247,7 +247,7 @@ harnessd resume                    # "Resumed."
 ## Review
 The reviewer judges each part PR's code before QA (D-060). It runs read-only in a scratch checkout of the PR head, holds one `max_concurrent` slot, and uses the part's size budget and reviewer turn cap. Code: `packages/daemon/src/coordinator/review.ts`.
 
-A review starts when a shipped part is In Review and `reviewerHeads` in `loop.json` has no verdict for the current PR head. Only an admitted parent's parts get a review, and a parent in Needs input keeps its slot with no new review (D-050, D-057). A head equal to an approved or sent-back sha gets no new review.
+A review starts when a shipped part is In Review and `reviewerHeads` in `loop.json` has no verdict for the current PR head. Only an admitted parent's parts get a review, and a parent in Needs input keeps its slot with no new review (D-050, D-057). A head equal to an approved or sent-back sha gets no new review. A part this daemon never shipped in its state, or one of a parent it never split, still gets its review when a QA round is waiting on it: the wait starts the review, holds the QA sub-issue Ready and logs the same wait line (MET-226).
 
 The reviewer returns strict JSON:
 
@@ -278,7 +278,7 @@ After the verdict:
 ## QA
 QA reviews one PR, when that part reaches In Review (D-040, D-049). It checks the part's own "Done when" and "Verify" sections against the running product before anything merges (D-013, D-051). A part body from before D-049 has no such sections; QA then falls back to the parent's checklist. QA does not read the whole repo.
 
-QA starts only after the reviewer approved the same PR head (MET-226, D-060). While a part of the round waits for its review, the QA sub-issue stays Ready and the loop logs `<QA key> waits, <part key> review pending`, once per wait and again only when the pending set changes (D-050). A `QA: tests` part waits the same way (D-053).
+QA starts only after the reviewer approved the same PR head (MET-226, D-060). While a part of the round waits for its review, the QA sub-issue stays Ready and the loop logs `<QA key> waits, <part key> review pending`, once per wait and again only when the pending set changes (D-050). A `QA: tests` part waits the same way (D-053). If the PR head moves while the round runs, the verdict names a head the reviewer has not seen: the round posts no review, re-queues with no QA failure, and the delta review then QA run on the new head (MET-226).
 
 Before QA, the loop reads the PR's `headRefOid` and compares it with the part's **reviewed head** in `loop.json`:
 - the same sha as an approved part: QA does not run again;

@@ -32,7 +32,7 @@ Never commit these:
 ## Skills (vendored in .claude/skills, see VENDORED.md)
 - **Coordinator: before you grill an issue,** read and follow `.claude/skills/grill-with-docs/SKILL.md` and the two skills it names. Run it on autopilot: answer each question yourself from the spec, decisions, code and vault. Ask the human only for a D-011 trigger. Write new terms to `GLOSSARY.md` and new precedent as a decision record.
 - **Builder: write code test-first** with `.claude/skills/tdd/`. Use `diagnosing-bugs` for a bug, and `codebase-design` before a new module.
-- **QA: before you approve a PR,** run `.claude/skills/code-review/` on the diff.
+- **Reviewer: before you approve a PR,** run `.claude/skills/code-review/` on the diff.
 - **Frontend: for any UI work,** use `.claude/skills/impeccable/` for real, never in a degraded mode without saying so in the PR. Read PRODUCT.md and DESIGN.md first, and read `impeccable/reference/craft-floor.md` before every UI edit.
   - Plan with `/impeccable shape`. Before the PR, run `/impeccable critique` and `/impeccable audit`, then `/impeccable polish`.
   - The design hook in `.claude/settings.json` scans each UI file you edit, and runs a deep pass when you stop. Fix its findings; do not silence them.

@@ -420,6 +420,7 @@ function pendingQaReview(r: PrReview): PendingQaReview {
     out.body = r.pendingPost.body;
   }
   if (r.setup !== undefined) out.setup = r.setup;
+  if (r.stale !== undefined) out.stale = r.stale;
   if (r.notJudged !== undefined) out.notJudged = r.notJudged;
   if (r.error !== undefined) out.error = r.error;
   if (r.testTail !== undefined) out.testTail = r.testTail;
@@ -452,6 +453,7 @@ function reviewFromPending(r: PendingQaReview, part: LinkedIssue): PrReview {
     failing: r.failing,
     ...(r.cases === undefined ? {} : { cases: r.cases }),
     ...(r.setup === undefined ? {} : { setup: r.setup }),
+    ...(r.stale === undefined ? {} : { stale: r.stale }),
     ...(r.notJudged === undefined ? {} : { notJudged: r.notJudged }),
     ...(r.error === undefined ? {} : { error: r.error }),
     ...(r.testTail === undefined ? {} : { testTail: r.testTail }),
@@ -2165,8 +2167,6 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
       if (pr === undefined) continue;
       if (s.reviewerHeads?.[id]?.sha === pr.headRefOid) continue;
-      const budget = budgetMs(part.size, config.limits);
-      if (budget === undefined) continue;
       let parent = parents.get(parentId);
       if (parent === undefined) {
         try {
@@ -2177,22 +2177,91 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           continue;
         }
       }
-      if (await overTokenBudget(s, parent)) continue;
-      const choice = chooseForRun(s, id, main);
-      const agent = choice.agent;
-      const adapter = agent && adapters[agent.harness];
-      if (agent === undefined || adapter === undefined) {
-        logNoHarness(part.key, id, choice.skipped);
-        continue;
-      }
-      noHarness.delete(id);
       const linked: LinkedIssue = {
         ...part,
         parentId,
         parentKey: parent.key,
         blockers: [],
       };
-      startReview(s, linked, parent, pr, agent, adapter, budget, report);
+      await reviewPart(s, report, linked, parent, pr, main);
+    }
+  }
+
+  /**
+   * Starts one review of a part at its PR head when its budget allows (MET-224, D-060).
+   * The caller has already checked the same-head gate and the dispatch guards. Returns true
+   * when the review started.
+   */
+  async function reviewPart(
+    s: LoopState,
+    report: TickReport,
+    part: LinkedIssue,
+    parent: Issue,
+    pr: PullRequest,
+    main: ResolvedAgentConfig,
+  ): Promise<boolean> {
+    const budget = budgetMs(part.size, config.limits);
+    if (budget === undefined) return false;
+    if (await overTokenBudget(s, parent)) return false;
+    const choice = chooseForRun(s, part.id, main);
+    const agent = choice.agent;
+    const adapter = agent && adapters[agent.harness];
+    if (agent === undefined || adapter === undefined) {
+      logNoHarness(part.key, part.id, choice.skipped);
+      return false;
+    }
+    noHarness.delete(part.id);
+    startReview(s, part, parent, pr, agent, adapter, budget, report);
+    return true;
+  }
+
+  /**
+   * The review a waiting QA round needs when the normal dispatch cannot see the part: a part
+   * the loop never shipped in this state, or one of a parent it never split (MET-226). The
+   * same-head gate holds, so a part with a verdict at this head is not reviewed again.
+   */
+  async function backfillReviews(
+    s: LoopState,
+    report: TickReport,
+    pending: readonly LinkedIssue[],
+    prs: ReadonlyMap<string, PullRequest>,
+  ): Promise<void> {
+    const max = config.limits.max_concurrent;
+    const parents = new Map<string, Issue>();
+    let main: ResolvedAgentConfig | undefined;
+    for (const part of pending) {
+      if (pausedNow || s.inFlight.length >= max) return;
+      const pr = prs.get(part.id);
+      if (pr === undefined) continue;
+      if (s.reviewerHeads?.[part.id]?.sha === pr.headRefOid) continue;
+      if (s.inFlight.some((entry) => entry.issueId === part.id)) continue;
+      if (
+        s.pendingReview?.[part.id] !== undefined ||
+        s.pendingReviewSettle?.[part.id] !== undefined
+      ) {
+        continue;
+      }
+      const parentId = part.parentId;
+      if (parentId === undefined) continue;
+      let parent = parents.get(parentId);
+      if (parent === undefined) {
+        try {
+          parent = await linear.getIssue(parentId);
+          parents.set(parentId, parent);
+        } catch (error) {
+          log(`${part.key}: could not read its parent for the review: ${message(error)}`);
+          continue;
+        }
+      }
+      if (main === undefined) {
+        const name = agentForRole(config, "reviewer");
+        if (name === undefined) {
+          log("no agent has role reviewer");
+          return;
+        }
+        main = resolveAgentConfig(config, name);
+      }
+      await reviewPart(s, report, part, parent, pr, main);
     }
   }
 
@@ -2442,10 +2511,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         );
         const parts: LinkedIssue[] = [];
         const pendingReview: LinkedIssue[] = [];
+        const pendingPrs = new Map<string, PullRequest>();
         const approvedHeads: Record<string, string> = {};
         for (const part of children) {
           if (part.state.toLowerCase() !== "in review") continue;
-          let pr: { headRefOid: string } | undefined;
+          let pr: PullRequest | undefined;
           try {
             pr = await github.findPrForIssue(part.key);
           } catch (error) {
@@ -2468,12 +2538,15 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             reviewer.sha !== pr.headRefOid
           ) {
             pendingReview.push(part);
+            if (pr !== undefined) pendingPrs.set(part.id, pr);
             continue;
           }
           parts.push(part);
           approvedHeads[part.id] = pr.headRefOid;
         }
         if (pendingReview.length > 0) {
+          // A part the normal review dispatch cannot see still gets its review (MET-226).
+          await backfillReviews(s, report, pendingReview, pendingPrs);
           noteReviewWait(issue.id, issue.key, pendingReview, waiting);
           continue;
         }

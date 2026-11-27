@@ -2213,6 +2213,37 @@ test("QA requeues without testing when the approved PR head moved before checkou
   assert.deepEqual(h.reviews, []);
 });
 
+test("a head that moves during QA re-queues the stale verdict with no failure (MET-226)", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  let reads = 0;
+  const result = await runQa(h.input, {
+    ...h.deps,
+    github: {
+      ...h.deps.github,
+      async findPrForIssue(key: string) {
+        const found = await h.deps.github.findPrForIssue(key);
+        reads += 1;
+        return found === undefined || reads === 1 ? found : { ...found, headRefOid: "sha8" };
+      },
+    },
+  });
+  assert.equal(result.outcome, "error");
+  assert.equal(result.reviews[0]?.stale, true);
+  assert.match(result.reviews[0]?.error ?? "", /moved from sha7 to sha8 during QA/);
+  assert.deepEqual(h.reviews, [], "a verdict for a head that moved is never posted");
+  assert.equal(h.tasks.length, 1, "the QA agent did run");
+
+  const s = settleDeps();
+  const state = emptyLoopState();
+  assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "requeued");
+  assert.deepEqual(state.qaFailures, {}, "a stale verdict counts no QA failure");
+  assert.deepEqual(s.comments, []);
+  assert.ok(
+    s.moves.some((move) => move.issueId === qa.id && move.state === "Ready"),
+    "QA waits Ready for the delta review",
+  );
+});
+
 test("a round whose budget ran out before the agent is a setup error", async () => {
   const h = harness();
   let clock = 0;

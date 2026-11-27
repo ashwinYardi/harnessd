@@ -1026,6 +1026,11 @@ export interface PrReview {
    */
   setup?: boolean;
   /**
+   * True when the PR head moved while QA ran: the verdict names a head the reviewer has not
+   * seen, so it is dropped and the round re-queues with no failure (MET-226, D-040).
+   */
+  stale?: boolean;
+  /**
    * Why the QA agent gave no usable verdict: turn cap, time limit, stall, a reply that is not
    * JSON even after the backslash repair, or a request-changes verdict with no failing case.
    * Such a round counts no QA failure, and two in a row on one PR head go to the human
@@ -1800,6 +1805,37 @@ export async function runQa(input: QaRunInput, deps: QaRunDeps): Promise<QaRunRe
         error: decision.error ?? "unknown",
       };
     }
+    // A push during the round makes this verdict stale: applying it could send the part back
+    // or spend its QA budget on a head the reviewer has not seen (MET-226, D-040). Re-read
+    // the head before anything is posted and re-queue with no counted failure.
+    let current: PullRequest | undefined;
+    try {
+      current = await deps.github.findPrForIssue(part.key);
+    } catch (error) {
+      return {
+        part,
+        pr,
+        decision: "error",
+        failing: [],
+        setup: true,
+        error: `could not re-read the PR head: ${message(error)}`,
+      };
+    }
+    if (current === undefined || current.headRefOid !== pr.headRefOid) {
+      const moved =
+        current === undefined
+          ? "closed or unreadable"
+          : `moved from ${pr.headRefOid.slice(0, 7)} to ${current.headRefOid.slice(0, 7)}`;
+      log(`${qa.key}: ${part.key} head ${moved} during QA, re-queued`);
+      return {
+        part,
+        pr,
+        decision: "error",
+        failing: [],
+        stale: true,
+        error: `the PR head ${moved} during QA`,
+      };
+    }
     const cases =
       reQaCases === undefined
         ? reviewCases(verdict, tests, verifyFailed)
@@ -2118,7 +2154,7 @@ export async function settleQa(
   const notApproved = result.reviews.filter((r) => r.decision !== "approve");
   const noVerdictOnly =
     notApproved.length > 0 &&
-    notApproved.every((r) => r.setup === true || r.notJudged !== undefined) &&
+    notApproved.every((r) => r.setup === true || r.stale === true || r.notJudged !== undefined) &&
     !result.reviews.some((r) => r.decision === "request_changes");
   if (noVerdictOnly) {
     const reasons = notApproved.map((r) =>

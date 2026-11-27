@@ -3115,6 +3115,109 @@ for (const mode of ["agent", "tests"]) {
   });
 }
 
+test("a part of a parent with no split record still gets the review QA waits for (MET-226)", async () => {
+  const t = setup({ config: ONE_AT_A_TIME });
+  const parent = t.linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const part = t.linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: "In Review",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const qa = t.linear.add({
+    title: "QA: P",
+    parentId: parent.id,
+    description: `${partMarker("qa")}\n**Size**: M`,
+  });
+  t.linear.relations.push({ blocker: part.id, blocked: qa.id });
+  t.gh.open(part.key, 7);
+
+  assert.deepEqual(
+    (await t.loop.tick()).dispatched,
+    [part.key],
+    "the QA wait starts the review no other path would",
+  );
+  assert.equal(qa.state, "Ready");
+  assert.equal(
+    t.logs.filter((line) => line === `${qa.key} waits, ${part.key} review pending`).length,
+    1,
+  );
+
+  (await nextRun(t.adapter)).finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "approve", findings: [] }),
+  );
+  await t.loop.idle();
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key], "QA runs on the approved head");
+});
+
+test("a part missing from shipped still gets the review its QA round waits for (MET-226)", async () => {
+  const t = setup({ config: ONE_AT_A_TIME });
+  const { parent, backend, qa } = qaFixture(t);
+  t.memory.state.splits = {
+    [parent.id]: { key: parent.key, parts: [backend.id], qa: qa.id, at: "2026-11-23T10:00:00Z" },
+  };
+  t.memory.state.reviewerHeads = {};
+  delete t.memory.state.shipped;
+  t.gh.open(backend.key, 7);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key], "the review is backfilled");
+  assert.equal(t.wt.checkouts.at(-1)?.sha, "sha7");
+  assert.equal(qa.state, "Ready");
+
+  (await nextRun(t.adapter)).finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "approve", findings: [] }),
+  );
+  await t.loop.idle();
+  assert.equal(t.memory.state.reviewerHeads?.[backend.id]?.sha, "sha7");
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key], "QA starts after the approval");
+});
+
+test("a head that moves during QA re-queues the round and runs a delta review (MET-226)", async () => {
+  const t = setup({ config: ONE_AT_A_TIME });
+  const fx = qaFixture(t);
+  const { backend, qa } = fx;
+  trackShippedPart(t, fx);
+  t.gh.open(backend.key, 7);
+  // Each read is a snapshot, as a fresh `gh pr view` is, so the round sees a push mid-run.
+  const read = t.gh.github.findPrForIssue.bind(t.gh.github);
+  t.gh.github.findPrForIssue = async (key) => {
+    const found = await read(key);
+    return found === undefined ? undefined : { ...found };
+  };
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  const pr = t.gh.prs[backend.key];
+  assert.ok(pr);
+  pr.headRefOid = "sha7-pushed";
+  t.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+
+  assert.equal(qa.state, "Ready", "the stale round is re-queued");
+  assert.deepEqual(t.memory.state.qaFailures, {}, "a stale verdict counts no QA failure");
+  assert.deepEqual(t.gh.reviews, [], "no verdict is posted for the head that moved");
+  assert.deepEqual(t.memory.state.merges, []);
+
+  assert.deepEqual(
+    (await t.loop.tick()).dispatched,
+    [backend.key],
+    "the delta review runs on the new head",
+  );
+  (await nextRun(t.adapter, 2)).finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "approve", findings: [] }),
+  );
+  await t.loop.idle();
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key], "QA runs on the reviewed new head");
+  await nextRun(t.adapter, 3);
+  assert.equal(t.wt.checkouts.at(-1)?.sha, "sha7-pushed");
+});
+
 test("an approved head is skipped and a new head gets a review (MET-224)", async () => {
   const fx = reviewFixture({ withQa: false });
   const state = fx.state;
