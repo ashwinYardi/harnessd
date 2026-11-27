@@ -586,6 +586,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   let pausedSeen = false;
   /** applyUpdate built the new version and the restart is under way: dispatch nothing. */
   let restarting = false;
+  /** True after the one first-tick orphan sweep (MET-214). */
+  let orphanSwept = false;
+  /** Orphans whose move failed, retried on later ticks until it succeeds (MET-214). */
+  let orphanRetry: Array<{ id: string; key: string }> = [];
 
   /** Follows a run's events: its latest action and token use, and the UI's log. */
   function follow(l: LiveRun, run: AdapterRun): void {
@@ -926,6 +930,54 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
     }
     if (changed) await save();
+  }
+
+  /**
+   * The first tick after the daemon starts moves a part or QA sub-issue a previous process
+   * left In Progress back to Ready (MET-214). Only tickets listed in a split record count:
+   * a split parent is In Progress by design and holds its slot (D-057). A ticket with a run
+   * in flight, a `pendingQa` verdict or a `shipped` record is not orphaned, because that
+   * work finishes on a later tick (D-039, D-058). A failed move is logged and retried on
+   * later ticks; the list lives in memory, so a restart seeds it from `splits` again. A read
+   * only a network error blocked waits too; any other read error drops the ticket.
+   */
+  async function sweepOrphans(s: LoopState): Promise<void> {
+    if (!orphanSwept) {
+      orphanSwept = true;
+      const seen = new Set(orphanRetry.map((candidate) => candidate.id));
+      for (const record of Object.values(s.splits ?? {})) {
+        for (const id of [...record.parts, record.qa]) {
+          if (seen.has(id)) continue;
+          seen.add(id);
+          orphanRetry.push({ id, key: id });
+        }
+      }
+    }
+    if (orphanRetry.length === 0) return;
+    const retry: Array<{ id: string; key: string }> = [];
+    for (const candidate of orphanRetry) {
+      if (s.inFlight.some((entry) => entry.issueId === candidate.id)) continue;
+      if (s.shipped?.[candidate.id] !== undefined) continue;
+      if (s.pendingQa?.[candidate.id] !== undefined) continue;
+      let issue: Issue;
+      try {
+        issue = await linear.getIssue(candidate.id);
+      } catch (error) {
+        log(`${candidate.key}: could not read it for the restart sweep: ${message(error)}`);
+        if (isNetworkError(error)) retry.push(candidate);
+        continue;
+      }
+      if (issue.state.toLowerCase() !== "in progress") continue;
+      const moved = await safely(`move ${issue.key} to Ready`, () =>
+        linear.moveTo(issue.id, "Ready"),
+      );
+      if (!moved) {
+        retry.push({ id: issue.id, key: issue.key });
+        continue;
+      }
+      log(`${issue.key}: In Progress with no run after restart, back to Ready`);
+    }
+    orphanRetry = retry;
   }
 
   /**
@@ -2487,6 +2539,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     // In Progress is In Review again (MET-128). It runs while a self-update waits: it starts nothing.
     await repairShipped(s);
     await repairSplits(s);
+    // Once after start, before dispatch: a previous process's leftover goes back to Ready
+    // (MET-214). It starts nothing on its own and runs while a self-update waits.
+    await sweepOrphans(s);
     const up = options.selfUpdate;
     if (pausedSeen) {
       pausedSeen = false;
