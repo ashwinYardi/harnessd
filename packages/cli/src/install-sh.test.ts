@@ -70,15 +70,17 @@ esac`,
 }
 
 /** Runs the script in a new session: no controlling terminal, so /dev/tty is unavailable. */
-function runScript(s: { bin: string }, args: string[] = []) {
-  return new Promise<{ code: number; stdout: string; stderr: string }>((done) => {
-    const child = spawn(SH, [SCRIPT, ...args], {
+function runScript(s: { bin: string }, args: string[] = [], script = SCRIPT, shell = SH) {
+  return new Promise<{ code: number; stdout: string; stderr: string }>((done, fail) => {
+    const child = spawn(shell, [script, ...args], {
       env: { PATH: s.bin, HOME: s.bin },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let stdout = "";
     let stderr = "";
+    // A failed spawn has no close event: reject instead of leaving the test's promise pending.
+    child.on("error", fail);
     child.stdout.on("data", (d) => {
       stdout += d;
     });
@@ -96,6 +98,11 @@ async function calls(log: string): Promise<string[]> {
 test("install.sh passes sh -n", () => {
   const res = spawnSync(SH, ["-n", SCRIPT], { encoding: "utf8" });
   assert.equal(res.status, 0, res.stderr);
+});
+
+test("a shell that cannot start rejects instead of leaving the test pending", async () => {
+  const s = await setup({ node: "v24.1.0" });
+  await assert.rejects(runScript(s, [], SCRIPT, join(s.root, "missing-sh")), /ENOENT/);
 });
 
 test("node 24 present: runs init with the arguments, and again on a re-run", async () => {

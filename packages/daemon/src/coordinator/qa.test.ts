@@ -1163,8 +1163,8 @@ test("the second failed re-QA sends the parent to Needs input and clears the cas
 
   assert.equal(await settleQa(state, { qa, parent }, result, s.deps), "escalated");
   assert.deepEqual(s.moves, [
-    { issueId: qa.id, state: "Needs input" },
     { issueId: parent.id, state: "Needs input" },
+    { issueId: qa.id, state: "Needs input" },
   ]);
   assert.deepEqual(state.qaFailures, {});
   assert.equal(state.reviewedHeads[briefed.id]?.cases, undefined, "the saved cases are cleared");
@@ -1531,8 +1531,8 @@ test("a second not-judged run in a row on the same head escalates with the reaso
   assert.equal(state.sessions[backend.id]?.sessionId, "session-1", "the part session is kept");
   assert.deepEqual(s.moves, [
     { issueId: qa.id, state: "Ready" },
-    { issueId: qa.id, state: "Needs input" },
     { issueId: parent.id, state: "Needs input" },
+    { issueId: qa.id, state: "Needs input" },
   ]);
   assert.equal(s.comments.length, 1, "one comment on the parent");
   assert.equal(s.comments[0]?.issueId, parent.id);
@@ -1645,8 +1645,8 @@ test("the second failure escalates to the human once and sends nothing back", as
   assert.deepEqual(state.qaFailures, {});
   assert.deepEqual(state.qaFeedback, {});
   assert.deepEqual(s.moves, [
-    { issueId: qa.id, state: "Needs input" },
     { issueId: parent.id, state: "Needs input" },
+    { issueId: qa.id, state: "Needs input" },
   ]);
   assert.equal(s.comments.length, 1);
   assert.equal(s.comments[0]?.issueId, parent.id);
@@ -1810,8 +1810,8 @@ test("a second not-judged run on one head escalates even when another part asks 
   assert.deepEqual(state.qaFeedback, {}, "no feedback is stored");
   assert.deepEqual(s.moves, [
     { issueId: qa.id, state: "Ready" },
-    { issueId: qa.id, state: "Needs input" },
     { issueId: parent.id, state: "Needs input" },
+    { issueId: qa.id, state: "Needs input" },
   ]);
   assert.equal(s.comments.length, 1, "one comment on the parent");
   assert.equal(s.comments[0]?.issueId, parent.id);
@@ -2478,6 +2478,83 @@ test("a failing test command skips the app lifecycle, so a broken build is a tes
   assert.equal(called, false);
   assert.equal(result.outcome, "changes_requested");
   assert.match(result.reviews[0]?.failing[0] ?? "", /Tests: `pnpm test` exited with code 1/);
+});
+
+test("a GitHub network error keeps the verdict and marks the post not done (MET-213)", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  const result = await runQa(h.input, {
+    ...h.deps,
+    github: {
+      ...h.deps.github,
+      async postReview() {
+        throw new Error("read ECONNRESET");
+      },
+    },
+  });
+  assert.equal(result.outcome, "approved");
+  assert.equal(result.reviews[0]?.decision, "approve");
+  assert.equal(result.reviews[0]?.error, undefined, "no error review");
+  assert.equal(result.reviews[0]?.pendingPost?.event, "APPROVE");
+  assert.match(result.reviews[0]?.pendingPost?.body ?? "", /approved/);
+  assert.deepEqual(h.reviews, [], "nothing was posted");
+});
+
+test("a GitHub network error on a request-changes verdict keeps it, not an error review (MET-213)", async () => {
+  const h = harness({ replies: [verdict([true, false])] });
+  const result = await runQa(h.input, {
+    ...h.deps,
+    github: {
+      ...h.deps.github,
+      async postReview() {
+        throw new Error("fetch failed");
+      },
+    },
+  });
+  assert.equal(result.outcome, "changes_requested");
+  assert.equal(result.reviews[0]?.decision, "request_changes");
+  assert.equal(result.reviews[0]?.pendingPost?.event, "REQUEST_CHANGES");
+  assert.equal(result.reviews[0]?.cases?.length, 1);
+});
+
+test("a Linear network error leaves the settle pending, and the retry writes it once (MET-213)", async () => {
+  const h = harness({ replies: [verdict([true, true])] });
+  const result = await runQa(h.input, h.deps);
+  const state = emptyLoopState();
+  const s = settleDeps();
+  const comment = s.deps.linear.comment;
+  let fail = true;
+  s.deps.linear.comment = async (issueId, body) => {
+    if (fail) {
+      fail = false;
+      throw new Error("fetch failed");
+    }
+    return comment(issueId, body);
+  };
+  const done: string[] = [];
+  const deps = {
+    ...s.deps,
+    steps: {
+      done,
+      mark(step: string) {
+        done.push(step);
+      },
+    },
+  };
+
+  assert.equal(await settleQa(state, { qa, parent }, result, deps), "pending");
+  assert.deepEqual(done, [], "the failed comment is not marked done");
+  assert.deepEqual(state.qaFailures, {}, "no QA failure counted");
+  assert.equal(s.comments.length, 0);
+  assert.equal(s.moves.length, 0, "the move after the comment did not run");
+
+  assert.equal(await settleQa(state, { qa, parent }, result, deps), "approved");
+  assert.deepEqual(
+    s.comments.map((c) => c.issueId),
+    [qa.id],
+  );
+  assert.deepEqual(s.moves, [{ issueId: qa.id, state: "Ready" }]);
+  assert.deepEqual(state.qaFailures, {});
+  assert.deepEqual(done, [`comment on ${qa.key}`, `move ${qa.key} to Ready`]);
 });
 
 test("without a [qa] table no app starts, and the review says it did not run live", async () => {
