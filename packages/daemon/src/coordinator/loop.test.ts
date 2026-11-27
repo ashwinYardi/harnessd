@@ -3318,6 +3318,77 @@ test("a pending review with no matching recorded head is dropped with one line (
   await t.loop.idle();
 });
 
+test("an unposted legacy review is validated before its comment is posted (MET-230)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.pendingReview = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha6",
+      body: "**harnessd review**: changes requested.",
+    },
+  };
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+
+  await t.loop.tick();
+
+  assert.equal(t.gh.reviews.length, 0, "the stale verdict is never published");
+  assert.equal(store.state.pendingReview, undefined, "the unmatched record is dropped");
+  assert.equal(fx.part.state, "In Review", "nothing is settled from it");
+  assert.equal(
+    t.logs.filter((line) => line.includes("dropped the pending review")).length,
+    1,
+    "one log line",
+  );
+});
+
+test("a network error in a not-judged escalation does not lose the rest of it (MET-230)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish("timeout", "budget of 1000ms exceeded");
+  await t.loop.idle();
+  assert.equal(fx.part.state, "In Review", "the first timeout re-queues the same head");
+
+  const moveTo = fx.linear.moveTo.bind(fx.linear);
+  let down = true;
+  fx.linear.moveTo = async (id, state) => {
+    if (down && id === fx.part.id && state === "Needs input") {
+      down = false;
+      throw new Error("fetch failed");
+    }
+    return moveTo(id, state);
+  };
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [fx.part.key], "the same head reviews again");
+  t.adapter.pending.at(-1)?.finish("timeout", "budget of 1000ms exceeded");
+  await t.loop.idle();
+
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(store.state.reviewFailures[fx.part.id], undefined, "no review failure counted");
+  assert.equal(
+    t.pings.filter((ping) => ping.includes("review not judged twice")).length,
+    1,
+    "the notice still goes out after the failed move",
+  );
+});
+
 test("a blocking code finding sends the part back and the next run resumes the builder (MET-225, D-046)", async () => {
   const fx = reviewFixture({ withQa: false });
   fx.part.description += "\n\n**Verify**\n- `pnpm test` → exit 0";

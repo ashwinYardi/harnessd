@@ -75,7 +75,7 @@ import {
   runQa,
   settleQa,
 } from "./qa.ts";
-import type { ReviewRunResult } from "./review.ts";
+import type { ReviewFinding, ReviewRunResult } from "./review.ts";
 import { runReview, settleReview } from "./review.ts";
 import { type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import {
@@ -101,6 +101,7 @@ import type {
   PartSession,
   PendingQa,
   PendingQaReview,
+  PendingReview,
   ReviewedHead,
   ReviewerHead,
   SelfUpdateRecord,
@@ -389,6 +390,13 @@ export function tokenBudgetFor(
   limits: { token_budget: Record<"S" | "M", number> },
 ): number {
   return size === "S" ? limits.token_budget.S : limits.token_budget.M;
+}
+
+/** A pending review whose verdict is ready to settle (MET-230). */
+interface PreparedReview {
+  record: PendingReview;
+  verdict: "approved" | "changes_requested";
+  findings: ReviewFinding[];
 }
 
 /** A review as the pending record keeps it; the part and PR are ids (MET-213, D-058). */
@@ -1130,26 +1138,21 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   }
 
   /**
-   * Settles a review whose PR comment is posted, then drops its pending record (MET-225).
-   * A failed post, a network error on a settle write or the Linear reads it needs keep the
-   * record, so a later tick finishes the settle without running the reviewer again for
-   * that verdict (D-058).
+   * Validates a pending review before its comment goes out (MET-230). A legacy record with
+   * no verdict takes it from reviewerHeads when the head matches; otherwise it is dropped
+   * with one line, so a stale verdict is never posted and a bad record never blocks reviews.
    */
-  async function settlePendingReview(s: LoopState, partId: string): Promise<void> {
+  async function preparePendingReview(
+    s: LoopState,
+    partId: string,
+  ): Promise<PreparedReview | undefined> {
     const record = s.pendingReview?.[partId];
-    if (record === undefined || record.posted !== true) return;
-    // A record written before the verdict was saved (MET-230): fill it from the recorded
-    // head when the sha matches; otherwise there is nothing to settle, so drop it.
+    if (record === undefined) return undefined;
     let verdict = record.verdict;
     let findings = record.findings;
     if (verdict === undefined || findings === undefined) {
       const recorded = s.reviewerHeads?.[partId];
-      if (recorded !== undefined && recorded.sha === record.head) {
-        verdict = recorded.verdict;
-        findings = recorded.findings;
-        record.verdict = recorded.verdict;
-        record.findings = recorded.findings;
-      } else {
+      if (recorded === undefined || recorded.sha !== record.head) {
         log(
           `${record.partKey}: dropped the pending review at ${record.head.slice(0, 7)}: no verdict for that head`,
         );
@@ -1159,9 +1162,29 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           if (Object.keys(records).length === 0) delete s.pendingReview;
         }
         await save();
-        return;
+        return undefined;
       }
+      verdict = recorded.verdict;
+      findings = recorded.findings;
+      record.verdict = verdict;
+      record.findings = findings;
     }
+    if (verdict === undefined || findings === undefined) return undefined;
+    return { record, verdict, findings };
+  }
+
+  /**
+   * Settles a review whose PR comment is posted, then drops its pending record (MET-225).
+   * A failed post, a network error on a settle write or the Linear reads it needs keep the
+   * record, so a later tick finishes the settle without running the reviewer again for
+   * that verdict (D-058).
+   */
+  async function settlePendingReview(s: LoopState, partId: string): Promise<void> {
+    const record = s.pendingReview?.[partId];
+    if (record === undefined || record.posted !== true) return;
+    const prepared = await preparePendingReview(s, partId);
+    if (prepared === undefined) return;
+    const { verdict, findings } = prepared;
     let part: Issue;
     let parent: Issue;
     try {
@@ -1235,6 +1258,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   async function retryPendingReviews(s: LoopState): Promise<void> {
     for (const partId of Object.keys(s.pendingReview ?? {})) {
       if (live.has(partId)) continue;
+      // Validate before the post: a legacy record with no matching head is dropped, never
+      // published, and leaves reviewer dispatch free (MET-230).
+      if ((await preparePendingReview(s, partId)) === undefined) continue;
       if (!(await postPendingReview(s, partId))) continue;
       await settlePendingReview(s, partId);
     }

@@ -670,7 +670,9 @@ export async function settleReview(
       await fn();
     } catch (error) {
       log(`could not ${what}: ${message(error)}`);
-      if (retryNetwork && isNetworkError(error)) {
+      // Only a persistent settlement has a record to retry. The direct callers have none,
+      // so they keep the old write behavior and let the round go on (MET-230).
+      if (retryNetwork && steps !== undefined && isNetworkError(error)) {
         stopped = true;
         return;
       }
