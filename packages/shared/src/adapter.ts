@@ -1,4 +1,4 @@
-import type { HarnessId } from "./index.ts";
+import type { AgentRole, HarnessId } from "./index.ts";
 
 /** A unit of work handed to a harness adapter. */
 export interface Task {
@@ -22,6 +22,11 @@ export interface Task {
    * Each adapter maps it to its harness's own flags or env; unset means a normal run.
    */
   readOnly?: boolean;
+  /**
+   * The role the task runs as. A reviewer read-only run also gets the Agent tool, so the
+   * code-review skill can start its sub-agents (MET-223, D-059).
+   */
+  role?: AgentRole;
   /** Extra environment for this run, over the adapter's own (e.g. git config for the worktree). */
   env?: Record<string, string>;
 }

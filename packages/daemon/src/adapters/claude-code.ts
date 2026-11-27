@@ -47,6 +47,11 @@ export const BASH_MAX_OUTPUT_LENGTH = "20000";
 /** MET-219: a coordinator run may read, search and look up files, and nothing else. */
 export const READ_ONLY_TOOLS = "Read,Grep,Glob";
 /**
+ * MET-223: a reviewer run also gets the Agent tool, so the code-review skill can start its
+ * two sub-agents. The deny list stays: a sub-agent inherits it (D-059).
+ */
+export const REVIEWER_READ_ONLY_TOOLS = "Read,Grep,Glob,Agent";
+/**
  * MET-219: no edits, no shell and no vault writes. The daemon writes the grill's notes itself,
  * and the memory read tools stay available.
  */
@@ -79,7 +84,9 @@ export function claudeArgs(task: Task, options: ClaudeCodeOptions = {}, cwd?: st
   // MET-219: a coordinator run gets read-only tools only. The D-031 flags above stay.
   const readOnly = task.readOnly === true;
   if (readOnly) {
-    args.push("--tools", READ_ONLY_TOOLS, "--disallowedTools", READ_ONLY_DISALLOWED_TOOLS);
+    // MET-223: only the reviewer gets the Agent tool, so code-review can start sub-agents.
+    const tools = task.role === "reviewer" ? REVIEWER_READ_ONLY_TOOLS : READ_ONLY_TOOLS;
+    args.push("--tools", tools, "--disallowedTools", READ_ONLY_DISALLOWED_TOOLS);
   }
   // Read-only needs no approval flags; `auto` would also approve writes the tool limits deny.
   if (options.permissionMode && !(readOnly && options.permissionMode === "auto")) {

@@ -179,6 +179,26 @@ test("a readOnly task gets read-only tools and no skip-permissions or auto mode 
   assert.deepEqual(argv.slice(-2), ["--max-turns", "12"]);
 });
 
+test("a read-only reviewer gets the Agent tool and no write tools (MET-223, D-059)", () => {
+  const argv = claudeArgs(
+    task({ readOnly: true, role: "reviewer", maxTurns: 15 }),
+    { permissionMode: "auto", skipPermissions: true },
+    scratch,
+  );
+  const tools = argv[argv.indexOf("--tools") + 1]?.split(",") ?? [];
+  assert.deepEqual(tools, ["Read", "Grep", "Glob", "Agent"]);
+  assert.equal(
+    argv[argv.indexOf("--disallowedTools") + 1],
+    "Edit,Write,NotebookEdit,Bash,mcp__harnessd-memory__write_note",
+  );
+  for (const tool of ["Edit", "Write", "NotebookEdit", "Bash"]) {
+    assert.ok(!tools.includes(tool), tool);
+  }
+  assert.ok(!argv.includes("--dangerously-skip-permissions"));
+  assert.ok(!argv.includes("--permission-mode"));
+  assert.deepEqual(argv.slice(-2), ["--max-turns", "15"]);
+});
+
 test("a task without readOnly keeps today's argv and gains no tool limits", () => {
   const argv = claudeArgs(task(), { permissionMode: "auto", skipPermissions: true }, scratch);
   assert.deepEqual(argv, [
