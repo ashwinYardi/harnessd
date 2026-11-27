@@ -16,6 +16,7 @@ import {
 } from "@harnessd/shared";
 import type { GitHub, PullRequest } from "../github/client.ts";
 import type { LinearClient } from "../linear/client.ts";
+import { isNetworkError } from "../net-error.ts";
 import type { TaskWorktrees } from "../worktrees/index.ts";
 import { agentPromptHeader, partBrief } from "./dispatch.ts";
 import { runForReply } from "./grill.ts";
@@ -534,10 +535,16 @@ export async function runReview(
 export type ReviewNotJudged = "turn_cap" | "timeout" | "stalled" | "not_json";
 
 /** What a review settle did: send back, approve, ask a human, or retry. */
-export type ReviewSettlement = "approved" | "sent_back" | "escalated" | "requeued";
+export type ReviewSettlement = "approved" | "sent_back" | "escalated" | "requeued" | "pending";
 
 /** The Linear calls a review settle makes. A LinearClient satisfies it. */
 export type ReviewLinear = Pick<LinearClient, "comment" | "moveTo">;
+
+/** The settle writes a retry may skip, kept across ticks (D-058). */
+export interface ReviewSettleSteps {
+  done: string[];
+  mark(step: string): void | Promise<void>;
+}
 
 export interface ReviewSettleInput {
   part: LinkedIssue;
@@ -559,6 +566,11 @@ export interface ReviewSettleDeps {
   /** `limits.qa_max_failures`: failed reviews on one part before a human is asked (D-014). */
   maxFailures: number;
   log?: (line: string) => void;
+  /**
+   * The steps a retry already finished, by the name the log gives them (D-058).
+   * A retry skips a done step and a network error leaves the rest for the next tick.
+   */
+  steps?: ReviewSettleSteps;
 }
 
 /**
@@ -626,6 +638,9 @@ export function reviewFindingList(findings: readonly ReviewFinding[]): string[] 
  * Ready, so its next run resumes the builder (D-046). An approve sends nothing back and
  * leaves nits only in the PR comment. Two failed reviews, or two not-judged reviews on one
  * head, move the part and parent to Needs input (D-014, D-052).
+ *
+ * A network error stops the writes and returns `pending` without changing any state; the
+ * loop keeps the record for a retry and skips the steps already done (D-058).
  */
 export async function settleReview(
   state: Pick<LoopState, "reviewFailures" | "qaFeedback"> & {
@@ -636,12 +651,32 @@ export async function settleReview(
 ): Promise<ReviewSettlement> {
   const { part, parent, pr } = input;
   const log = deps.log ?? (() => {});
-  const safely = async (what: string, fn: () => Promise<unknown>): Promise<void> => {
+  const steps = deps.steps;
+  const done = new Set(steps?.done ?? []);
+  /** A network error stopped the writes: the rest waits for the next tick (D-058). */
+  let stopped = false;
+  const mark = async (step: string): Promise<void> => {
+    if (done.has(step)) return;
+    done.add(step);
+    await steps?.mark(step);
+  };
+  const safely = async (
+    what: string,
+    fn: () => Promise<unknown>,
+    retryNetwork = true,
+  ): Promise<void> => {
+    if (done.has(what) || stopped) return;
     try {
       await fn();
     } catch (error) {
       log(`could not ${what}: ${message(error)}`);
+      if (retryNetwork && isNetworkError(error)) {
+        stopped = true;
+        return;
+      }
+      // A non-network failure is logged and the settle goes on.
     }
+    await mark(what);
   };
   const escalate = async (
     reason: string,
@@ -666,6 +701,7 @@ export async function settleReview(
         detail,
       }),
     );
+    if (stopped) return "pending";
     delete state.reviewFailures[part.id];
     delete state.qaFeedback[part.id];
     if (state.harnessSwitch !== undefined) {
@@ -731,8 +767,10 @@ export async function settleReview(
   clearNotJudged(part.id);
 
   if (input.verdict.decision === "approve") {
-    delete state.reviewFailures[part.id];
-    delete state.qaFeedback[part.id];
+    // Keep the failure count until the part is Done or escalated (MET-230): an approval
+    // does not erase the two-failure rule set on earlier rounds (D-014).
+    const feedback = state.qaFeedback[part.id];
+    if (feedback?.source === "review") delete state.qaFeedback[part.id];
     log(`${part.key}: review approved, PR #${pr.number}`);
     return "approved";
   }
@@ -763,6 +801,7 @@ export async function settleReview(
   ].join("\n");
   await safely(`comment on ${part.key}`, () => deps.linear.comment(part.id, `${body}\n`));
   await safely(`re-queue ${part.key}`, () => deps.linear.moveTo(part.id, "Ready"));
+  if (stopped) return "pending";
   state.qaFeedback[part.id] = feedback;
   state.reviewFailures[part.id] = failures;
   log(

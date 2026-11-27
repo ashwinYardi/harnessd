@@ -211,6 +211,8 @@ export interface PendingReview {
   posted?: boolean;
   /** The posted review, once a retry succeeds. */
   reviewUrl?: string;
+  /** The settle steps already done, by the name the log gives them (D-058). */
+  done?: string[];
 }
 
 /**
@@ -657,6 +659,12 @@ function pendingReviews(value: unknown): Record<string, PendingReview> {
       continue;
     }
     if (r.posted !== undefined && typeof r.posted !== "boolean") continue;
+    if (
+      r.done !== undefined &&
+      (!Array.isArray(r.done) || !r.done.every((s) => typeof s === "string"))
+    ) {
+      continue;
+    }
     const findings = r.findings === undefined ? undefined : reviewFindings(r.findings);
     if (r.findings !== undefined && findings === undefined) continue;
     out[id] = {
@@ -671,6 +679,7 @@ function pendingReviews(value: unknown): Record<string, PendingReview> {
       ...(findings === undefined ? {} : { findings }),
       ...(r.posted === undefined ? {} : { posted: r.posted }),
       ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
+      ...(r.done === undefined ? {} : { done: r.done }),
     };
   }
   return out;

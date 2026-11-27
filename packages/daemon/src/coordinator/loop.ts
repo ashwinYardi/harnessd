@@ -1131,12 +1131,37 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
 
   /**
    * Settles a review whose PR comment is posted, then drops its pending record (MET-225).
-   * A failed post or the Linear reads it needs keep the record, so a later tick finishes the
-   * settle without running the reviewer again for that verdict.
+   * A failed post, a network error on a settle write or the Linear reads it needs keep the
+   * record, so a later tick finishes the settle without running the reviewer again for
+   * that verdict (D-058).
    */
   async function settlePendingReview(s: LoopState, partId: string): Promise<void> {
     const record = s.pendingReview?.[partId];
     if (record === undefined || record.posted !== true) return;
+    // A record written before the verdict was saved (MET-230): fill it from the recorded
+    // head when the sha matches; otherwise there is nothing to settle, so drop it.
+    let verdict = record.verdict;
+    let findings = record.findings;
+    if (verdict === undefined || findings === undefined) {
+      const recorded = s.reviewerHeads?.[partId];
+      if (recorded !== undefined && recorded.sha === record.head) {
+        verdict = recorded.verdict;
+        findings = recorded.findings;
+        record.verdict = recorded.verdict;
+        record.findings = recorded.findings;
+      } else {
+        log(
+          `${record.partKey}: dropped the pending review at ${record.head.slice(0, 7)}: no verdict for that head`,
+        );
+        const records = s.pendingReview;
+        if (records !== undefined) {
+          delete records[partId];
+          if (Object.keys(records).length === 0) delete s.pendingReview;
+        }
+        await save();
+        return;
+      }
+    }
     let part: Issue;
     let parent: Issue;
     try {
@@ -1161,18 +1186,19 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       parentKey: parent.key,
       blockers: [],
     };
-    await settleReview(
+    record.done ??= [];
+    const settled = await settleReview(
       s,
       {
         part: linked,
         parent,
         pr,
-        ...(record.verdict === undefined
+        ...(verdict === undefined
           ? {}
           : {
               verdict: {
-                decision: record.verdict === "approved" ? "approve" : "changes_requested",
-                findings: record.findings ?? [],
+                decision: verdict === "approved" ? "approve" : "changes_requested",
+                findings: findings ?? [],
               },
             }),
         ...(record.reviewUrl === undefined ? {} : { reviewUrl: record.reviewUrl }),
@@ -1182,8 +1208,22 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         notifier,
         maxFailures: config.limits.qa_max_failures,
         log,
+        steps: {
+          done: record.done,
+          async mark(step: string) {
+            record.done ??= [];
+            record.done.push(step);
+            await save();
+          },
+        },
       },
     );
+    if (settled === "pending") {
+      // A network error stopped a write: keep the record and its done steps for the next
+      // tick, as QA does (D-058).
+      await save();
+      return;
+    }
     const records = s.pendingReview;
     if (records !== undefined) {
       delete records[partId];

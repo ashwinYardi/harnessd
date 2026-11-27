@@ -609,12 +609,15 @@ test("pendingReview is optional, keeps a valid entry and drops a malformed one (
         d: { ...valid, head: "" },
         e: { ...valid, body: 3 },
         f: { ...valid, reviewUrl: "https://github.test/pull/7#review-1" },
+        g: { ...valid, done: ["comment on MET-41", "re-queue MET-41"] },
+        h: { ...valid, done: ["comment on MET-41", 3] },
       },
     }),
   );
   assert.deepEqual(parsed.pendingReview, {
     a: valid,
     f: { ...valid, reviewUrl: "https://github.test/pull/7#review-1" },
+    g: { ...valid, done: ["comment on MET-41", "re-queue MET-41"] },
   });
 
   const store = createFileLoopStore(await repo());

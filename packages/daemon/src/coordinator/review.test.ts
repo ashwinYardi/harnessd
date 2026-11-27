@@ -10,6 +10,7 @@ import {
   formatReviewComment,
   parseReviewVerdict,
   type ReviewFinding,
+  settleReview,
 } from "./review.ts";
 import { partMarker } from "./split.ts";
 
@@ -338,4 +339,46 @@ test("the reviewer task is read-only and carries its size cap (MET-223, D-047, D
   assert.equal(task.role, "reviewer");
   assert.equal(task.maxTurns, 15);
   assert.equal(task.model, "gpt-6.2-sol");
+});
+
+test("an approval keeps review failures and QA feedback that is not a review send-back (MET-230)", async () => {
+  const deps = {
+    linear: {
+      async comment(_issueId: string, _body: string) {
+        return "comment-1";
+      },
+      async moveTo(_issueId: string, _state: string) {},
+    },
+    notifier: { async notify() {} },
+    maxFailures: 2,
+  };
+  const input = {
+    part,
+    parent,
+    pr: pr(),
+    verdict: { decision: "approve" as const, findings: [] },
+  };
+  const qaFeedback = { source: "qa" as const, failing: ["Works: no test"] };
+  const state = {
+    reviewFailures: { [part.id]: 1 },
+    qaFeedback: { [part.id]: qaFeedback },
+  };
+
+  assert.equal(await settleReview(state, input, deps), "approved");
+  assert.equal(state.reviewFailures[part.id], 1, "an approval keeps the failure count");
+  assert.deepEqual(state.qaFeedback[part.id], qaFeedback, "QA feedback stays");
+
+  const reviewState = {
+    reviewFailures: { [part.id]: 1 },
+    qaFeedback: {
+      [part.id]: { source: "review" as const, failing: ["R1 (src/a.ts:1) Fix it."] },
+    },
+  };
+  assert.equal(await settleReview(reviewState, input, deps), "approved");
+  assert.equal(
+    reviewState.reviewFailures[part.id],
+    1,
+    "the count still waits for Done or escalation",
+  );
+  assert.equal(reviewState.qaFeedback[part.id], undefined, "its own review send-back is cleared");
 });
