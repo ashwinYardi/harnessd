@@ -508,3 +508,81 @@ test("reviewed heads and usage load additively, and an old file still loads", ()
     },
   });
 });
+
+test("reviewerHeads is optional, keeps a valid entry and drops a malformed one (MET-224)", async () => {
+  assert.equal(parseLoopState('{"inFlight":[]}').reviewerHeads, undefined, "old files still load");
+  const finding = {
+    file: "src/a.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  const nit = {
+    file: "src/b.ts",
+    line: 3,
+    severity: "nit",
+    kind: "design",
+    text: "The name hides the seam.",
+  };
+  const at = "2026-11-27T10:00:00.000Z";
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewerHeads: {
+        a: { sha: "sha7", verdict: "changes_requested", findings: [finding, nit], at },
+        b: { sha: "sha8", verdict: "approved", findings: [], at },
+        c: { sha: "sha9", verdict: "approved", findings: [{ ...finding, line: 0 }], at },
+        d: { sha: "", verdict: "approved", findings: [], at },
+        e: { sha: "sha10", verdict: "perhaps", findings: [], at },
+        f: { sha: "sha11", verdict: "approved", findings: [] },
+      },
+    }),
+  );
+  assert.deepEqual(parsed.reviewerHeads, {
+    a: { sha: "sha7", verdict: "changes_requested", findings: [finding, nit], at },
+    b: { sha: "sha8", verdict: "approved", findings: [], at },
+  });
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.reviewerHeads = parsed.reviewerHeads ?? {};
+  await store.save(state);
+  assert.deepEqual((await store.load()).reviewerHeads, state.reviewerHeads);
+});
+
+test("pendingReview is optional, keeps a valid entry and drops a malformed one (MET-224, D-058)", async () => {
+  assert.equal(parseLoopState('{"inFlight":[]}').pendingReview, undefined, "old files still load");
+  const valid = {
+    partId: "part-1",
+    partKey: "MET-41",
+    parentId: "parent-1",
+    prNumber: 7,
+    prUrl: "https://github.test/pull/7",
+    head: "sha7",
+    body: "**harnessd review**: approved.",
+  };
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      pendingReview: {
+        a: valid,
+        b: { ...valid, partId: "" },
+        c: { ...valid, prNumber: 0 },
+        d: { ...valid, head: "" },
+        e: { ...valid, body: 3 },
+        f: { ...valid, reviewUrl: "https://github.test/pull/7#review-1" },
+      },
+    }),
+  );
+  assert.deepEqual(parsed.pendingReview, {
+    a: valid,
+    f: { ...valid, reviewUrl: "https://github.test/pull/7#review-1" },
+  });
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.pendingReview = parsed.pendingReview ?? {};
+  await store.save(state);
+  assert.deepEqual((await store.load()).pendingReview, state.pendingReview);
+});

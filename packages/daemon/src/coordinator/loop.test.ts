@@ -48,6 +48,7 @@ import {
   tokenSumOf,
 } from "./loop.ts";
 import { formatNotice } from "./notifier.ts";
+import type { ReviewFinding } from "./review.ts";
 import { type ShipInput, type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import { partMarker, readPartMarker } from "./split.ts";
 import {
@@ -721,11 +722,14 @@ test("grill and plan runs are read-only; part and QA runs are not (D-059)", asyn
   assert.equal(partRun?.id, `${backend.key}-1`);
   assert.notEqual(partRun?.readOnly, true, "a builder keeps full access");
 
-  // The part reaches In Review, so QA runs too. It is not a coordinator run.
+  // The part reaches In Review, so the reviewer runs before QA (MET-224). Neither is a
+  // coordinator run. The reviewer is read-only; QA keeps full access.
   adapter.pending[0]?.finish("ok");
   await t.loop.idle();
   t.gh.open(backend.key, 7);
-  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key, qa.key]);
+  const reviewRun = adapter.tasks.find((task) => task.role === "reviewer");
+  assert.equal(reviewRun?.readOnly, true, "the reviewer is read-only");
   const qaRun = adapter.tasks.at(-1);
   assert.match(qaRun?.id ?? "", /-qa-1-pr7$/);
   assert.notEqual(qaRun?.readOnly, true, "QA keeps full access");
@@ -735,7 +739,12 @@ test("grill and plan runs are read-only; part and QA runs are not (D-059)", asyn
     "no coordinator run starts for a part or QA round",
   );
 
-  adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  adapter.pending
+    .find((pending) => pending.task.role === "reviewer")
+    ?.finish("ok", undefined, JSON.stringify({ decision: "approve", findings: [] }));
+  adapter.pending
+    .find((pending) => pending.task.id.endsWith("-qa-1-pr7"))
+    ?.finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
 });
 
@@ -2879,6 +2888,254 @@ test("QA reviews one part as soon as it reaches In Review, at its PR head", asyn
     t.memory.state.merges.map((m) => [m.qaKey, m.prs.map((p) => [p.number, p.sha])]),
     [[qa.key, [[7, "sha7"]]]],
     "one merge entry with one PR",
+  );
+});
+
+/** A split parent with one shipped part at PR #7, In Review, and its QA sub-issue. */
+function reviewFixture(options: { partSize?: string; withQa?: boolean } = {}) {
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const part = linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: "In Review",
+    description: [
+      partMarker("backend"),
+      "",
+      "**Goal**",
+      "Ship the API.",
+      "",
+      "**Done when**",
+      "- [ ] Works",
+      "",
+      `**Size**: ${options.partSize ?? "S"}`,
+    ].join("\n"),
+  });
+  let qa: FakeIssue | undefined;
+  let qaId = "qa-1";
+  if (options.withQa !== false) {
+    qa = linear.add({
+      title: "QA: P",
+      parentId: parent.id,
+      state: "Ready",
+      description: `${partMarker("qa")}\n**Size**: M`,
+    });
+    qaId = qa.id;
+    linear.relations.push({ blocker: part.id, blocked: qa.id });
+  }
+  const state = emptyLoopState();
+  state.splits = {
+    [parent.id]: {
+      key: parent.key,
+      parts: [part.id],
+      qa: qaId,
+      at: "2026-11-23T10:00:00.000Z",
+    },
+  };
+  state.shipped = {
+    [part.id]: {
+      key: part.key,
+      branch: part.key.toLowerCase(),
+      prUrl: "https://github.test/o/r/pull/7",
+      at: "2026-11-23T10:01:00.000Z",
+    },
+  };
+  return { linear, parent, part, qa, state };
+}
+
+const ONE_AT_A_TIME = mergeLayers([
+  {
+    scope: "workspace",
+    dir: "/repo/.harnessd",
+    settings: { limits: { max_concurrent: 1 } },
+    agents: {},
+    rules: [],
+    skills: [],
+    mcp: {},
+    skillSettings: {},
+  },
+]);
+
+test("a shipped part in In Review gets one review before QA, at its PR head (MET-224)", async () => {
+  const fx = reviewFixture();
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+
+  const report = await t.loop.tick();
+
+  assert.deepEqual(report.dispatched, [fx.part.key], "the review starts before QA");
+  const run = t.adapter.runs()[0];
+  assert.equal(run?.id, `${fx.part.key}-review-pr7`);
+  assert.equal(run?.readOnly, true, "the reviewer edits nothing");
+  assert.equal(run?.role, "reviewer");
+  assert.equal(run?.maxTurns, 15, "the reviewer turn cap for an S part");
+  assert.equal(run?.budgetMs, 30 * 60_000, "the part's size budget");
+  assert.match(run?.prompt ?? "", /diff --git a\/src\/x\.ts/);
+  assert.match(run?.prompt ?? "", /The loop needs it\./, "the parent issue");
+  assert.match(run?.prompt ?? "", /\*\*Goal\*\*\nShip the API\./, "the part brief");
+  assert.match(run?.prompt ?? "", /Edit nothing/);
+  assert.deepEqual(t.wt.checkouts, [
+    {
+      issueKey: fx.part.key,
+      title: "pr 7",
+      branch: fx.part.key.toLowerCase(),
+      sha: "sha7",
+    },
+  ]);
+  assert.equal(t.adapter.pending[0]?.cwd, `/wt/${fx.part.key}-sha7`);
+  assert.equal(fx.qa?.state, "Ready", "QA does not start while the review holds the slot");
+  assert.equal(t.gh.reviews.length, 0);
+
+  const nit: ReviewFinding = {
+    file: "src/api.ts",
+    line: 9,
+    severity: "nit",
+    kind: "design",
+    text: "The name hides the seam.",
+  };
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "approve", findings: [nit] }),
+    undefined,
+    { input: 10, cacheRead: 5, cacheWrite: 2, output: 3 },
+    4,
+  );
+  await t.loop.idle();
+
+  assert.equal(t.gh.reviews.length, 1);
+  assert.equal(t.gh.reviews[0]?.event, "COMMENT");
+  assert.equal(t.gh.reviews[0]?.commitId, "sha7");
+  assert.match(
+    t.gh.reviews[0]?.body ?? "",
+    /- src\/api\.ts:9 \(nit, design\): The name hides the seam\./,
+  );
+  const head = store.state.reviewerHeads?.[fx.part.id];
+  assert.equal(head?.sha, "sha7");
+  assert.equal(head?.verdict, "approved");
+  assert.deepEqual(head?.findings, [nit]);
+  assert.match(head?.at ?? "", /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(
+    store.state.usage?.[fx.parent.id],
+    { input: 10, cached: 7, output: 3 },
+    "review tokens count in the parent's sum",
+  );
+  assert.deepEqual(t.wt.removed, [`/wt/${fx.part.key}-sha7`], "the review checkout is never kept");
+
+  const next = await t.loop.tick();
+  assert.deepEqual(next.dispatched, [fx.qa?.key], "QA starts on the next tick");
+  assert.equal(
+    t.adapter.runs().filter((task) => task.role === "reviewer").length,
+    1,
+    "the approved head is not reviewed twice",
+  );
+  t.adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+});
+
+test("an approved head is skipped and a new head gets a review (MET-224)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const state = fx.state;
+  state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "approved",
+      findings: [],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store: memoryStore(state) });
+  const pr = t.gh.open(fx.part.key, 7);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  assert.equal(t.adapter.runs().length, 0);
+  pr.headRefOid = "new-head";
+  assert.deepEqual((await t.loop.tick()).dispatched, [fx.part.key]);
+  assert.equal(t.wt.checkouts.at(-1)?.sha, "new-head");
+  t.adapter.pending.at(-1)?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({
+      decision: "approve",
+      findings: [],
+    }),
+  );
+  await t.loop.idle();
+  assert.equal(t.gh.reviews.at(-1)?.commitId, "new-head");
+});
+
+test("a review uses the part size's cap and budget (MET-224, D-014)", async () => {
+  const fx = reviewFixture({ partSize: "M", withQa: false });
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store: memoryStore(fx.state) });
+  t.gh.open(fx.part.key, 7);
+
+  await t.loop.tick();
+
+  const run = t.adapter.runs()[0];
+  assert.equal(run?.maxTurns, 30);
+  assert.equal(run?.budgetMs, 120 * 60_000);
+  t.adapter.pending[0]?.finish("cancelled");
+  await t.loop.idle();
+});
+
+test("a failed review post is kept in pendingReview and retried with no failure (MET-224, D-058)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  const post = t.gh.github.postReview.bind(t.gh.github);
+  let down = true;
+  let postsWithSavedVerdict = 0;
+  t.gh.github.postReview = async (number, review) => {
+    assert.equal(store.state.reviewerHeads?.[fx.part.id]?.sha, "sha7");
+    assert.equal(store.state.pendingReview?.[fx.part.id]?.head, "sha7");
+    postsWithSavedVerdict += 1;
+    if (down) {
+      down = false;
+      throw new Error("fetch failed");
+    }
+    return post(number, review);
+  };
+
+  await t.loop.tick();
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "changes_requested", findings: [blocking] }),
+  );
+  await t.loop.idle();
+
+  assert.equal(postsWithSavedVerdict, 1, "the verdict was already saved when posting");
+  assert.equal(t.gh.reviews.length, 0, "the post failed");
+  assert.equal(store.state.reviewerHeads?.[fx.part.id]?.verdict, "changes_requested");
+  const pending = store.state.pendingReview?.[fx.part.id];
+  assert.equal(pending?.prNumber, 7);
+  assert.equal(pending?.head, "sha7");
+  assert.match(pending?.body ?? "", /- src\/api\.ts:12 \(blocking, code\)/);
+  assert.deepEqual(store.state.attempts, {}, "no failure is counted");
+  assert.ok(
+    t.logs.some((line) => line.includes("could not post the review on PR #7")),
+    t.logs.join("\n"),
+  );
+
+  await t.loop.tick();
+
+  assert.equal(t.gh.reviews.length, 1, "the retry posts the kept review");
+  assert.equal(t.gh.reviews[0]?.event, "COMMENT");
+  assert.equal(t.gh.reviews[0]?.commitId, "sha7");
+  assert.equal(store.state.pendingReview?.[fx.part.id], undefined);
+  assert.equal(
+    t.adapter.runs().filter((task) => task.role === "reviewer").length,
+    1,
+    "the retry posts the verdict; it does not review again",
   );
 });
 

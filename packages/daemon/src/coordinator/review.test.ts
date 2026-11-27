@@ -7,6 +7,7 @@ import { maxTurns } from "./dispatch.ts";
 import {
   buildReviewPrompt,
   buildReviewTask,
+  formatReviewComment,
   parseReviewVerdict,
   type ReviewFinding,
 } from "./review.ts";
@@ -278,6 +279,49 @@ test("parseReviewVerdict repairs a stray backslash and keeps not_json for a pars
   assert.equal(notJson.ok, false);
   assert.equal(!notJson.ok && notJson.kind, "not_json");
   assert.match(!notJson.ok ? notJson.error : "", /^not JSON: /);
+});
+
+test("the review comment lists every blocking finding and nit with file:line (MET-224, D-060)", () => {
+  const body = formatReviewComment({
+    part,
+    parent,
+    pr: pr(),
+    verdict: {
+      decision: "changes_requested",
+      findings: [
+        {
+          file: "src/a.ts",
+          line: 12,
+          severity: "blocking",
+          kind: "code",
+          text: "The loop reads the file on every tick.",
+        },
+        {
+          file: "src/b.ts",
+          line: 3,
+          severity: "nit",
+          kind: "design",
+          text: "The name hides the seam.",
+        },
+      ],
+    },
+  });
+  assert.match(body, /changes requested/);
+  assert.match(body, /sha223/);
+  assert.match(body, /- src\/a\.ts:12 \(blocking, code\): The loop reads the file on every tick\./);
+  assert.match(body, /- src\/b\.ts:3 \(nit, design\): The name hides the seam\./);
+  assert.match(body, /Blocking \(1\):/);
+  assert.match(body, /Nits \(1\):/);
+
+  const approved = formatReviewComment({
+    part,
+    parent,
+    pr: pr(),
+    verdict: { decision: "approve", findings: [] },
+  });
+  assert.match(approved, /approved/);
+  assert.match(approved, /No blocking finding/);
+  assert.doesNotMatch(approved, /Nits:/);
 });
 
 test("the reviewer task is read-only and carries its size cap (MET-223, D-047, D-059)", () => {

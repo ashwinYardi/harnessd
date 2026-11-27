@@ -75,6 +75,8 @@ import {
   runQa,
   settleQa,
 } from "./qa.ts";
+import type { ReviewRunResult } from "./review.ts";
+import { runReview } from "./review.ts";
 import { type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import {
   formatSplitComment,
@@ -100,6 +102,7 @@ import type {
   PendingQa,
   PendingQaReview,
   ReviewedHead,
+  ReviewerHead,
   SelfUpdateRecord,
   SelfUpdateTrigger,
 } from "./state.ts";
@@ -836,15 +839,25 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
 
   /** Re-queues entries with no live run, including stopped runs whose Ready move failed. */
   async function requeue(s: LoopState, report: TickReport): Promise<void> {
+    let changed = false;
     for (const entry of [...s.inFlight]) {
       if (live.has(entry.issueId)) continue;
-      if (entry.pausedAt !== undefined) {
+      if (entry.pausedAt !== undefined && entry.role !== "reviewer") {
         if (await requeueStopped(s, entry)) report.requeued.push(entry.issueKey);
         continue;
       }
       if (entry.worktree !== "") {
-        // A QA checkout is never kept: a crash re-queue removes it without the guard.
-        await removeWithGuard(s, entry, entry.worktree, { force: entry.role === "qa" });
+        // A QA or review checkout is never kept: a crash re-queue removes it without the guard.
+        await removeWithGuard(s, entry, entry.worktree, {
+          force: entry.role === "qa" || entry.role === "reviewer",
+        });
+      }
+      if (entry.role === "reviewer") {
+        // The part stays In Review: the next tick starts the review again (MET-224).
+        s.inFlight = s.inFlight.filter((e) => e !== entry);
+        changed = true;
+        log(`${entry.issueKey}: interrupted review dropped`);
+        continue;
       }
       const moved = await safely(`re-queue ${entry.issueKey}`, () =>
         linear.moveTo(entry.issueId, "Ready"),
@@ -852,9 +865,10 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       if (!moved) continue;
       s.inFlight = s.inFlight.filter((e) => e !== entry);
       report.requeued.push(entry.issueKey);
+      changed = true;
       log(`${entry.issueKey}: interrupted run re-queued`);
     }
-    if (report.requeued.length > 0) await save();
+    if (changed || report.requeued.length > 0) await save();
   }
 
   // --- state repair -------------------------------------------------------
@@ -1086,6 +1100,34 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
       log(`${qa.key}: QA verdict posted after retry`);
       await save();
+    }
+  }
+
+  /** Posts a saved verdict, leaving failed writes for the next tick (D-058). */
+  async function postPendingReview(s: LoopState, partId: string): Promise<void> {
+    const records = s.pendingReview;
+    const record = records?.[partId];
+    if (records === undefined || record === undefined) return;
+    try {
+      await github.postReview(record.prNumber, {
+        event: "COMMENT",
+        body: record.body,
+        commitId: record.head,
+      });
+    } catch (error) {
+      log(
+        `${record.partKey}: could not post the review on PR #${record.prNumber}: ${message(error)}`,
+      );
+      return;
+    }
+    delete records[partId];
+    if (Object.keys(records).length === 0) delete s.pendingReview;
+    await save();
+  }
+
+  async function retryPendingReviews(s: LoopState): Promise<void> {
+    for (const partId of Object.keys(s.pendingReview ?? {})) {
+      if (!live.has(partId)) await postPendingReview(s, partId);
     }
   }
 
@@ -1816,6 +1858,242 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       syncWatch();
     });
     // Paused while this round was starting: stop it like the others.
+    if (pausedNow) void pauseRuns();
+  }
+
+  /**
+   * Starts one review for a shipped part of an admitted parent in In Review that has no
+   * reviewer verdict at its PR head (MET-224, D-060). It runs before QA and holds a
+   * `max_concurrent` slot. A parent without a split record keeps running as before (D-050).
+   */
+  async function dispatchReviews(s: LoopState, report: TickReport): Promise<void> {
+    const max = config.limits.max_concurrent;
+    const shipped = s.shipped;
+    if (pausedNow || s.inFlight.length >= max || shipped === undefined) return;
+    const agentName = agentForRole(config, "reviewer");
+    if (agentName === undefined) {
+      log("no agent has role reviewer");
+      return;
+    }
+    const main = resolveAgentConfig(config, agentName);
+    const { ids: admitted, parents: holders } = admittedParents(await inFlightParents(s));
+    const needsInput = new Set(holders.filter((p) => p.needsInput).map((p) => p.id));
+    const parents = new Map<string, Issue>();
+    for (const [id, record] of Object.entries(shipped)) {
+      if (pausedNow || s.inFlight.length >= max) break;
+      if (live.has(id) || s.inFlight.some((entry) => entry.issueId === id)) continue;
+      if (s.pendingReview?.[id] !== undefined) continue;
+      let part: Issue;
+      try {
+        part = await linear.getIssue(id);
+      } catch (error) {
+        log(`${record.key}: could not read it for the review: ${message(error)}`);
+        continue;
+      }
+      if (part.state.toLowerCase() !== "in review") continue;
+      // Only a part of a parent the loop split and admitted gets a review (D-050, D-057).
+      let parentId: string | undefined;
+      for (const [candidate, parentRecord] of Object.entries(s.splits ?? {})) {
+        if (parentRecord.parts.includes(part.id)) {
+          parentId = candidate;
+          break;
+        }
+      }
+      if (parentId === undefined) continue;
+      if (!admitted.has(parentId) || needsInput.has(parentId)) continue;
+      let pr: PullRequest | undefined;
+      try {
+        pr = await github.findPrByHead(record.branch);
+      } catch (error) {
+        log(`${record.key}: could not read its PR for the review: ${message(error)}`);
+        continue;
+      }
+      if (pr === undefined) continue;
+      if (s.reviewerHeads?.[id]?.sha === pr.headRefOid) continue;
+      const budget = budgetMs(part.size, config.limits);
+      if (budget === undefined) continue;
+      let parent = parents.get(parentId);
+      if (parent === undefined) {
+        try {
+          parent = await linear.getIssue(parentId);
+          parents.set(parentId, parent);
+        } catch (error) {
+          log(`${record.key}: could not read the parent for the review: ${message(error)}`);
+          continue;
+        }
+      }
+      if (await overTokenBudget(s, parent)) continue;
+      const choice = chooseForRun(s, id, main);
+      const agent = choice.agent;
+      const adapter = agent && adapters[agent.harness];
+      if (agent === undefined || adapter === undefined) {
+        logNoHarness(part.key, id, choice.skipped);
+        continue;
+      }
+      noHarness.delete(id);
+      const linked: LinkedIssue = {
+        ...part,
+        parentId,
+        parentKey: parent.key,
+        blockers: [],
+      };
+      startReview(s, linked, parent, pr, agent, adapter, budget, report);
+    }
+  }
+
+  /**
+   * One review run (MET-224, D-060). It stays in flight until it posts and records its
+   * verdict, so a tick cannot start a second review of the same part. The part stays In
+   * Review: a review creates no Linear state and no sub-issue.
+   */
+  function startReview(
+    s: LoopState,
+    part: LinkedIssue,
+    parent: Issue,
+    pr: PullRequest,
+    agent: ResolvedAgentConfig,
+    adapter: HarnessAdapter,
+    budget: number,
+    report: TickReport,
+  ): void {
+    const entry: InFlightRun = {
+      issueId: part.id,
+      issueKey: part.key,
+      issueUrl: part.url,
+      role: "reviewer",
+      agent: agent.name,
+      worktree: "",
+      branch: pr.headRefName,
+      startedAt: clock.now().toISOString(),
+      pid,
+    };
+    s.inFlight.push(entry);
+    const abort = new AbortController();
+    let agentResult: RunResult | undefined;
+    const l: LiveRun = {
+      key: part.key,
+      entry,
+      abort,
+      done: Promise.resolve(),
+      title: part.title,
+      budgetMs: budget,
+      tokens: 0,
+      harness: agent.harness,
+    };
+    // The reviewer's run is the live run while it lasts, so a pause cancels it.
+    const reviewAdapter: HarnessAdapter = {
+      id: adapter.id,
+      start(task, cwd) {
+        const deferred = deferWhileHeld(adapter.id);
+        if (deferred !== undefined) return deferred;
+        const run = adapter.start(task, cwd);
+        l.run = run;
+        follow(l, run);
+        void run.result.then(
+          (result) => {
+            agentResult = result;
+            noteRun(adapter.id, result);
+          },
+          () => undefined,
+        );
+        const clear = (): void => {
+          if (l.run === run) delete l.run;
+        };
+        void run.result.then(clear, clear);
+        if (abort.signal.aborted) void run.cancel();
+        return run;
+      },
+    };
+    live.set(part.id, l);
+    syncWatch();
+    report.dispatched.push(part.key);
+    l.done = (async () => {
+      let result: ReviewRunResult;
+      try {
+        result = await runReview(
+          {
+            part,
+            parent,
+            pr,
+            budgetMs: budget,
+            maxTurns: maxTurnsFor("reviewer", part.size, config.limits),
+          },
+          {
+            github,
+            worktrees,
+            adapter: reviewAdapter,
+            agent,
+            signal: abort.signal,
+            onWorktree: (path) => {
+              entry.worktree = path;
+              void save();
+            },
+            ...(globalDir === undefined
+              ? {}
+              : {
+                  prepare: async (worktree, runId) =>
+                    (await syncWorktree({ repoDir, globalDir, worktree, runId, agent })).env,
+                }),
+            ...(memory ? { memory } : {}),
+            log,
+          },
+        );
+      } catch (error) {
+        result = { pr, tokens: emptyTokenUsage(), error: message(error) };
+      }
+      recordUsage(
+        s,
+        parent.id,
+        part.key,
+        agent.name,
+        result.tokens ?? emptyTokenUsage(),
+        result.turns,
+        result.usageUnknown === true,
+      );
+      if (agentResult !== undefined && agentResult.status === "ok") clearSwitch(part.id);
+      if (entry.worktree !== "") {
+        // A review checkout is never kept, even when the run failed (D-041).
+        await removeWithGuard(s, entry, entry.worktree, { force: true });
+      }
+      if (result.cancelled === true) return;
+      if (result.limited === true) {
+        log(`${part.key}: review limited, retrying next tick`);
+        return;
+      }
+      if (result.verdict !== undefined && result.body !== undefined) {
+        const head: ReviewerHead = {
+          sha: pr.headRefOid,
+          verdict: result.verdict.decision === "approve" ? "approved" : "changes_requested",
+          findings: result.verdict.findings,
+          at: clock.now().toISOString(),
+        };
+        s.reviewerHeads ??= {};
+        s.reviewerHeads[part.id] = head;
+        s.pendingReview ??= {};
+        s.pendingReview[part.id] = {
+          partId: part.id,
+          partKey: part.key,
+          parentId: parent.id,
+          prNumber: pr.number,
+          prUrl: pr.url,
+          head: pr.headRefOid,
+          body: result.body,
+        };
+        await save();
+        await postPendingReview(s, part.id);
+        log(`${part.key}: review ${head.verdict}, PR #${pr.number}`);
+      } else {
+        log(
+          `${part.key}: review failed (${oneLine(result.error ?? "no verdict")}), retrying next tick`,
+        );
+      }
+    })().finally(async () => {
+      s.inFlight = s.inFlight.filter((e) => e !== entry);
+      live.delete(part.id);
+      syncWatch();
+      await save();
+    });
+    // Paused while this review was starting: stop it like the others.
     if (pausedNow) void pauseRuns();
   }
 
@@ -2584,6 +2862,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     s.lastPollAt = clock.now().toISOString();
     // Before dispatch, so the retried verdict can still merge or send back this tick (D-058).
     await retryPendingQa(s);
+    // A review comment a failed post left behind goes out before any new run starts (MET-224).
+    await retryPendingReviews(s);
     // Before dispatch, so QA can start on the same tick: a shipped part Linear moved back to
     // In Progress is In Review again (MET-128). It runs while a self-update waits: it starts nothing.
     await repairShipped(s);
@@ -2648,6 +2928,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
     }
     const waiting = new Set<string>();
+    // The review of an In Review part starts before QA sees the same head (MET-224).
+    await dispatchReviews(s, report);
     await dispatchEligible(s, report, waiting);
     await splitReady(report, waiting);
     await dispatchEligible(s, report, waiting);
