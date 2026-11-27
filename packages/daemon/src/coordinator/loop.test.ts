@@ -4286,10 +4286,12 @@ test("a re-review checks only the saved findings and sends back only the open on
   assert.equal(part.state, "Ready", "the part is sent back");
   assert.equal(store.state.reviewFailures[part.id], 2, "the re-review counts one failure");
   assert.deepEqual(store.state.qaFeedback[part.id]?.failing, [
-    "R1 (api.ts:1) The cache grows without a limit.",
+    "R1 (api.ts:1) The cache grows without a limit. (not fixed: The cache is still unbounded.)",
   ]);
   assert.equal(store.state.reviewerHeads?.[part.id]?.sha, sha8, "the new head is saved");
-  assert.deepEqual(store.state.reviewerHeads?.[part.id]?.findings, [blocking]);
+  assert.deepEqual(store.state.reviewerHeads?.[part.id]?.findings, [
+    { ...blocking, evidence: "The cache is still unbounded." },
+  ]);
   assert.match(
     t.gh.reviews.at(-1)?.body ?? "",
     /R1 \(api\.ts:1\): not fixed: The cache is still unbounded\./,
@@ -4331,6 +4333,113 @@ test("a re-review with no readable delta falls back to the full review (MET-234,
   pending.finish("ok", undefined, JSON.stringify({ decision: "approve", findings: [] }));
   await t.loop.idle();
   assert.equal(t.gh.reviews.at(-1)?.commitId, "sha8");
+});
+
+test("an escalated review's moved head gets a full first review, not a delta (MET-234, D-061)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-rereview-escalated-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
+  await writeFile(join(repo, "README.md"), "hi\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+  const branch = "met-234-escalated";
+  git(repo, "checkout", "-q", "-b", branch);
+  await writeFile(join(repo, "api.ts"), "export const cache = [];\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "round 1");
+  const sha7 = git(repo, "rev-parse", "HEAD");
+  await writeFile(join(repo, "api.ts"), "export const cache = new Map();\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "round 2");
+  const sha8 = git(repo, "rev-parse", "HEAD");
+  const worktrees = createGitWorktrees({ repoDir: repo, root: join(root, "worktrees") });
+
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const part = linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: "In Review",
+    description: [
+      partMarker("backend"),
+      "",
+      "**Goal**",
+      "Ship the API.",
+      "",
+      "**Done when**",
+      "- [ ] Works",
+      "",
+      "**Size**: S",
+    ].join("\n"),
+  });
+  const state = emptyLoopState();
+  state.splits = {
+    [parent.id]: {
+      key: parent.key,
+      parts: [part.id],
+      qa: "qa-1",
+      at: "2026-11-23T10:00:00.000Z",
+    },
+  };
+  state.shipped = {
+    [part.id]: {
+      key: part.key,
+      branch,
+      prUrl: "https://github.test/o/r/pull/7",
+      at: "2026-11-23T10:01:00.000Z",
+    },
+  };
+  const blocking: ReviewFinding = {
+    file: "api.ts",
+    line: 1,
+    severity: "blocking",
+    kind: "code",
+    text: "The cache grows without a limit.",
+  };
+  state.reviewerHeads = {
+    [part.id]: {
+      sha: sha7,
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  // The escalation deleted the failure count; a human moved the part back to In Review.
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 1 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const t = setup({ config, linear, worktrees, store: memoryStore(state) });
+  const opened = t.gh.open(part.key, 7, branch);
+  opened.headRefOid = sha8;
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+  let pending = t.adapter.pending[0];
+  for (let i = 0; i < 200 && pending === undefined; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    pending = t.adapter.pending[0];
+  }
+  assert.ok(pending, "the review run started");
+  assert.match(pending.task.prompt, /## Diff/, "the full diff is used");
+  assert.match(pending.task.prompt, /src\/x\.ts/, "the full PR diff, not the old delta");
+  assert.doesNotMatch(pending.task.prompt, /## Delta since the last review/);
+  assert.doesNotMatch(
+    pending.task.prompt,
+    /## Earlier blocking findings/,
+    "the escalated head is not passed as since",
+  );
+
+  pending.finish("ok", undefined, JSON.stringify({ decision: "approve", findings: [] }));
+  await t.loop.idle();
 });
 
 test("a nit never sends a part back (MET-225)", async () => {
@@ -4534,11 +4643,13 @@ test("a new head after a review reads only the sha..head delta (MET-225, D-060)"
   fx.state.reviewerHeads = {
     [fx.part.id]: {
       sha: base,
-      verdict: "changes_requested",
+      verdict: "approved",
       findings: [earlier],
       at: "2026-11-27T10:00:00.000Z",
     },
   };
+  // An approved head that moved gets the delta review (D-060), not a re-review.
+  fx.state.reviewFailures = { [fx.part.id]: 1 };
   const worktrees: TaskWorktrees = {
     async create() {
       return { path: join(root, "builder"), branch: "b", resumed: false };
@@ -4595,11 +4706,13 @@ test("a recorded sha that is not an ancestor falls back to the full PR diff (MET
   fx.state.reviewerHeads = {
     [fx.part.id]: {
       sha: "not-in-this-repo",
-      verdict: "changes_requested",
+      verdict: "approved",
       findings: [earlier],
       at: "2026-11-27T10:00:00.000Z",
     },
   };
+  // An approved head that moved still gets the delta attempt and its full-diff fallback.
+  fx.state.reviewFailures = { [fx.part.id]: 1 };
   const worktrees: TaskWorktrees = {
     async create() {
       return { path: join(root, "builder"), branch: "b", resumed: false };

@@ -41,6 +41,8 @@ export interface ReviewFinding {
   text: string;
   /** The part Done-when item a new blocking finding breaks (a re-review only, D-061). */
   item?: string;
+  /** The new evidence that a carried saved finding is still not fixed (D-061). */
+  evidence?: string;
 }
 
 /** One saved finding's result in a re-review verdict (D-061). */
@@ -89,16 +91,90 @@ export const RE_REVIEW_VERDICT_SHAPE = `{
   ]
 }`;
 
-/** The paths a unified diff changes, taken from its `diff --git` and `+++` lines. */
+/** The paths of `diff --git` headers, quoted or not, and never a line of hunk content. */
 export function diffFiles(diff: string): Set<string> {
   const files = new Set<string>();
   for (const line of diff.split("\n")) {
-    const header = /^diff --git a\/(.+) b\/(.+)$/.exec(line);
-    if (header?.[2] !== undefined) files.add(header[2]);
-    const plus = /^\+\+\+ b\/(.+)$/.exec(line);
-    if (plus?.[1] !== undefined) files.add(plus[1]);
+    if (!line.startsWith("diff --git ")) continue;
+    const rest = line.slice("diff --git ".length);
+    const path = rest.startsWith('"') ? quotedGitPath(rest) : lastGitPath(rest);
+    if (path !== undefined) files.add(path);
   }
   return files;
+}
+
+/** The `b/` path from an unquoted `a/… b/…` header, taking the last ` b/`. */
+function lastGitPath(rest: string): string | undefined {
+  const at = rest.lastIndexOf(" b/");
+  if (at === -1) return undefined;
+  return rest.slice(at + 3);
+}
+
+/** The `b/` path from a Git-quoted `"a/…" "b/…"` header. */
+function quotedGitPath(rest: string): string | undefined {
+  const first = quotedToken(rest);
+  if (first === undefined) return undefined;
+  const after = rest.slice(first.end).trimStart();
+  if (!after.startsWith('"')) return after.startsWith("b/") ? after.slice(2) : undefined;
+  const second = quotedToken(after);
+  if (second === undefined) return undefined;
+  return unquoteGitPath(second.value);
+}
+
+/** One quoted token and where it ends in `text`. */
+function quotedToken(text: string): { value: string; end: number } | undefined {
+  if (!text.startsWith('"')) return undefined;
+  for (let i = 1; i < text.length; i++) {
+    if (text[i] === "\\") {
+      i += 1;
+      continue;
+    }
+    if (text[i] === '"') return { value: text.slice(0, i + 1), end: i + 1 };
+  }
+  return undefined;
+}
+
+/** Removes the `b/` prefix and Git's C-style quoting from a header path. */
+function unquoteGitPath(value: string): string {
+  if (!value.startsWith('"') || !value.endsWith('"')) {
+    return value.startsWith("b/") ? value.slice(2) : value;
+  }
+  const body = value.slice(1, -1);
+  let out = "";
+  for (let i = 0; i < body.length; i++) {
+    const char = body[i] as string;
+    if (char !== "\\") {
+      out += char;
+      continue;
+    }
+    const next = body[i + 1];
+    if (next === undefined) break;
+    const simple: Record<string, string> = {
+      a: "\x07",
+      b: "\b",
+      f: "\f",
+      n: "\n",
+      r: "\r",
+      t: "\t",
+      v: "\v",
+      "\\": "\\",
+      '"': '"',
+    };
+    if (simple[next] !== undefined) {
+      out += simple[next];
+      i += 1;
+      continue;
+    }
+    const octal = /^[0-7]{1,3}/.exec(body.slice(i + 1));
+    if (octal !== null) {
+      out += String.fromCharCode(Number.parseInt(octal[0], 8));
+      i += octal[0].length;
+      continue;
+    }
+    out += next;
+    i += 1;
+  }
+  return out.startsWith("b/") ? out.slice(2) : out;
 }
 
 type Obj = Record<string, unknown>;
@@ -327,7 +403,7 @@ export function parseReReviewVerdict(
   for (const [i, finding] of savedBlocking.entries()) {
     const result = byId.get(`R${i + 1}`);
     if (result?.fixed !== false) continue;
-    carried.push({ ...finding, severity: "blocking" });
+    carried.push({ ...finding, severity: "blocking", evidence: result.evidence });
   }
   const findings = [...carried, ...newFindings];
   const blocking = findings.filter((finding) => finding.severity === "blocking");
@@ -587,6 +663,24 @@ async function gitDelta(worktree: string, base: string, head: string): Promise<s
   }
 }
 
+/** The paths `base..head` changes, from Git's NUL-delimited name output (D-061). */
+export async function gitDeltaFiles(
+  worktree: string,
+  base: string,
+  head: string,
+): Promise<Set<string> | undefined> {
+  try {
+    const { stdout } = await runGit(
+      "git",
+      ["-C", worktree, "diff", "--name-only", "-z", `${base}..${head}`],
+      { maxBuffer: 16 * 1024 * 1024, timeout: 30_000 },
+    );
+    return new Set(stdout.split("\0").filter((path) => path !== ""));
+  } catch {
+    return undefined;
+  }
+}
+
 export interface ReviewCommentInput {
   part: LinkedIssue;
   parent: Issue;
@@ -665,6 +759,8 @@ export interface ReviewRunDeps {
   onWorktree?: (path: string) => void;
   /** Reads `base..head` from the checkout, or undefined when base is not an ancestor. */
   deltaDiff?: (worktree: string, base: string, head: string) => Promise<string | undefined>;
+  /** Reads the paths `base..head` changes, or undefined when Git cannot list them. */
+  deltaFiles?: (worktree: string, base: string, head: string) => Promise<Set<string> | undefined>;
   memory?: AgentMemory;
   /** Aborted by a pause: the reviewer is stopped and the checkout removed (D-041). */
   signal?: AbortSignal;
@@ -730,20 +826,29 @@ export async function runReview(
       throw new Error(`PR #${pr.number} changed while reading its diff`);
     }
     let delta: string | undefined;
-    if (input.since !== undefined && input.since.sha !== pr.headRefOid) {
+    const since = input.since;
+    if (since !== undefined && since.sha !== pr.headRefOid) {
       const read = deps.deltaDiff ?? gitDelta;
       try {
-        delta = await read(path, input.since.sha, pr.headRefOid);
+        delta = await read(path, since.sha, pr.headRefOid);
       } catch (error) {
         log(`${part.key}: could not read the review delta: ${message(error)}`);
       }
     }
-    const saved = (input.since?.findings ?? []).filter(
-      (finding) => finding.severity === "blocking",
-    );
-    const reReview = input.reReview === true && delta !== undefined;
+    const saved = (since?.findings ?? []).filter((finding) => finding.severity === "blocking");
+    const reReview = input.reReview === true && delta !== undefined && since !== undefined;
     if (input.reReview === true && delta === undefined) {
       log(`${part.key}: no review delta, full review`);
+    }
+    let deltaFiles: ReadonlySet<string> = new Set();
+    if (reReview && since !== undefined && delta !== undefined) {
+      const readFiles = deps.deltaFiles ?? gitDeltaFiles;
+      try {
+        deltaFiles = (await readFiles(path, since.sha, pr.headRefOid)) ?? diffFiles(delta);
+      } catch (error) {
+        log(`${part.key}: could not read the review delta files: ${message(error)}`);
+        deltaFiles = diffFiles(delta);
+      }
     }
     const prompt = reReview
       ? buildReReviewPrompt({
@@ -761,7 +866,7 @@ export async function runReview(
           pr,
           diff,
           ...(delta === undefined ? {} : { delta }),
-          ...(input.since === undefined ? {} : { earlierFindings: input.since.findings }),
+          ...(since === undefined ? {} : { earlierFindings: since.findings }),
           ...(deps.memory === undefined ? {} : { memory: deps.memory }),
         });
 
@@ -800,7 +905,7 @@ export async function runReview(
       };
     }
     const parsed = reReview
-      ? parseReReviewVerdict(reply.text, saved, part, delta as string, (line) =>
+      ? parseReReviewVerdict(reply.text, saved, part, deltaFiles, (line) =>
           log(`${part.key}: ${line}`),
         )
       : parseReviewVerdict(reply.text);
@@ -965,7 +1070,10 @@ function notJudgedReason(notJudged: ReviewNotJudged, error: string | undefined):
 export function reviewFindingList(findings: readonly ReviewFinding[]): string[] {
   return findings
     .filter((finding) => finding.severity === "blocking")
-    .map((finding, i) => `R${i + 1} (${finding.file}:${finding.line}) ${finding.text}`);
+    .map((finding, i) => {
+      const line = `R${i + 1} (${finding.file}:${finding.line}) ${finding.text}`;
+      return finding.evidence === undefined ? line : `${line} (not fixed: ${finding.evidence})`;
+    });
 }
 
 /**

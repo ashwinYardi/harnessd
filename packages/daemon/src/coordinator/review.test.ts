@@ -8,6 +8,7 @@ import {
   buildReReviewPrompt,
   buildReviewPrompt,
   buildReviewTask,
+  diffFiles,
   formatReviewComment,
   parseReReviewVerdict,
   parseReviewVerdict,
@@ -18,6 +19,7 @@ import {
   settleReview,
 } from "./review.ts";
 import { partMarker } from "./split.ts";
+import { parseLoopState } from "./state.ts";
 
 const agent: ResolvedAgentConfig = {
   name: "reviewer",
@@ -272,7 +274,11 @@ test("parseReReviewVerdict carries open saved findings and drops out-of-delta bl
   if (!parsed.ok) return;
   assert.deepEqual(parsed.verdict.saved, value.saved);
   assert.deepEqual(parsed.verdict.findings, [
-    savedFindings[1],
+    {
+      ...savedFindings[1],
+      severity: "blocking",
+      evidence: "The seam still sits in the wrong module.",
+    },
     {
       file: "src/new.ts",
       line: 3,
@@ -400,6 +406,117 @@ test("parseReReviewVerdict is strict about saved ids and the decision (MET-234, 
     bad({ decision: "changes_requested", saved: savedOk, findings: [{ ...finding, note: "x" }] }),
     /findings\[0\]: unknown key "note"/,
   );
+});
+
+test("the delta file scan reads headers, not hunk content, and unquotes paths (MET-234, D-061)", () => {
+  const delta = [
+    'diff --git "a/src/path with space.ts" "b/src/path with space.ts"',
+    "@@ -1 +1 @@",
+    "--- a/src/path with space.ts",
+    "+++ b/src/path with space.ts",
+    "+export const touched = true;",
+    "diff --git a/src/real.ts b/src/real.ts",
+    "@@ -1,2 +1,2 @@",
+    " const keep = true;",
+    "+const source = '++ b/untouched.ts';",
+    "+++ b/untouched.ts",
+  ].join("\n");
+  const files = diffFiles(delta);
+  assert.equal(files.has("src/path with space.ts"), true);
+  assert.equal(files.has("src/real.ts"), true);
+  assert.equal(files.has("untouched.ts"), false, "hunk content is not a changed file");
+
+  const parsed = parseReReviewVerdict(
+    JSON.stringify({
+      decision: "changes_requested",
+      saved: [
+        { id: "R1", fixed: true, evidence: "Fixed." },
+        { id: "R2", fixed: false, evidence: "Still open." },
+      ],
+      findings: [
+        {
+          file: "untouched.ts",
+          line: 1,
+          severity: "blocking",
+          kind: "code",
+          text: "Hunk content tricked the scan.",
+          item: "The review run works",
+        },
+      ],
+    }),
+    savedFindings,
+    doneWhen,
+    files,
+  );
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(
+    parsed.ok ? parsed.verdict.findings.filter((finding) => finding.severity === "nit") : [],
+    [
+      {
+        file: "untouched.ts",
+        line: 1,
+        severity: "nit",
+        kind: "code",
+        text: "Hunk content tricked the scan.",
+      },
+    ],
+    "a finding on an unchanged file is a nit",
+  );
+});
+
+test("a carried saved finding keeps its new evidence in the send-back and across a reload (MET-234, D-061)", async () => {
+  const evidence = "The seam still sits in the wrong module.";
+  const open: ReviewFinding = {
+    file: "src/api.ts",
+    line: 7,
+    severity: "blocking",
+    kind: "code",
+    text: "The seam sits in the wrong module.",
+    evidence,
+  };
+  const comments: string[] = [];
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment(_issueId, body) {
+        comments.push(body);
+        return "comment-1";
+      },
+      async moveTo() {},
+    },
+    notifier: { async notify() {} },
+    maxFailures: 3,
+  };
+  const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
+  const verdict = {
+    decision: "changes_requested" as const,
+    saved: [
+      { id: "R1", fixed: true, evidence: "Fixed." },
+      { id: "R2", fixed: false, evidence },
+    ],
+    findings: [open],
+  };
+
+  assert.equal(await settleReview(state, { part, parent, pr: pr(), verdict }, deps), "sent_back");
+  const line = `R1 (src/api.ts:7) The seam sits in the wrong module. (not fixed: ${evidence})`;
+  assert.deepEqual(state.qaFeedback[part.id]?.failing, [line]);
+  assert.match(comments[0] ?? "", new RegExp(`not fixed: ${evidence}`));
+
+  const reloaded = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      qaFeedback: state.qaFeedback,
+      reviewerHeads: {
+        [part.id]: {
+          sha: "sha223",
+          verdict: "changes_requested",
+          findings: [open],
+          at: "2026-11-27T10:00:00.000Z",
+        },
+      },
+    }),
+  );
+  assert.equal(reloaded.reviewerHeads?.[part.id]?.findings[0]?.evidence, evidence);
+  assert.deepEqual(reloaded.qaFeedback[part.id]?.failing, [line]);
 });
 
 test("a re-review settle sends back only the open blocking findings and counts one failure (MET-234, D-061)", async () => {
