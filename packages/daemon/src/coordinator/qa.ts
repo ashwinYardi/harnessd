@@ -928,6 +928,8 @@ export function buildQaPrompt(input: QaPromptInput): string {
         : [
             "- Read this part's brief, the decision IDs it names in the part body, the part's \"Done when\" and Verify sections, the diff, the CI result and the tests. Do not read docs/SPEC.md or every decision record.",
             `- Test each item against the running product. ${LIVE_CHECK[app.kind]} Another method is allowed when an item needs it.`,
+            "- When the running product cannot reach an item's behaviour (for example, the sandbox stays in setup because it has no secrets, so the loop never runs), judge the item from the tests and the diff. It passes when a test that ran proves it, and its evidence starts with `not reachable live: <reason>;` and then names the test.",
+            "- Such an item fails only when no test proves it, and then the case's `actual` says which test is missing. A case never asks for a secret, an account or a different sandbox.",
             "- Read the diff only to find what to test. Do not judge code style: the tests and CI guard the code, and a separate reviewer judges style.",
             "- Each item's evidence is the command you ran, the response you got, or the screenshot path. An item passes only with that evidence.",
             "- This worktree is a detached checkout of the PR head. Do not edit files, commit, push, comment or review: harnessd posts the review from your verdict.",
