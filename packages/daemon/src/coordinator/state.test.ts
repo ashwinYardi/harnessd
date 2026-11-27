@@ -626,3 +626,61 @@ test("pendingReview is optional, keeps a valid entry and drops a malformed one (
   await store.save(state);
   assert.deepEqual((await store.load()).pendingReview, state.pendingReview);
 });
+
+test("pendingReviewSettle is optional, keeps a valid entry and drops a malformed one (MET-230)", async () => {
+  assert.equal(
+    parseLoopState('{"inFlight":[]}').pendingReviewSettle,
+    undefined,
+    "old files still load",
+  );
+  const finding = {
+    file: "src/a.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  const valid = {
+    partId: "part-1",
+    partKey: "MET-41",
+    parentId: "parent-1",
+    prNumber: 7,
+    prUrl: "https://github.test/pull/7",
+    head: "sha7",
+    notJudged: "timeout",
+    error: "timed out",
+    done: ["comment on MET-165"],
+  };
+  const judged = {
+    partId: "part-1",
+    partKey: "MET-41",
+    parentId: "parent-1",
+    prNumber: 7,
+    prUrl: "https://github.test/pull/7",
+    head: "sha7",
+    verdict: "changes_requested",
+    findings: [finding],
+    done: ["comment on MET-41", "re-queue MET-41"],
+  };
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      pendingReviewSettle: {
+        a: valid,
+        b: { ...valid, partId: "" },
+        c: { ...valid, prNumber: 0 },
+        d: { ...valid, head: "" },
+        e: { ...valid, notJudged: "perhaps" },
+        f: { ...valid, done: ["comment on MET-165", 3] },
+        g: judged,
+      },
+    }),
+  );
+  assert.deepEqual(parsed.pendingReviewSettle, { a: valid, g: judged });
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.pendingReviewSettle = parsed.pendingReviewSettle ?? {};
+  await store.save(state);
+  assert.deepEqual((await store.load()).pendingReviewSettle, state.pendingReviewSettle);
+});

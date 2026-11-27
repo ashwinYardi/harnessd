@@ -3424,7 +3424,7 @@ test("an unposted legacy review is validated before its comment is posted (MET-2
   );
 });
 
-test("a network error in a not-judged escalation does not lose the rest of it (MET-230)", async () => {
+test("a timed-out part move in a not-judged escalation is retried to Needs input (MET-230)", async () => {
   const fx = reviewFixture({ withQa: false });
   const store = memoryStore(fx.state);
   const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
@@ -3440,6 +3440,7 @@ test("a network error in a not-judged escalation does not lose the rest of it (M
   fx.linear.moveTo = async (id, state) => {
     if (down && id === fx.part.id && state === "Needs input") {
       down = false;
+      // The response times out before the move takes effect.
       throw new Error("fetch failed");
     }
     return moveTo(id, state);
@@ -3450,11 +3451,32 @@ test("a network error in a not-judged escalation does not lose the rest of it (M
   await t.loop.idle();
 
   assert.equal(fx.parent.state, "Needs input");
+  assert.equal(fx.part.state, "In Review", "the part move did not land");
   assert.equal(store.state.reviewFailures[fx.part.id], undefined, "no review failure counted");
+  const pending = store.state.pendingReviewSettle?.[fx.part.id];
+  assert.ok(pending, "the unfinished escalation is saved");
+  assert.deepEqual(pending?.done, [
+    `comment on ${fx.parent.key}`,
+    `move ${fx.parent.key} to Needs input`,
+  ]);
+  assert.equal(
+    t.pings.filter((ping) => ping.includes("review not judged twice")).length,
+    0,
+    "the notice waits for the part move",
+  );
+
+  await t.loop.tick();
+
+  assert.equal(fx.part.state, "Needs input", "the next tick finishes the part move");
+  assert.equal(
+    store.state.pendingReviewSettle?.[fx.part.id],
+    undefined,
+    "the record goes once every step is done",
+  );
   assert.equal(
     t.pings.filter((ping) => ping.includes("review not judged twice")).length,
     1,
-    "the notice still goes out after the failed move",
+    "the notice goes out after the retried move",
   );
 });
 
