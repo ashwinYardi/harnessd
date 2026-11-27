@@ -4789,6 +4789,209 @@ test("a shipped part a human moved to Ready drops its record and is not moved", 
   assert.ok(!t.logs.some((l) => l.includes("after its PR opened")));
 });
 
+// --- the startup orphan sweep (MET-214) ------------------------------------
+
+/** A split parent with its part and QA sub-issues, as a restart finds them in `loop.json`. */
+function orphanFixture(linear: FakeLinear, states: { part?: string; qa?: string } = {}) {
+  const parent = linear.add({ title: "Orphaned parent", state: "In Progress" });
+  const part = linear.add({
+    title: "The part",
+    parentId: parent.id,
+    state: states.part ?? "In Review",
+    description: `${partMarker("backend")}\n**Size**: S`,
+  });
+  const qa = linear.add({
+    title: `QA: ${parent.title}`,
+    parentId: parent.id,
+    state: states.qa ?? "In Progress",
+  });
+  linear.relations.push({ blocker: part.id, blocked: qa.id });
+  const state = emptyLoopState();
+  state.splits = {
+    [parent.id]: { key: parent.key, parts: [part.id], qa: qa.id, at: "2026-11-23T00:00:00.000Z" },
+  };
+  return { parent, part, qa, state };
+}
+
+test("an orphaned QA ticket in In Progress goes back to Ready on the first tick (MET-214)", async () => {
+  const linear = new FakeLinear();
+  const { parent, part, qa, state } = orphanFixture(linear);
+  const t = setup({ linear, store: memoryStore(state) });
+
+  await t.loop.tick();
+
+  assert.equal(qa.state, "Ready");
+  assert.equal(part.state, "In Review", "the part is not touched");
+  assert.equal(parent.state, "In Progress", "a split parent is never moved");
+  const line = `${qa.key}: In Progress with no run after restart, back to Ready`;
+  assert.deepEqual(
+    t.logs.filter((l) => l === line),
+    [line],
+    "one line, once",
+  );
+  assert.deepEqual(
+    t.linear.moves.filter((m) => m.key === qa.key),
+    [{ key: qa.key, state: "Ready" }],
+  );
+
+  // The sweep is a first-tick check: a ticket left In Progress later is not moved.
+  qa.state = "In Progress";
+  await t.loop.tick();
+  assert.equal(qa.state, "In Progress", "the sweep does not run again");
+  assert.equal(t.logs.filter((l) => l === line).length, 1);
+});
+
+test("an orphaned part ticket in In Progress goes back to Ready too (MET-214)", async () => {
+  const linear = new FakeLinear();
+  const { part, qa, state } = orphanFixture(linear, { part: "In Progress", qa: "In Review" });
+  const blocker = linear.add({ title: "Other work", state: "In Progress" });
+  linear.relations.push({ blocker: blocker.id, blocked: part.id });
+  const t = setup({ linear, store: memoryStore(state) });
+
+  await t.loop.tick();
+
+  assert.equal(part.state, "Ready");
+  assert.equal(qa.state, "In Review", "the QA ticket is not touched");
+  const line = `${part.key}: In Progress with no run after restart, back to Ready`;
+  assert.deepEqual(
+    t.logs.filter((l) => l === line),
+    [line],
+    "one line, once",
+  );
+});
+
+test("a ticket with an in-flight entry or a pending QA verdict is not swept (MET-214)", async () => {
+  const linear = new FakeLinear();
+  const { qa, state } = orphanFixture(linear);
+  state.inFlight.push({
+    issueId: qa.id,
+    issueKey: qa.key,
+    role: "qa",
+    agent: "qa",
+    worktree: "",
+    branch: "met-orphan-qa",
+    startedAt: "2026-11-23T00:00:00.000Z",
+    pid: 1,
+  });
+  const moveTo = linear.moveTo.bind(linear);
+  let moves = 0;
+  linear.moveTo = async (id, name) => {
+    if (id === qa.id && name === "Ready") {
+      moves += 1;
+      throw new Error("fetch failed");
+    }
+    return moveTo(id, name);
+  };
+  const t = setup({ linear, store: memoryStore(state) });
+
+  await t.loop.tick();
+
+  assert.equal(qa.state, "In Progress", "the re-queue failed, and the sweep skips the run");
+  assert.equal(moves, 1, "only the re-queue tried to move it");
+  assert.ok(!t.logs.some((l) => l.includes("no run after restart")));
+
+  // A verdict waiting in `pendingQa` keeps its QA ticket in place until it settles (D-058).
+  const verdict = new FakeLinear();
+  const pending = orphanFixture(verdict);
+  pending.state.pendingQa = {
+    [pending.qa.id]: {
+      parentId: pending.parent.id,
+      qaKey: pending.qa.key,
+      reviews: [
+        {
+          partId: pending.part.id,
+          partKey: pending.part.key,
+          decision: "approve",
+          failing: [],
+          prNumber: 7,
+          head: "sha7",
+          event: "APPROVE",
+          body: "Looks good.",
+          done: false,
+        },
+      ],
+      done: [],
+    },
+  };
+  const gh = fakeGitHub();
+  const down: GitHub = {
+    ...gh.github,
+    async postReview() {
+      throw new Error("read ECONNRESET");
+    },
+  };
+  const waitingStore = memoryStore(pending.state);
+  const waiting = setup({
+    linear: verdict,
+    store: waitingStore,
+    extra: { github: down },
+  });
+
+  await waiting.loop.tick();
+
+  assert.equal(pending.qa.state, "In Progress", "the verdict is still waiting");
+  assert.ok(waitingStore.state.pendingQa?.[pending.qa.id]);
+  assert.ok(!waiting.logs.some((l) => l.includes("no run after restart")));
+});
+
+test("a part with a shipped record is not swept while the state repair cannot read its PR (MET-214)", async () => {
+  const linear = new FakeLinear();
+  const { part, qa, state } = orphanFixture(linear, { part: "In Progress", qa: "In Review" });
+  state.shipped = {
+    [part.id]: {
+      key: part.key,
+      branch: "met-orphan-the-part",
+      prUrl: "https://github.test/o/r/pull/7",
+      at: "2026-11-23T00:00:00.000Z",
+    },
+  };
+  const gh = fakeGitHub();
+  const github: GitHub = {
+    ...gh.github,
+    async findPrByHead() {
+      throw new Error("fetch failed");
+    },
+  };
+  const store = memoryStore(state);
+  const t = setup({ linear, store, extra: { github } });
+
+  await t.loop.tick();
+
+  assert.equal(part.state, "In Progress", "the shipped record keeps it out of the sweep");
+  assert.ok(store.state.shipped?.[part.id], "the record stays for the next state check");
+  assert.equal(qa.state, "In Review");
+  assert.ok(!t.logs.some((l) => l.includes("no run after restart")));
+});
+
+test("a failed orphan move is logged and retried on the next tick until it succeeds (MET-214)", async () => {
+  const linear = new FakeLinear();
+  const { qa, state } = orphanFixture(linear);
+  const moveTo = linear.moveTo.bind(linear);
+  let down = true;
+  linear.moveTo = async (id, name) => {
+    if (down && id === qa.id && name === "Ready") throw new Error("fetch failed");
+    return moveTo(id, name);
+  };
+  const t = setup({ linear, store: memoryStore(state) });
+
+  await t.loop.tick();
+
+  assert.equal(qa.state, "In Progress");
+  assert.ok(t.logs.includes(`could not move ${qa.key} to Ready: fetch failed`));
+  assert.ok(!t.logs.some((l) => l.includes("no run after restart")));
+
+  down = false;
+  await t.loop.tick();
+
+  assert.equal(qa.state, "Ready");
+  const line = `${qa.key}: In Progress with no run after restart, back to Ready`;
+  assert.deepEqual(
+    t.logs.filter((l) => l === line),
+    [line],
+    "logged once, when the move succeeds",
+  );
+});
+
 test("a run with no changes fails as no changes and does not go to In Review", async () => {
   const r = await shipRepo();
   const linear = new FakeLinear();

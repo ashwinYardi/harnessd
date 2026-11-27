@@ -22,9 +22,10 @@ harnessd run [dir] [--once] [--interval <seconds>] [--permission-mode <mode>]
 3. **Release holds.** A usage-limit hold whose time has passed ends (see Usage limits).
 4. **Retry pending QA.** Post unfinished GitHub reviews and finish the Linear writes for verdicts in `pendingQa`. Each retry skips completed writes.
 5. **State repair.** A shipped part that Linear moved back to In Progress goes to In Review again, before dispatch (see Ship). A split record whose parent is Done or Canceled is dropped (see Split).
-6. **Merge.** Every QA approval recorded in `loop.json` goes one step through the merge gate (see Merge).
-7. **Dispatch** eligible sub-issues of admitted parents, then **split** the Ready issues the queue admits, then **dispatch** again.
-8. **Save** `loop.json`.
+6. **Orphan sweep.** The first tick after the daemon starts moves each part or QA sub-issue listed in a split record that Linear shows In Progress with no run in flight, no `pendingQa` record and no `shipped` record back to Ready, with one line: `<key>: In Progress with no run after restart, back to Ready` (MET-214, D-039, D-057, D-058). A split parent is never moved, because it is In Progress by design. A failed move is logged and kept in memory, and later ticks retry it until it succeeds; the sweep itself does not run again.
+7. **Merge.** Every QA approval recorded in `loop.json` goes one step through the merge gate (see Merge).
+8. **Dispatch** eligible sub-issues of admitted parents, then **split** the Ready issues the queue admits, then **dispatch** again.
+9. **Save** `loop.json`.
 
 The Linear client drops its connection pool after a network-class request error. A tick with any Linear network-class error advances an in-memory streak, and a clean tick clears it. On the third consecutive failed tick the loop resets the pool again, logs `Linear unreachable for 3 ticks, connections reset`, and clears the streak (D-058).
 
