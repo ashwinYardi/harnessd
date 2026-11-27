@@ -1048,18 +1048,42 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             pendingHead = true;
             break;
           }
-          if (current !== undefined && current.headRefOid === review.head) continue;
-          const moved =
-            current === undefined
-              ? "closed or unreadable"
-              : `moved from ${review.head.slice(0, 7)} to ${current.headRefOid.slice(0, 7)}`;
-          log(
-            `${record.qaKey ?? qaId}: ${review.partKey} head ${moved} before the pending QA retry, re-queued`,
-          );
+          if (
+            current !== undefined &&
+            current.number === review.prNumber &&
+            current.headRefOid === review.head
+          ) {
+            continue;
+          }
+          // The verdict names one PR at one head. A saved PR that closed, even when a new PR
+          // carries the same sha, must not receive it (MET-233).
+          let what: string;
+          let reason: string;
+          if (current === undefined) {
+            what = `PR #${review.prNumber} closed before the pending QA retry`;
+            reason = what;
+          } else if (current.number !== review.prNumber) {
+            what = `PR #${review.prNumber} closed before the pending QA retry (PR #${current.number} is open now)`;
+            reason = `PR #${review.prNumber} closed before the pending QA retry`;
+          } else {
+            const moved = `moved from ${review.head.slice(0, 7)} to ${current.headRefOid.slice(0, 7)}`;
+            what = `head ${moved} before the pending QA retry`;
+            reason = `the PR head ${moved} before the pending QA retry`;
+          }
+          log(`${record.qaKey ?? qaId}: ${review.partKey} ${what}, re-queued`);
           review.decision = "error";
           review.stale = true;
           review.done = true;
-          review.error = `the PR head ${moved} before the pending QA retry`;
+          review.error = reason;
+          // A saved not-judged marker would drive the D-052 count on a stale verdict and
+          // escalate the part before the re-queue (MET-233, D-052).
+          delete review.notJudged;
+          // The live round recorded its verdict in reviewedHeads before the pending post and
+          // settle finished. A discarded verdict must not leave that head looking approved,
+          // or dispatch would skip QA when the PR returns to it (MET-233).
+          if (s.reviewedHeads?.[review.partId]?.sha === review.head) {
+            delete s.reviewedHeads[review.partId];
+          }
           changed = true;
         }
         if (changed) await save();

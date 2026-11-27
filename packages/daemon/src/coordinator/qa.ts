@@ -2105,7 +2105,8 @@ export async function settleQa(
       }
     | undefined;
   for (const r of result.reviews) {
-    if (r.notJudged === undefined) continue;
+    // A stale verdict is never settled, so its saved marker must not drive the count (MET-233).
+    if (r.notJudged === undefined || r.stale === true) continue;
     const next = nextNotJudged(r.part.id, r.pr?.headRefOid ?? "", notJudgedReason(r));
     const entry = { part: r.part, ...(r.pr === undefined ? {} : { pr: r.pr }), counted: next };
     counted.push(entry);

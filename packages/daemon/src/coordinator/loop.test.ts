@@ -3341,6 +3341,9 @@ function pendingQaApproval(fx: ReturnType<typeof reviewFixture>) {
     },
   };
   fx.state.qaFailures = { [fx.parent.id]: 1 };
+  // The live round records its approval before its pending post and settle finish; the retry
+  // must clear it when it discards the verdict (MET-233).
+  fx.state.reviewedHeads = { [fx.part.id]: { sha: "sha7", verdict: "approved" } };
   fx.state.pendingQa = {
     [qa.id]: {
       parentId: fx.parent.id,
@@ -3383,6 +3386,86 @@ test("a pending QA retry drops a verdict whose PR head moved before it posts (ME
   assert.deepEqual(store.state.qaFailures, { [fx.parent.id]: 1 }, "the count is unchanged");
   assert.equal(store.state.pendingQa, undefined, "the settled record is dropped");
   assert.deepEqual(store.state.merges, [], "nothing is pinned to the stale head");
+  assert.equal(
+    store.state.reviewedHeads?.[fx.part.id],
+    undefined,
+    "the discarded approval no longer marks the head as QA-approved",
+  );
+  assert.ok(
+    t.logs.some((line) => line.includes("moved from sha7 to sha8")),
+    "the moved head is logged",
+  );
+});
+
+test("a pending QA retry never posts on a saved PR that closed (MET-233)", async () => {
+  const fx = reviewFixture();
+  const qa = pendingQaApproval(fx);
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  // PR #7 closed, and PR #8 now carries the issue at the same sha.
+  t.gh.open(fx.part.key, 8);
+  const pr = t.gh.prs[fx.part.key];
+  assert.ok(pr);
+  pr.headRefOid = "sha7";
+  qa.state = "In Progress";
+
+  await t.loop.tick();
+
+  assert.deepEqual(t.gh.reviews, [], "the verdict never goes to the closed PR #7");
+  assert.ok(
+    t.linear.moves.some((move) => move.key === qa.key && move.state === "Ready"),
+    "QA is re-queued before it runs again on the unchanged sha",
+  );
+  assert.equal(store.state.pendingQa, undefined, "the record is dropped");
+  assert.ok(
+    t.logs.some((line) => line.includes("PR #7 closed")),
+    "the closed PR is logged",
+  );
+});
+
+test("a stale pending verdict ignores its saved not-judged marker (MET-233)", async () => {
+  const linear = new FakeLinear();
+  let failComment = false;
+  const comment = linear.comment.bind(linear);
+  linear.comment = async (id, body) => {
+    if (failComment) throw new Error("fetch failed");
+    return comment(id, body);
+  };
+  const t = setup({ config: ONE_AT_A_TIME, linear });
+  const { parent, backend, qa } = qaFixture(t);
+  trackShippedPart(t, { parent, backend, qa });
+  t.gh.open(backend.key, 7);
+
+  // One not-judged QA run on sha7: the next one on the same head would escalate (D-052).
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  (await nextRun(t.adapter)).finish("timeout", "budget of 1000ms exceeded");
+  await t.loop.idle();
+  assert.equal(qa.state, "Ready", "the not-judged round re-queues");
+
+  // The second run is not judged too, and its settle fails a Linear write, so the record
+  // keeps the not-judged marker with no count committed.
+  failComment = true;
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  (await nextRun(t.adapter, 2)).finish("timeout", "budget of 1000ms exceeded");
+  await t.loop.idle();
+  assert.equal(
+    t.memory.state.pendingQa?.[qa.id]?.reviews[0]?.notJudged,
+    "timeout",
+    "the marker is saved with the pending verdict",
+  );
+
+  // The head moves before the retry, so the saved verdict is stale, not a second timeout.
+  failComment = false;
+  const pr = t.gh.prs[backend.key];
+  assert.ok(pr);
+  pr.headRefOid = "sha8";
+
+  await t.loop.tick();
+
+  assert.equal(qa.state, "Ready", "a stale verdict re-queues instead of escalating");
+  assert.equal(parent.state, "In Progress", "the parent is not escalated");
+  assert.deepEqual(t.pings, [], "no notice is sent");
+  assert.equal(t.memory.state.pendingQa, undefined, "the record is dropped");
   assert.ok(
     t.logs.some((line) => line.includes("moved from sha7 to sha8")),
     "the moved head is logged",
