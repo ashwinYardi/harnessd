@@ -87,16 +87,16 @@ When the split is done, the parent moves to In Progress.
 
 **Split record (MET-154).** After `splitIssue` returns, and before the move to In Progress, the loop writes the parent id, its part ids, the QA id and the time to `splits` in `loop.json`. It saves at once, not at the end of the tick. Linear reads can lag a few seconds behind writes, so this record guards the next tick:
 - `splitReady` reads the children once. If any recorded part id or the QA id is missing, the read is stale. It skips the parent with one line: `<key>: already split at <time>, Linear read is stale; skipped`.
-- If the read holds every recorded id and every recorded work part is Canceled, the loop drops the record and grills the parent again.
+- If the read holds every recorded id and no recorded work part is live, that is, every one is Canceled or Done, the loop drops the record and grills the parent again. The QA state is not part of this check. Before that grill it logs one line naming the marked children it leaves alone, in Linear child order, QA included: `<key>: old parts not reused: <key>, <key>`. It logs nothing when the parent has no marked children.
 - Otherwise it goes on to the split, which reuses the record's live parts and QA, and does not grill again.
 
-A re-split keeps the record's first `at` and only updates its parts and QA ids; a new record, after the owner canceled every part, gets a new time (MET-210).
+A re-split keeps the record's first `at` and only updates its parts and QA ids; a new record, after no recorded work part was live, gets a new time (MET-210).
 
 **Re-read before the create (MET-154).** After the grill and plan, the loop reads the children again and builds the reuse set from that read: a live child whose marker matches a planned part and that was not in the child list before the grill. It passes that set to `splitIssue`, not a list matched by marker alone. So a part that shows up in the fresh read is reused, never created twice; an older plan's child is left alone. A Canceled or Done child is never reused.
 
 **Dropping the record (MET-154).** Two rules, and no time window:
 - An early-tick sweep reads each recorded parent. It drops the record when the state is Done, Canceled or Cancelled, ignoring case. A read error logs one line and keeps the record.
-- The owner canceled every recorded work part and moved the parent back to Ready on purpose. The record is dropped and the parent is grilled again.
+- The owner canceled or finished every recorded work part and moved the parent back to Ready on purpose. The record is dropped and the parent is grilled again. The old marked children are left alone, and the one `<key>: old parts not reused: ...` line names them before the grill.
 
 ## Sizes and budgets
 - S runs for `limits.budget_minutes.S` (30 min), M for `limits.budget_minutes.M` (2 h). An issue with no size counts as M.
@@ -104,7 +104,7 @@ A re-split keeps the record's first `at` and only updates its parts and QA ids; 
 
 ## Dispatch
 - `limits.max_concurrent` runs at once (default 1, D-040). Parallel parts of one parent touched the same files, and each merge sent the next PR back for another build and QA round, so the default is serial. A user may still set up to 3 (D-014 cap).
-- At most `limits.max_parents` parents are in flight, and only the admitted parents' parts and QA dispatch (see Split, D-050). Admission is by split record time, oldest first, so parts of the other in-flight parents wait and log `<part key> waits, <in-flight key> is in flight`. A part or QA of a parent in Needs input does not start even when the parent is admitted: it keeps its place with no move and no comment, and logs `<part key> waits, <parent> needs input` (D-057). A part whose parent has no split record was not split by the loop and runs as before.
+- At most `limits.max_parents` parents are in flight, and only the admitted parents' parts and QA dispatch (see Split, D-050). Admission is by split record time, oldest first, so parts of the other in-flight parents wait and log `<part key> waits, <in-flight key> is in flight`. A part or QA of a parent in Needs input does not start even when the parent is admitted: it keeps its place with no move and no comment, and logs `<part key> waits, <parent> needs input` (D-057). A marked child whose parent has a split record that does not list its id belongs to an older plan: dispatch leaves it alone, with no move and no comment (MET-217). A part whose parent has no split record was not split by the loop and runs as before. A per-part QA round reviews only the parts the record lists.
 - A part is eligible when it is in Ready and nothing unfinished blocks it. With serial parts, part 2's blocker is part 1 until part 1 is Done (merged).
 - A QA sub-issue is eligible when a part of its parent is In Review at a head QA has not approved (see QA).
 - Each run:
