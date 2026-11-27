@@ -82,17 +82,17 @@ Sub-issues are Linear children of the parent, in the same team and project.
 When the split is done, the parent moves to In Progress.
 
 **Idempotent.** The first line of each sub-issue body is a plain-text marker (Linear may drop HTML comments), such as `harnessd part: backend`, `backend-2` or `qa`.
-- Before creating anything, the split reads the parent's children and reuses any that already carry a marker.
-- If a split was interrupted, the next tick finishes it without grilling again.
+- The split reuses a child only from the explicit reuse set the caller passes, and only when that child is not Canceled or Done. With a split record, the set is the record's part and QA ids; without one, it is this tick's plan: a live child whose marker matches a planned part and that was not in the child list before the grill. Every other child is left alone and is never reused.
+- If a split was interrupted, the next tick finds the record, reuses its live children and finishes the split without grilling again.
 
 **Split record (MET-154).** After `splitIssue` returns, and before the move to In Progress, the loop writes the parent id, its part ids, the QA id and the time to `splits` in `loop.json`. It saves at once, not at the end of the tick. Linear reads can lag a few seconds behind writes, so this record guards the next tick:
 - `splitReady` reads the children once. If any recorded part id or the QA id is missing, the read is stale. It skips the parent with one line: `<key>: already split at <time>, Linear read is stale; skipped`.
 - If the read holds every recorded id and every recorded work part is Canceled, the loop drops the record and grills the parent again.
-- Otherwise it goes on to the split, which finds the live parts and does not grill again.
+- Otherwise it goes on to the split, which reuses the record's live parts and QA, and does not grill again.
 
 A re-split keeps the record's first `at` and only updates its parts and QA ids; a new record, after the owner canceled every part, gets a new time (MET-210).
 
-**Re-read before the create (MET-154).** After the grill and plan, the loop reads the children again and passes that fresh list to `splitIssue`, not the list from before the grill. A part whose marker is in the fresh read is reused, never created twice. Canceled children are filtered out before the "has work parts" check and before `splitIssue`.
+**Re-read before the create (MET-154).** After the grill and plan, the loop reads the children again and builds the reuse set from that read: a live child whose marker matches a planned part and that was not in the child list before the grill. It passes that set to `splitIssue`, not a list matched by marker alone. So a part that shows up in the fresh read is reused, never created twice; an older plan's child is left alone. A Canceled or Done child is never reused.
 
 **Dropping the record (MET-154).** Two rules, and no time window:
 - An early-tick sweep reads each recorded parent. It drops the record when the state is Done, Canceled or Cancelled, ignoring case. A read error logs one line and keeps the record.

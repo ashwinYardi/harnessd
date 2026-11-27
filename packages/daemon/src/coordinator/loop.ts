@@ -79,9 +79,11 @@ import { type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import {
   formatSplitComment,
   isCanceledState,
+  isLiveChild,
   isWorkPart,
   noLiveQaWarning,
   PART_MARKER_PREFIX,
+  partIds,
   readPartMarker,
   type SubIssueRole,
   splitIssue,
@@ -1896,7 +1898,12 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
 
   // --- grill and split ----------------------------------------------------
 
-  async function splitOne(issue: Issue, context: GrillContext, report: TickReport): Promise<void> {
+  async function splitOne(
+    issue: Issue,
+    context: GrillContext,
+    report: TickReport,
+    shouldGrill: boolean,
+  ): Promise<void> {
     const name = agentForRole(config, "coordinator");
     if (name === undefined) {
       log("no agent has role coordinator");
@@ -1905,6 +1912,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     const main = resolveAgentConfig(config, name);
     const s = state;
     if (s === undefined) return;
+    const record = s.splits?.[issue.id];
     // The next coordinator harness in the fixed order (D-048).
     const choice = chooseForRun(s, issue.id, main);
     const agent = choice.agent;
@@ -1918,14 +1926,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     if (switched !== undefined) log(switched);
     const adapter = tracked(harness);
 
-    const children = (await linear.listChildren(issue.id)).filter(
-      (child) => !isCanceledState(child.state),
-    );
+    // The children before this tick's grill. A marked child that was already here is an old
+    // part, even when its marker matches the new plan (MET-216).
+    const before = shouldGrill ? await linear.listChildren(issue.id) : [];
+    const beforeIds = new Set(before.map((child) => child.id));
     let plan: SplitPlan = { parts: [], source: "model" };
     /** The grill's calls, rendered into each new part body (D-044). */
     let grillCalls: Call[] = [];
-    // Parts already exist: an earlier tick grilled and split, then stopped early. Finish it.
-    if (!children.some(isWorkPart)) {
+    // splitReady's grill flag, not the presence of marked children, decides the path. A parent
+    // with a split record finishes its interrupted split without grilling again (MET-154).
+    if (shouldGrill) {
       const grill = await grillIssue(issue, {
         adapter,
         agent,
@@ -2039,12 +2049,26 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       }
     }
 
-    // Read the children again after the grill and plan: a part created in between is reused,
-    // never duplicated. Canceled parts do not count as existing work.
-    const fresh = (await linear.listChildren(issue.id)).filter(
-      (child) => !isCanceledState(child.state),
-    );
-    const result = await splitIssue(issue, plan.parts, linear, fresh, grillCalls);
+    // Read the children again after the grill and plan, then pass only the explicit reuse set.
+    // A record names the current split; without one, this tick's plan does. Every other child
+    // is left alone, never reused (MET-216).
+    const fresh = (await linear.listChildren(issue.id)).filter(isLiveChild);
+    let reuse: LinkedIssue[];
+    if (record !== undefined) {
+      // The record's own order is the plan order the split was built with (D-049).
+      const byId = new Map(fresh.map((child) => [child.id, child]));
+      reuse = [...record.parts.map((id) => byId.get(id)), byId.get(record.qa)].filter(
+        (child): child is LinkedIssue => child !== undefined,
+      );
+    } else {
+      const markers = new Set(partIds(plan.parts));
+      reuse = fresh.filter((child) => {
+        if (beforeIds.has(child.id)) return false;
+        const marker = readPartMarker(child.description);
+        return marker !== undefined && marker.role !== "qa" && markers.has(marker.id);
+      });
+    }
+    const result = await splitIssue(issue, plan.parts, linear, reuse, grillCalls);
     if (state !== undefined) {
       state.splits ??= {};
       // A re-split keeps the record's first time: admission is oldest first (D-050). Only a
@@ -2253,7 +2277,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         started++;
       }
       try {
-        await splitOne(item.issue, context, report);
+        await splitOne(item.issue, context, report, item.grill);
       } catch (error) {
         log(`${item.issue.key}: split failed, retrying next tick: ${message(error)}`);
       }
