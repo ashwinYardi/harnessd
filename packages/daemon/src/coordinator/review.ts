@@ -364,7 +364,7 @@ export function parseReReviewVerdict(
       }
       item = raw.item.trim();
     }
-    const file = raw.file.trim();
+    const file = raw.file;
     const text = raw.text.trim();
     if (raw.severity === "nit") {
       if (item !== undefined) {
@@ -836,18 +836,27 @@ export async function runReview(
       }
     }
     const saved = (since?.findings ?? []).filter((finding) => finding.severity === "blocking");
-    const reReview = input.reReview === true && delta !== undefined && since !== undefined;
+    let reReview = input.reReview === true && delta !== undefined && since !== undefined;
     if (input.reReview === true && delta === undefined) {
       log(`${part.key}: no review delta, full review`);
     }
     let deltaFiles: ReadonlySet<string> = new Set();
     if (reReview && since !== undefined && delta !== undefined) {
       const readFiles = deps.deltaFiles ?? gitDeltaFiles;
+      let files: Set<string> | undefined;
       try {
-        deltaFiles = (await readFiles(path, since.sha, pr.headRefOid)) ?? diffFiles(delta);
-      } catch (error) {
-        log(`${part.key}: could not read the review delta files: ${message(error)}`);
-        deltaFiles = diffFiles(delta);
+        files = await readFiles(path, since.sha, pr.headRefOid);
+      } catch {
+        files = undefined;
+      }
+      if (files === undefined) {
+        // The change names are authoritative. Without them, a hunk-only fallback could let an
+        // unchanged file's finding stay blocking, so the run reads the full review instead.
+        reReview = false;
+        delta = undefined;
+        log(`${part.key}: no review delta, full review`);
+      } else {
+        deltaFiles = files;
       }
     }
     const prompt = reReview

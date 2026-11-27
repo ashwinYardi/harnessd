@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { Issue, LinkedIssue, ResolvedAgentConfig, Task } from "@harnessd/shared";
+import type {
+  HarnessAdapter,
+  Issue,
+  LinkedIssue,
+  ResolvedAgentConfig,
+  RunResult,
+  Task,
+} from "@harnessd/shared";
+import { emptyTokenUsage } from "@harnessd/shared";
 import { mergeLayers } from "../config/merge.ts";
 import type { PullRequest } from "../github/client.ts";
 import { maxTurns } from "./dispatch.ts";
@@ -16,6 +24,7 @@ import {
   type ReviewFinding,
   type ReviewSettleDeps,
   resetReviewNotJudged,
+  runReview,
   settleReview,
 } from "./review.ts";
 import { partMarker } from "./split.ts";
@@ -220,6 +229,82 @@ test("a re-review prompt lists the saved findings and the delta-only rules (MET-
     "no parent body",
   );
   assert.ok(!prompt.includes("## Senior-dev rubric"), "no senior-dev rubric");
+});
+
+test("a re-review whose delta paths cannot be read falls back to the full review (MET-234, D-061)", async () => {
+  const prompts: string[] = [];
+  const logs: string[] = [];
+  const adapter: HarnessAdapter = {
+    id: "claude-code",
+    start(task) {
+      prompts.push(task.prompt);
+      const result: RunResult = {
+        status: "ok",
+        exitCode: 0,
+        durationMs: 1,
+        tokens: emptyTokenUsage(),
+        finalText: JSON.stringify({ decision: "approve", findings: [] }),
+      };
+      return {
+        events: (async function* () {
+          yield { type: "end" as const, result };
+        })(),
+        result: Promise.resolve(result),
+        cancel: async () => {},
+      };
+    },
+  };
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 1,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  const result = await runReview(
+    {
+      part,
+      parent,
+      pr: pr(),
+      budgetMs: 1_000,
+      since: { sha: "old", findings: [blocking] },
+      reReview: true,
+    },
+    {
+      github: {
+        async prDiff() {
+          return "FULL DIFF";
+        },
+        async findPrByHead() {
+          return pr();
+        },
+      },
+      worktrees: {
+        async checkout() {
+          return { path: "/wt/review", branch: "b", resumed: false };
+        },
+        async remove() {
+          return { removed: true };
+        },
+      },
+      adapter,
+      agent,
+      deltaDiff: async () => "DELTA",
+      deltaFiles: async () => undefined,
+      log: (line) => logs.push(line),
+    },
+  );
+
+  assert.equal(result.verdict?.decision, "approve");
+  assert.equal(prompts.length, 1);
+  const prompt = prompts[0] ?? "";
+  assert.match(prompt, /## Diff/);
+  assert.match(prompt, /FULL DIFF/);
+  assert.doesNotMatch(prompt, /## Delta since the last review/);
+  assert.doesNotMatch(prompt, /DELTA/);
+  assert.match(prompt, /## Earlier blocking findings \(1\)/);
+  assert.match(prompt, /src\/api\.ts:1/);
+  assert.deepEqual(logs, [`${part.key}: no review delta, full review`]);
 });
 
 test("parseReReviewVerdict carries open saved findings and drops out-of-delta blocking findings (MET-234, D-061)", () => {
@@ -462,6 +547,48 @@ test("the delta file scan reads headers, not hunk content, and unquotes paths (M
     ],
     "a finding on an unchanged file is a nit",
   );
+});
+
+test("parseReReviewVerdict keeps exact changed file names with trailing whitespace (MET-234, D-061)", () => {
+  const exact = "src/ends-with-space.ts ";
+  const parsed = parseReReviewVerdict(
+    JSON.stringify({
+      decision: "changes_requested",
+      saved: [
+        { id: "R1", fixed: true, evidence: "Fixed." },
+        { id: "R2", fixed: true, evidence: "Fixed too." },
+      ],
+      findings: [
+        {
+          file: exact,
+          line: 1,
+          severity: "blocking",
+          kind: "code",
+          text: "This file is in the delta.",
+          item: "The review run works",
+        },
+        {
+          file: "src/ends-with-space.ts",
+          line: 2,
+          severity: "blocking",
+          kind: "code",
+          text: "This name is not in the delta.",
+          item: "The review run works",
+        },
+      ],
+    }),
+    savedFindings,
+    doneWhen,
+    new Set([exact]),
+  );
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const blocking = parsed.verdict.findings.filter((finding) => finding.severity === "blocking");
+  const nits = parsed.verdict.findings.filter((finding) => finding.severity === "nit");
+  assert.equal(blocking.length, 1);
+  assert.equal(blocking[0]?.file, exact, "the exact path is kept for membership and storage");
+  assert.equal(nits.length, 1);
+  assert.equal(nits[0]?.file, "src/ends-with-space.ts");
 });
 
 test("a carried saved finding keeps its new evidence in the send-back and across a reload (MET-234, D-061)", async () => {
