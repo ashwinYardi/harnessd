@@ -48,6 +48,9 @@ import { type QaApp, type QaAppInput, type QaAppStart, startQaApp } from "./qa-a
 import { extractSection, readPartMarker, sectionChecklist, sectionList } from "./split.ts";
 import type { LoopState, QaCase, ReviewedHead } from "./state.ts";
 
+// The review parser reuses the QA parse steps (MET-223, D-041, D-052).
+export { extractJson };
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -484,7 +487,7 @@ export function repairJsonBackslashes(text: string): string {
 }
 
 /** Every line-start "{" candidate that runs to the last "}", newest first. */
-function trailingJsonObjects(text: string): string[] {
+export function trailingJsonObjects(text: string): string[] {
   const end = text.lastIndexOf("}");
   if (end === -1) return [];
   const candidates: string[] = [];
@@ -499,9 +502,9 @@ function trailingJsonObjects(text: string): string[] {
 /**
  * Parses the reply's JSON, repairing stray backslashes only after the first parse fails
  * (MET-196). The repair runs on the extracted text and on each trailing-object candidate,
- * so a verdict in prose is still found.
+ * so a verdict in prose is still found. The review verdict reuses this (MET-223).
  */
-function parseQaJson(text: string): { value: unknown } | { error: Error } {
+export function parseStrictJson(text: string): { value: unknown } | { error: Error } {
   const extracted = extractJson(text);
   let first: Error | undefined;
   try {
@@ -546,7 +549,7 @@ function caseNamesFailingItem(item: string, items: readonly QaVerdictItem[]): bo
  * `Verify` (MET-162), and one well-formed case per failing item (D-054).
  */
 export function parseQaVerdict(text: string, expectedItems: number): ParsedQaVerdict {
-  const parsed = parseQaJson(text);
+  const parsed = parseStrictJson(text);
   if ("error" in parsed) {
     return { ok: false, error: `not JSON: ${parsed.error.message}`, kind: "not_json" };
   }
@@ -665,7 +668,7 @@ export function parseReQaVerdict(
   saved: readonly string[] | readonly QaCase[],
 ): ParsedReQaVerdict {
   const savedIds = saved.map((entry) => (typeof entry === "string" ? entry : entry.id));
-  const parsed = parseQaJson(text);
+  const parsed = parseStrictJson(text);
   if ("error" in parsed) {
     return { ok: false, error: `not JSON: ${parsed.error.message}`, kind: "not_json" };
   }
