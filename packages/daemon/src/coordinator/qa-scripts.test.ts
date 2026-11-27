@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import {
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -142,4 +143,57 @@ test("case (c): HARNESSD_QA_HOME equal to the plist's HARNESSD_HOME is refused",
     assert.equal(result.status, 1, `${name}: exits 1`);
     assert.match(result.stderr, GUARD);
   }
+});
+
+test("the guard resolves homes as the daemon does: trimmed, relative and physical", (t) => {
+  const s = sandbox(t);
+  const real = realHome(join(s.home, ".harnessd"));
+
+  // The daemon trims HARNESSD_HOME, so padding still names the real home.
+  for (const name of SCRIPTS) {
+    const padded = run(s, name, { HARNESSD_QA_HOME: ` ${real} `, HARNESSD_QA_AREA: "backend" });
+    assert.equal(padded.status, 1, `${name}: a padded override is refused`);
+    assert.match(padded.stderr, GUARD);
+  }
+
+  // A relative override that lands on the real home is compared as an absolute path.
+  const relative = run(s, "seed.sh", { HARNESSD_QA_HOME: "../home/.harnessd" });
+  assert.equal(relative.status, 1, "a relative override is resolved before comparing");
+  assert.match(relative.stderr, GUARD);
+
+  // A padded caller HARNESSD_HOME names the real home, but never becomes the sandbox.
+  const started = run(s, "start.sh", { HARNESSD_HOME: ` ${real} `, HARNESSD_QA_AREA: "backend" });
+  assert.equal(started.status, 0, started.stderr);
+  kept(real);
+  const scratch = readFileSync(s.out, "utf8");
+  assert.equal(dirname(scratch), s.temp, "the scratch home is used");
+  assert.equal(scratch, scratch.trim(), "the handed-off home survives the daemon's trim");
+});
+
+test("an unreadable plist is skipped and both scripts still run", (t) => {
+  const s = sandbox(t);
+  const agents = join(s.home, "Library", "LaunchAgents");
+  mkdirSync(agents, { recursive: true });
+  const plist = join(agents, "dev.harnessd.daemon.plist");
+  writeFileSync(
+    plist,
+    [
+      '<plist version="1.0">',
+      "<dict>",
+      "  <key>EnvironmentVariables</key>",
+      "  <dict>",
+      "    <key>HARNESSD_HOME</key>",
+      `    <string>${join(s.root, "service-home")}</string>`,
+      "  </dict>",
+      "</dict>",
+      "</plist>",
+      "",
+    ].join("\n"),
+  );
+  chmodSync(plist, 0o000);
+
+  const seeded = run(s, "seed.sh");
+  assert.equal(seeded.status, 0, seeded.stderr);
+  const started = run(s, "start.sh", { HARNESSD_QA_AREA: "backend" });
+  assert.equal(started.status, 0, started.stderr);
 });
