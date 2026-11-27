@@ -3222,6 +3222,75 @@ test("a network error while a review settles keeps the record and retries its un
   await t.loop.idle();
 });
 
+test("a part whose Ready move landed before a timeout waits for its review settlement (MET-230)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  fx.part.description += "\n\n**Verify**\n- `pnpm test` → exit 0";
+  fx.state.sessions = {
+    [fx.part.id]: {
+      harness: "claude-code",
+      sessionId: "sess-1",
+      worktree: `/wt/${fx.part.key}`,
+      branch: fx.part.key.toLowerCase(),
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  const adapter = fakeAdapter({ canResume: true });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, adapter, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  await t.loop.tick();
+
+  const moveTo = fx.linear.moveTo.bind(fx.linear);
+  let timeouts = 2;
+  fx.linear.moveTo = async (id, state) => {
+    if (id === fx.part.id && state === "Ready" && timeouts > 0) {
+      timeouts -= 1;
+      await moveTo(id, state);
+      throw new Error("fetch failed");
+    }
+    return moveTo(id, state);
+  };
+
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "changes_requested", findings: [blocking] }),
+  );
+  await t.loop.idle();
+
+  assert.equal(fx.part.state, "Ready", "the move landed before the timeout");
+  assert.ok(store.state.pendingReview?.[fx.part.id], "the settlement stays pending");
+  assert.equal(store.state.qaFeedback[fx.part.id], undefined, "the findings are not saved yet");
+  assert.deepEqual(store.state.pendingReview?.[fx.part.id]?.done, [`comment on ${fx.part.key}`]);
+
+  const blocked = await t.loop.tick();
+  assert.deepEqual(blocked.dispatched, [], "the builder waits for the settlement");
+  assert.equal(
+    t.adapter.runs().filter((run) => run.role !== "reviewer").length,
+    0,
+    "no builder run starts without the findings",
+  );
+  assert.ok(
+    store.state.pendingReview?.[fx.part.id],
+    "the second timeout keeps the settlement pending",
+  );
+
+  const report = await t.loop.tick();
+  assert.deepEqual(report.dispatched, [fx.part.key], "the builder runs after the settle");
+  const run = t.adapter.runs().at(-1);
+  assert.equal(run?.resumeSessionId, "sess-1", "the builder resumes with the findings");
+  assert.match(run?.prompt ?? "", /R1 \(src\/api\.ts:12\)/);
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+});
+
 test("a pending review written without a verdict recovers it from reviewerHeads (MET-230)", async () => {
   const fx = reviewFixture({ withQa: false });
   const blocking: ReviewFinding = {

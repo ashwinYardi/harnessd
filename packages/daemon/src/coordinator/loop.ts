@@ -2294,6 +2294,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     for (const issue of candidates) {
       if (pausedNow || s.inFlight.length >= max) break;
       if (s.inFlight.some((e) => e.issueId === issue.id)) continue;
+      // A review whose settlement is unfinished still owns the part: a Ready move may have
+      // landed before a timeout, so do not start its builder without the findings (MET-230).
+      if (s.pendingReview?.[issue.id] !== undefined) continue;
       if (
         s.pendingQa?.[issue.id] !== undefined ||
         Object.values(s.pendingQa ?? {}).some((record) =>
