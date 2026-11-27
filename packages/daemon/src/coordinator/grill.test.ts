@@ -151,6 +151,7 @@ test("clear issue: calls posted and noted, proceeds, no state change, no ping", 
   assert.equal(s.tasks[0]?.model, "opus");
   assert.equal(s.tasks[0]?.id, "grill-MET-40-1");
   assert.equal(s.tasks[0]?.maxTurns, 50);
+  assert.equal(s.tasks[0]?.readOnly, true, "a coordinator run is read-only (D-059)");
   assert.deepEqual(s.cwds, ["/repo"]);
 
   assert.equal(s.notes.length, 2);

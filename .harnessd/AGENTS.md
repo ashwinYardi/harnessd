@@ -2,6 +2,7 @@
 
 - **Reading by role.** The coordinator (grill, plan) reads `docs/SPEC.md` and every decision record in `docs/decisions/`. A builder or QA run reads only its brief and the decision records the brief names by ID. It reads another record only when the brief or the code points to it.
 - If a change contradicts a decision, add a new decision record (D-044). Don't silently diverge.
+- **Coordinator runs are read-only.** The coordinator plans and decides; it never edits code, commits or pushes, and sends a failed QA or review back to the part's builder (D-046, D-059).
 - Work only on Linear issues in **Ready** (team Meta Harness, project harnessd). One issue = one branch = one small PR. Put `MET-<n>` in the PR title.
 - Harness integration goes through CLIs only (D-002). Never add a vendor SDK.
 - UI: dense, quiet, keyboard-first and professional. No gradients, emoji, or filler copy.

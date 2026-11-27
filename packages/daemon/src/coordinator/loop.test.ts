@@ -701,6 +701,44 @@ test("a Ready issue splits into backend and frontend parts plus a QA part they b
   assert.equal(t.memory.state.inFlight.length, 1);
 });
 
+test("grill and plan runs are read-only; part and QA runs are not (D-059)", async () => {
+  const adapter = fakeAdapter({ plans: { "MET-100": plan(["backend", "S", "API"]) } });
+  const t = setup({ adapter });
+  const parent = t.linear.add({ title: "P", labels: ["coordinator"], description: BODY("S") });
+
+  await t.loop.tick();
+  const children = t.linear.children(parent);
+  const backend = children.find((child) => roleOf(child) === "backend");
+  const qa = children.find((child) => roleOf(child) === "qa");
+  assert.ok(backend, "the split made a backend part");
+  assert.ok(qa, "the split made a QA part");
+
+  const [grill, planRun, partRun] = adapter.tasks;
+  assert.match(grill?.id ?? "", /^grill-/);
+  assert.equal(grill?.readOnly, true, "a grill run is read-only");
+  assert.match(planRun?.id ?? "", /^plan-/);
+  assert.equal(planRun?.readOnly, true, "a plan run is read-only");
+  assert.equal(partRun?.id, `${backend.key}-1`);
+  assert.notEqual(partRun?.readOnly, true, "a builder keeps full access");
+
+  // The part reaches In Review, so QA runs too. It is not a coordinator run.
+  adapter.pending[0]?.finish("ok");
+  await t.loop.idle();
+  t.gh.open(backend.key, 7);
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  const qaRun = adapter.tasks.at(-1);
+  assert.match(qaRun?.id ?? "", /-qa-1-pr7$/);
+  assert.notEqual(qaRun?.readOnly, true, "QA keeps full access");
+  assert.equal(
+    adapter.tasks.filter((task) => /^(grill|plan)-/.test(task.id)).length,
+    2,
+    "no coordinator run starts for a part or QA round",
+  );
+
+  adapter.pending.at(-1)?.finish("ok", undefined, verdict(true, true));
+  await t.loop.idle();
+});
+
 test("a backend-only issue gets no frontend part", async () => {
   const adapter = fakeAdapter({ plans: { "MET-100": plan(["backend", "S", "Only API"]) } });
   const t = setup({ adapter });
@@ -2965,6 +3003,58 @@ test("a failed QA sends the part back with the review; the second failure escala
   assert.deepEqual((await t.loop.tick()).dispatched, [], "no more loops");
   assert.equal(t.adapter.runs().length, runs);
   assert.equal(t.pings.length, 1);
+});
+
+test("a QA request_changes round sends the part back to its builder and starts no coordinator run", async () => {
+  const t = setup();
+  const { parent, backend, qa } = qaFixture(t);
+  t.gh.open(backend.key, 7);
+
+  // Round 1 fails: the part goes back to its builder, never to the coordinator.
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending[0]?.finish("ok", undefined, verdict(false, true));
+  await t.loop.idle();
+  assert.equal(t.memory.state.qaFailures[parent.id], 1);
+  assert.equal(backend.state, "Ready");
+
+  const started = t.adapter.tasks.length;
+  assert.deepEqual((await t.loop.tick()).dispatched, [backend.key]);
+  const next = t.adapter.tasks.slice(started);
+  assert.equal(next.length, 1, "only the part's builder starts");
+  assert.equal(next[0]?.id, `${backend.key}-1`);
+  assert.notEqual(next[0]?.readOnly, true, "the builder keeps full access");
+  assert.match(next[0]?.prompt ?? "", /You are backend, the harnessd backend agent\./);
+  assert.equal(
+    next.filter((task) => /^(grill|plan)-/.test(task.id)).length,
+    0,
+    "no coordinator run starts on a send-back",
+  );
+  assert.equal(t.adapter.pending.at(-1)?.cwd, `/wt/${backend.key}`);
+  await t.loop.pause();
+});
+
+test("a QA failure at qa_max_failures starts no builder or coordinator run", async () => {
+  const t = setup();
+  const { parent, backend, qa } = qaFixture(t);
+  // One more failure reaches the default limit of 2 (D-014).
+  t.memory.state.qaFailures[parent.id] = 1;
+  t.gh.open(backend.key, 7);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
+  await settle();
+  t.adapter.pending[0]?.finish("ok", undefined, verdict(false, true));
+  await t.loop.idle();
+
+  assert.equal(qa.state, "Needs input");
+  assert.equal(parent.state, "Needs input");
+  assert.equal(backend.state, "In Review", "nothing is sent back at the limit");
+  assert.deepEqual(t.memory.state.qaFailures, {}, "the count is cleared on escalation");
+  assert.equal(t.adapter.tasks.filter((task) => /^(grill|plan)-/.test(task.id)).length, 0);
+
+  const started = t.adapter.tasks.length;
+  assert.deepEqual((await t.loop.tick()).dispatched, []);
+  assert.equal(t.adapter.tasks.length, started, "no builder or coordinator run starts");
 });
 
 test("a re-QA approves on the saved cases, writes no cases and goes to merges (D-056)", async () => {

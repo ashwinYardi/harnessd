@@ -10,7 +10,7 @@ import type {
   TokenUsage,
 } from "@harnessd/shared";
 import { COORDINATOR_MAX_TURNS } from "./dispatch.ts";
-import { extractJson, type RunReply, runForReply } from "./grill.ts";
+import { coordinatorTask, extractJson, type RunReply, runForReply } from "./grill.ts";
 import type { GrillContext } from "./prompt.ts";
 
 /** Roles a planned part can have. QA is added by harnessd, never planned. */
@@ -666,7 +666,7 @@ export async function planIssue(issue: Issue, deps: PlanDeps): Promise<SplitPlan
     };
     if (deps.agent.model !== undefined) task.model = deps.agent.model;
 
-    const reply: RunReply = await runForReply(deps.adapter, task, deps.cwd);
+    const reply: RunReply = await runForReply(deps.adapter, coordinatorTask(task), deps.cwd);
     if (reply.usageUnknown === true) unknownReplies += 1;
     else {
       knownReplies += 1;
