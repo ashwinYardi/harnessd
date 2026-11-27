@@ -620,6 +620,19 @@ function settle(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+/**
+ * Waits until the fake adapter has started `count` runs. Under load, one `settle()` can be
+ * too early; finishing a run that does not exist yet would leave `loop.idle()` pending.
+ */
+async function nextRun(adapter: ReturnType<typeof fakeAdapter>, count = 1): Promise<PendingRun> {
+  for (let i = 0; i < 1000; i++) {
+    const run = adapter.pending[count - 1];
+    if (run !== undefined) return run;
+    await settle();
+  }
+  throw new Error(`the adapter did not start run ${count}`);
+}
+
 function roleOf(issue: FakeIssue): string | undefined {
   return readPartMarker(issue.description)?.id;
 }
@@ -2061,8 +2074,7 @@ test("a QA checkout error counts no failure, and the next tick runs QA again", a
   );
 
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key], "the next tick runs QA again");
-  await settle();
-  t.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
+  (await nextRun(t.adapter)).finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
   assert.equal(t.gh.reviews.length, 1, "the retry really reviews the PR");
   assert.equal(backend.state, "In Review");
@@ -2088,8 +2100,7 @@ test("a Linear network error keeps the QA verdict and posts it after two failed 
   t.gh.open(backend.key, 7);
 
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
-  await settle();
-  t.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
+  (await nextRun(t.adapter)).finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
 
   assert.equal(qa.state, "In Progress", "the QA ticket stays In Progress while the verdict waits");
@@ -2140,8 +2151,7 @@ test("a GitHub network error keeps the QA verdict and posts it on the next tick 
   gh.open(backend.key, 7);
 
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
-  await settle();
-  t.adapter.pending[0]?.finish("ok", undefined, verdict(true, true));
+  (await nextRun(t.adapter)).finish("ok", undefined, verdict(true, true));
   await t.loop.idle();
 
   assert.equal(gh.reviews.length, 0, "the review post failed");
@@ -2171,8 +2181,7 @@ test("retrying a QA send-back keeps its cases and counts the verdict once", asyn
   };
 
   assert.deepEqual((await t.loop.tick()).dispatched, [qa.key]);
-  await settle();
-  t.adapter.pending[0]?.finish("ok", undefined, verdict(false, true));
+  (await nextRun(t.adapter)).finish("ok", undefined, verdict(false, true));
   await t.loop.idle();
 
   assert.equal(backend.state, "Ready", "the part move succeeded before the outage");
@@ -2190,7 +2199,7 @@ test("retrying a QA send-back keeps its cases and counts the verdict once", asyn
   assert.equal(t.linear.comments.filter((c) => c.key === backend.key).length, 1);
   assert.equal(t.gh.reviews.length, 1);
   assert.deepEqual(t.pings, []);
-  t.adapter.pending.at(-1)?.finish("ok");
+  (await nextRun(t.adapter, 2)).finish("ok");
   await t.loop.idle();
 });
 
