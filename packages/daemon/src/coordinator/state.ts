@@ -13,7 +13,7 @@ import {
 } from "@harnessd/shared";
 import type { ReviewEvent } from "../github/client.ts";
 import type { WorktreeKeepReason } from "../worktrees/index.ts";
-import type { ReviewFinding } from "./review.ts";
+import type { ReviewFinding, ReviewNotJudged } from "./review.ts";
 
 /** A sub-issue an agent is working on. */
 export interface InFlightRun {
@@ -211,6 +211,33 @@ export interface PendingReview {
   posted?: boolean;
   /** The posted review, once a retry succeeds. */
   reviewUrl?: string;
+  /** The settle steps already done, by the name the log gives them (D-058). */
+  done?: string[];
+}
+
+/**
+ * A review settlement a network error left unfinished, per part id (MET-230, D-058). It
+ * holds the settle inputs and the done steps, so the loop can retry an escalation that has
+ * no PR comment record to replay.
+ */
+export interface PendingReviewSettle {
+  partId: string;
+  partKey: string;
+  parentId: string;
+  prNumber: number;
+  prUrl: string;
+  head: string;
+  /** The judged verdict, when the settlement applies one. */
+  verdict?: "approved" | "changes_requested";
+  findings?: ReviewFinding[];
+  /** Why the review could not judge the head. */
+  notJudged?: ReviewNotJudged;
+  /** The run's error, for a failed review. */
+  error?: string;
+  /** The posted review, when there is one. */
+  reviewUrl?: string;
+  /** The settle steps already done, by the name the log gives them. */
+  done: string[];
 }
 
 /**
@@ -317,6 +344,8 @@ export interface LoopState {
   reviewerHeads?: Record<string, ReviewerHead>;
   /** Review comments a failed post left to send, per part id (MET-224, D-058). */
   pendingReview?: Record<string, PendingReview>;
+  /** Review settlements a network error left unfinished, per part id (MET-230, D-058). */
+  pendingReviewSettle?: Record<string, PendingReviewSettle>;
   /** Parts the ship step moved to In Review, per part id (MET-128). Optional for old files. */
   shipped?: Record<string, ShippedPart>;
   /** Tokens used per parent issue id, across grill, plan, part and QA runs (D-040). */
@@ -657,6 +686,12 @@ function pendingReviews(value: unknown): Record<string, PendingReview> {
       continue;
     }
     if (r.posted !== undefined && typeof r.posted !== "boolean") continue;
+    if (
+      r.done !== undefined &&
+      (!Array.isArray(r.done) || !r.done.every((s) => typeof s === "string"))
+    ) {
+      continue;
+    }
     const findings = r.findings === undefined ? undefined : reviewFindings(r.findings);
     if (r.findings !== undefined && findings === undefined) continue;
     out[id] = {
@@ -671,9 +706,55 @@ function pendingReviews(value: unknown): Record<string, PendingReview> {
       ...(findings === undefined ? {} : { findings }),
       ...(r.posted === undefined ? {} : { posted: r.posted }),
       ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
+      ...(r.done === undefined ? {} : { done: r.done }),
     };
   }
   return out;
+}
+
+/** A half-readable pending settlement is dropped: its writes cannot be replayed safely. */
+function pendingReviewSettles(value: unknown): Record<string, PendingReviewSettle> {
+  const out: Record<string, PendingReviewSettle> = {};
+  if (typeof value !== "object" || value === null) return out;
+  for (const [id, raw] of Object.entries(value as Record<string, unknown>)) {
+    const r = raw as Partial<PendingReviewSettle> | null;
+    if (typeof r !== "object" || r === null) continue;
+    if (typeof r.partId !== "string" || r.partId === "") continue;
+    if (typeof r.partKey !== "string" || r.partKey === "") continue;
+    if (typeof r.parentId !== "string" || r.parentId === "") continue;
+    if (typeof r.prNumber !== "number" || !Number.isInteger(r.prNumber) || r.prNumber <= 0) {
+      continue;
+    }
+    if (typeof r.prUrl !== "string") continue;
+    if (typeof r.head !== "string" || r.head === "") continue;
+    if (r.verdict !== undefined && r.verdict !== "approved" && r.verdict !== "changes_requested") {
+      continue;
+    }
+    if (r.notJudged !== undefined && !isReviewNotJudged(r.notJudged)) continue;
+    if (!optionalString(r.error) || !optionalString(r.reviewUrl)) continue;
+    const findings = r.findings === undefined ? undefined : reviewFindings(r.findings);
+    if (r.findings !== undefined && findings === undefined) continue;
+    if (!Array.isArray(r.done) || !r.done.every((step) => typeof step === "string")) continue;
+    out[id] = {
+      partId: r.partId,
+      partKey: r.partKey,
+      parentId: r.parentId,
+      prNumber: r.prNumber,
+      prUrl: r.prUrl,
+      head: r.head,
+      ...(r.verdict === undefined ? {} : { verdict: r.verdict }),
+      ...(findings === undefined ? {} : { findings }),
+      ...(r.notJudged === undefined ? {} : { notJudged: r.notJudged }),
+      ...(r.error === undefined ? {} : { error: r.error }),
+      ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
+      done: r.done,
+    };
+  }
+  return out;
+}
+
+function isReviewNotJudged(value: unknown): value is ReviewNotJudged {
+  return value === "turn_cap" || value === "timeout" || value === "stalled" || value === "not_json";
 }
 
 function shippedParts(value: unknown): Record<string, ShippedPart> {
@@ -888,6 +969,9 @@ export function parseLoopState(text: string): LoopState {
     ...(raw.pendingReview === undefined
       ? {}
       : { pendingReview: pendingReviews(raw.pendingReview) }),
+    ...(raw.pendingReviewSettle === undefined
+      ? {}
+      : { pendingReviewSettle: pendingReviewSettles(raw.pendingReviewSettle) }),
     ...(raw.shipped === undefined ? {} : { shipped: shippedParts(raw.shipped) }),
     ...(raw.usage === undefined ? {} : { usage: usageSums(raw.usage) }),
     ...(raw.usageBaseline === undefined

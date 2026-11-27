@@ -75,7 +75,7 @@ import {
   runQa,
   settleQa,
 } from "./qa.ts";
-import type { ReviewRunResult } from "./review.ts";
+import type { ReviewFinding, ReviewRunResult, ReviewSettleInput } from "./review.ts";
 import { runReview, settleReview } from "./review.ts";
 import { type ShipResult, type ShipRun, shipPart } from "./ship.ts";
 import {
@@ -101,6 +101,7 @@ import type {
   PartSession,
   PendingQa,
   PendingQaReview,
+  PendingReview,
   ReviewedHead,
   ReviewerHead,
   SelfUpdateRecord,
@@ -389,6 +390,13 @@ export function tokenBudgetFor(
   limits: { token_budget: Record<"S" | "M", number> },
 ): number {
   return size === "S" ? limits.token_budget.S : limits.token_budget.M;
+}
+
+/** A pending review whose verdict is ready to settle (MET-230). */
+interface PreparedReview {
+  record: PendingReview;
+  verdict: "approved" | "changes_requested";
+  findings: ReviewFinding[];
 }
 
 /** A review as the pending record keeps it; the part and PR are ids (MET-213, D-058). */
@@ -1130,13 +1138,53 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   }
 
   /**
+   * Validates a pending review before its comment goes out (MET-230). A legacy record with
+   * no verdict takes it from reviewerHeads when the head matches; otherwise it is dropped
+   * with one line, so a stale verdict is never posted and a bad record never blocks reviews.
+   */
+  async function preparePendingReview(
+    s: LoopState,
+    partId: string,
+  ): Promise<PreparedReview | undefined> {
+    const record = s.pendingReview?.[partId];
+    if (record === undefined) return undefined;
+    let verdict = record.verdict;
+    let findings = record.findings;
+    if (verdict === undefined || findings === undefined) {
+      const recorded = s.reviewerHeads?.[partId];
+      if (recorded === undefined || recorded.sha !== record.head) {
+        log(
+          `${record.partKey}: dropped the pending review at ${record.head.slice(0, 7)}: no verdict for that head`,
+        );
+        const records = s.pendingReview;
+        if (records !== undefined) {
+          delete records[partId];
+          if (Object.keys(records).length === 0) delete s.pendingReview;
+        }
+        await save();
+        return undefined;
+      }
+      verdict = recorded.verdict;
+      findings = recorded.findings;
+      record.verdict = verdict;
+      record.findings = findings;
+    }
+    if (verdict === undefined || findings === undefined) return undefined;
+    return { record, verdict, findings };
+  }
+
+  /**
    * Settles a review whose PR comment is posted, then drops its pending record (MET-225).
-   * A failed post or the Linear reads it needs keep the record, so a later tick finishes the
-   * settle without running the reviewer again for that verdict.
+   * A failed post, a network error on a settle write or the Linear reads it needs keep the
+   * record, so a later tick finishes the settle without running the reviewer again for
+   * that verdict (D-058).
    */
   async function settlePendingReview(s: LoopState, partId: string): Promise<void> {
     const record = s.pendingReview?.[partId];
     if (record === undefined || record.posted !== true) return;
+    const prepared = await preparePendingReview(s, partId);
+    if (prepared === undefined) return;
+    const { verdict, findings } = prepared;
     let part: Issue;
     let parent: Issue;
     try {
@@ -1161,10 +1209,92 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       parentKey: parent.key,
       blockers: [],
     };
-    await settleReview(
+    record.done ??= [];
+    const settled = await settleReview(
       s,
       {
         part: linked,
+        parent,
+        pr,
+        ...(verdict === undefined
+          ? {}
+          : {
+              verdict: {
+                decision: verdict === "approved" ? "approve" : "changes_requested",
+                findings: findings ?? [],
+              },
+            }),
+        ...(record.reviewUrl === undefined ? {} : { reviewUrl: record.reviewUrl }),
+      },
+      {
+        linear,
+        notifier,
+        maxFailures: config.limits.qa_max_failures,
+        log,
+        steps: {
+          done: record.done,
+          async mark(step: string) {
+            record.done ??= [];
+            record.done.push(step);
+            await save();
+          },
+        },
+      },
+    );
+    if (settled === "pending") {
+      // A network error stopped a write: keep the record and its done steps for the next
+      // tick, as QA does (D-058).
+      await save();
+      return;
+    }
+    const records = s.pendingReview;
+    if (records !== undefined) {
+      delete records[partId];
+      if (Object.keys(records).length === 0) delete s.pendingReview;
+    }
+    await save();
+  }
+
+  /**
+   * Saves a direct review settlement before its writes and keeps it until every step is
+   * done (MET-230, D-058). Not-judged and failed-run settles have no PR comment record, so
+   * an escalation that times out needs its own record to retry.
+   */
+  async function settleReviewPersisted(
+    s: LoopState,
+    part: LinkedIssue,
+    parent: Issue,
+    pr: PullRequest,
+    input: Omit<ReviewSettleInput, "part" | "parent" | "pr">,
+  ): Promise<void> {
+    s.pendingReviewSettle ??= {};
+    let record = s.pendingReviewSettle[part.id];
+    if (record === undefined) {
+      record = {
+        partId: part.id,
+        partKey: part.key,
+        parentId: parent.id,
+        prNumber: pr.number,
+        prUrl: pr.url,
+        head: pr.headRefOid,
+        ...(input.verdict === undefined
+          ? {}
+          : {
+              verdict: input.verdict.decision === "approve" ? "approved" : "changes_requested",
+              findings: input.verdict.findings,
+            }),
+        ...(input.notJudged === undefined ? {} : { notJudged: input.notJudged }),
+        ...(input.error === undefined ? {} : { error: input.error }),
+        ...(input.reviewUrl === undefined ? {} : { reviewUrl: input.reviewUrl }),
+        done: [],
+      };
+      s.pendingReviewSettle[part.id] = record;
+      await save();
+    }
+    const settled = await settleReview(
+      s,
+      {
+        part,
         parent,
         pr,
         ...(record.verdict === undefined
@@ -1175,6 +1305,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
                 findings: record.findings ?? [],
               },
             }),
+        ...(record.notJudged === undefined ? {} : { notJudged: record.notJudged }),
+        ...(record.error === undefined ? {} : { error: record.error }),
         ...(record.reviewUrl === undefined ? {} : { reviewUrl: record.reviewUrl }),
       },
       {
@@ -1182,19 +1314,69 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         notifier,
         maxFailures: config.limits.qa_max_failures,
         log,
+        steps: {
+          done: record.done,
+          async mark(step: string) {
+            record.done.push(step);
+            await save();
+          },
+        },
       },
     );
-    const records = s.pendingReview;
+    if (settled === "pending") {
+      // A network error stopped a write: keep the record and its done steps for next tick.
+      await save();
+      return;
+    }
+    const records = s.pendingReviewSettle;
     if (records !== undefined) {
-      delete records[partId];
-      if (Object.keys(records).length === 0) delete s.pendingReview;
+      delete records[part.id];
+      if (Object.keys(records).length === 0) delete s.pendingReviewSettle;
     }
     await save();
+  }
+
+  /** Retries review settlements a network error left unfinished (MET-230, D-058). */
+  async function retryReviewSettles(s: LoopState): Promise<void> {
+    for (const partId of Object.keys(s.pendingReviewSettle ?? {})) {
+      if (live.has(partId)) continue;
+      const record = s.pendingReviewSettle?.[partId];
+      if (record === undefined) continue;
+      let part: Issue;
+      let parent: Issue;
+      try {
+        part = await linear.getIssue(record.partId);
+        parent = await linear.getIssue(record.parentId);
+      } catch (error) {
+        log(`${record.partKey}: could not read it for the review settle: ${message(error)}`);
+        continue;
+      }
+      const pr: PullRequest = {
+        number: record.prNumber,
+        title: `${record.partKey}: review`,
+        url: record.prUrl,
+        headRefName: "",
+        headRefOid: record.head,
+        baseRefName: "",
+        isDraft: false,
+      };
+      const linked: LinkedIssue = {
+        ...part,
+        parentId: record.parentId,
+        parentKey: parent.key,
+        blockers: [],
+      };
+      // The record already holds the inputs; the empty input is only a type placeholder.
+      await settleReviewPersisted(s, linked, parent, pr, {});
+    }
   }
 
   async function retryPendingReviews(s: LoopState): Promise<void> {
     for (const partId of Object.keys(s.pendingReview ?? {})) {
       if (live.has(partId)) continue;
+      // Validate before the post: a legacy record with no matching head is dropped, never
+      // published, and leaves reviewer dispatch free (MET-230).
+      if ((await preparePendingReview(s, partId)) === undefined) continue;
       if (!(await postPendingReview(s, partId))) continue;
       await settlePendingReview(s, partId);
     }
@@ -1951,7 +2133,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     for (const [id, record] of Object.entries(shipped)) {
       if (pausedNow || s.inFlight.length >= max) break;
       if (live.has(id) || s.inFlight.some((entry) => entry.issueId === id)) continue;
-      if (s.pendingReview?.[id] !== undefined) continue;
+      if (s.pendingReview?.[id] !== undefined || s.pendingReviewSettle?.[id] !== undefined) {
+        continue;
+      }
       let part: Issue;
       try {
         part = await linear.getIssue(id);
@@ -2167,39 +2351,15 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         }
       } else if (result.notJudged !== undefined) {
         // A turn cap, timeout, stall or invalid JSON is not judged: no review failure (D-052).
-        await settleReview(
-          s,
-          {
-            part,
-            parent,
-            pr,
-            notJudged: result.notJudged,
-            ...(result.error === undefined ? {} : { error: result.error }),
-          },
-          {
-            linear,
-            notifier,
-            maxFailures: config.limits.qa_max_failures,
-            log,
-          },
-        );
+        await settleReviewPersisted(s, part, parent, pr, {
+          notJudged: result.notJudged,
+          ...(result.error === undefined ? {} : { error: result.error }),
+        });
       } else {
         // A schema error or any other agent error counts a failed review (D-014, D-052).
-        await settleReview(
-          s,
-          {
-            part,
-            parent,
-            pr,
-            ...(result.error === undefined ? {} : { error: result.error }),
-          },
-          {
-            linear,
-            notifier,
-            maxFailures: config.limits.qa_max_failures,
-            log,
-          },
-        );
+        await settleReviewPersisted(s, part, parent, pr, {
+          ...(result.error === undefined ? {} : { error: result.error }),
+        });
         log(
           `${part.key}: review failed (${oneLine(result.error ?? "no verdict")}), retrying next tick`,
         );
@@ -2228,6 +2388,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     for (const issue of candidates) {
       if (pausedNow || s.inFlight.length >= max) break;
       if (s.inFlight.some((e) => e.issueId === issue.id)) continue;
+      // A review whose settlement is unfinished still owns the part: a Ready move may have
+      // landed before a timeout, so do not start its builder without the findings (MET-230).
+      if (
+        s.pendingReview?.[issue.id] !== undefined ||
+        s.pendingReviewSettle?.[issue.id] !== undefined
+      )
+        continue;
       if (
         s.pendingQa?.[issue.id] !== undefined ||
         Object.values(s.pendingQa ?? {}).some((record) =>
@@ -2981,6 +3148,8 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     await retryPendingQa(s);
     // A review comment a failed post left behind goes out before any new run starts (MET-224).
     await retryPendingReviews(s);
+    // A review settle a timeout left unfinished finishes before dispatch (MET-230).
+    await retryReviewSettles(s);
     // Before dispatch, so QA can start on the same tick: a shipped part Linear moved back to
     // In Progress is In Review again (MET-128). It runs while a self-update waits: it starts nothing.
     await repairShipped(s);
