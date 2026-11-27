@@ -776,7 +776,13 @@ export async function settleReview(
     if (counted.count >= 2) {
       const escalation: ReviewEscalation = { reasons: counted.reasons };
       // Save the decision before the first write, so a restart replays it (MET-232).
-      await steps?.decide?.(escalation);
+      try {
+        await steps?.decide?.(escalation);
+      } catch (error) {
+        // Without a saved decision a restart would lose the escalation: write nothing.
+        log(`could not save the not-judged escalation: ${message(error)}`);
+        return "pending";
+      }
       const saved = notJudgedEscalation(escalation.reasons);
       return escalate(saved.reason, saved.detail, saved.comment);
     }

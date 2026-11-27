@@ -3831,6 +3831,58 @@ test("a restart replays a saved not-judged escalation with no writes done (MET-2
   );
 });
 
+test("a failed save blocks the escalation writes and the retry decides again (MET-232)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const memory = memoryStore(fx.state);
+  let failEscalationSave = false;
+  const store: LoopStore = {
+    load: () => memory.load(),
+    async save(next) {
+      if (failEscalationSave && next.pendingReviewSettle?.[fx.part.id]?.escalation !== undefined) {
+        failEscalationSave = false;
+        throw new Error("state write failed");
+      }
+      await memory.save(next);
+    },
+  };
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+
+  await t.loop.tick();
+  t.adapter.pending[0]?.finish("timeout", "budget of 1000ms exceeded");
+  await t.loop.idle();
+  assert.equal(fx.part.state, "In Review", "the first timeout re-queues the same head");
+
+  failEscalationSave = true;
+  assert.deepEqual((await t.loop.tick()).dispatched, [fx.part.key], "the same head reviews again");
+  t.adapter.pending.at(-1)?.finish("timeout", "budget of 1000ms exceeded");
+  await t.loop.idle();
+
+  assert.equal(fx.parent.state, "In Progress", "the failed save blocks the parent move");
+  assert.equal(fx.part.state, "In Review", "the failed save blocks the part move");
+  assert.equal(fx.linear.comments.length, 0, "no comment goes out before the decision is durable");
+  assert.equal(t.pings.length, 0, "no notice goes out");
+  const saved = await store.load();
+  assert.equal(saved.pendingReviewSettle?.[fx.part.id]?.escalation, undefined, "not durable");
+  assert.equal(saved.pendingReviewSettle?.[fx.part.id]?.notJudged, "timeout", "the record waits");
+
+  await t.loop.tick();
+
+  assert.equal(fx.parent.state, "Needs input", "the retry escalates after the save succeeds");
+  assert.equal(fx.part.state, "Needs input");
+  assert.equal(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key).length,
+    1,
+    "the parent comment is posted once",
+  );
+  assert.equal(
+    t.pings.filter((ping) => ping.includes("review not judged twice")).length,
+    1,
+    "the notice is sent once",
+  );
+  assert.equal((await store.load()).pendingReviewSettle, undefined, "the record goes when done");
+});
+
 test("a blocking code finding sends the part back and the next run resumes the builder (MET-225, D-046)", async () => {
   const fx = reviewFixture({ withQa: false });
   fx.part.description += "\n\n**Verify**\n- `pnpm test` → exit 0";

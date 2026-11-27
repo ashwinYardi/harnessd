@@ -646,12 +646,18 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
 
   /** Saves are chained so a slow write never lands after a newer one. */
   function save(): Promise<void> {
+    return saveOrFail().catch((error) => log(`could not save loop state: ${message(error)}`));
+  }
+
+  /** A save a caller must know succeeded, such as before a Linear write (MET-232). */
+  function saveRequired(): Promise<void> {
+    return saveOrFail();
+  }
+
+  function saveOrFail(): Promise<void> {
     const snapshot = structuredClone(state);
     if (snapshot === undefined) return saving;
-    saving = saving
-      .catch(() => undefined)
-      .then(() => store.save(snapshot))
-      .catch((error) => log(`could not save loop state: ${message(error)}`));
+    saving = saving.catch(() => undefined).then(() => store.save(snapshot));
     return saving;
   }
 
@@ -1328,7 +1334,14 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
             // Save the escalation before the first Linear write, so a restart replays it
             // instead of counting the run again from an empty map (MET-232).
             record.escalation = escalation;
-            await save();
+            try {
+              await saveRequired();
+            } catch (error) {
+              // The write failed, so the decision is not durable. Drop it from memory and
+              // let the retry decide again instead of treating it as saved (MET-232).
+              delete record.escalation;
+              throw error;
+            }
           },
         },
       },

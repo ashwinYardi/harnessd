@@ -459,4 +459,18 @@ test("a not-judged escalation decides before its first write and a replay applie
     `move ${part.id} Needs input`,
     "notice",
   ]);
+
+  // A decide that cannot save keeps every Linear write back, so the retry decides again.
+  resetReviewNotJudged();
+  assert.equal(await settleReview(state, input, deps), "requeued");
+  calls.length = 0;
+  const unsaved = {
+    done: [] as string[],
+    async mark() {},
+    async decide() {
+      throw new Error("state write failed");
+    },
+  };
+  assert.equal(await settleReview(state, input, { ...deps, steps: unsaved }), "pending");
+  assert.equal(calls.length, 0, "no write when the decision did not save");
 });
