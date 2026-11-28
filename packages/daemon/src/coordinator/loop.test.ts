@@ -4424,6 +4424,131 @@ test("an upgrade keeps a legacy send-back's completed steps and posts no comment
   await t.loop.idle();
 });
 
+test("an upgrade finishes a legacy send-back as fix even when the coordinator would escalate (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  await fx.linear.comment(fx.part.id, "**harnessd review**: changes requested on PR #7.");
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.pendingReview = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      body: "**harnessd review**: changes requested.",
+      verdict: "changes_requested",
+      findings: [blocking],
+      posted: true,
+      done: [`comment on ${fx.part.key}`],
+    },
+  };
+  const adapter = fakeAdapter({
+    reviewDecision: JSON.stringify({
+      decision: "escalate",
+      trigger: "money",
+      question: "May it spend the paid seat?",
+      options: ["Spend it", "Re-plan"],
+      recommendation: "Re-plan.",
+    }),
+  });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, adapter, linear: fx.linear, store });
+
+  await t.loop.tick();
+
+  assert.ok(
+    t.linear.moves.some((move) => move.key === fx.part.key && move.state === "Ready"),
+    "the promised Ready move still happens",
+  );
+  assert.ok(
+    !t.linear.moves.some((move) => move.state === "Needs input"),
+    "an escalate reply cannot move a started legacy send-back",
+  );
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
+    0,
+    "no coordinator run answers a legacy send-back",
+  );
+  assert.match(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key).at(-1)?.body ?? "",
+    /: fix/,
+    "the parent comment records a fix round",
+  );
+  assert.equal(store.state.qaFeedback[fx.part.id]?.source, "review");
+  assert.equal(store.state.pendingReview, undefined);
+  assert.equal(store.state.pendingReviewSettle, undefined);
+  t.adapter.pending.at(-1)?.finish("cancelled");
+  await t.loop.idle();
+});
+
+test("an upgrade finishes a legacy send-back's Ready move with no coordinator harness (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  await fx.linear.comment(fx.part.id, "**harnessd review**: changes requested on PR #7.");
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.pendingReview = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      body: "**harnessd review**: changes requested.",
+      verdict: "changes_requested",
+      findings: [blocking],
+      posted: true,
+      done: [`comment on ${fx.part.key}`],
+    },
+  };
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store, extra: { adapters: {} } });
+
+  await t.loop.tick();
+
+  assert.ok(
+    t.linear.moves.some((move) => move.key === fx.part.key && move.state === "Ready"),
+    "the Ready move finishes with no coordinator harness",
+  );
+  assert.equal(
+    fx.linear.comments.filter((comment) => comment.key === fx.part.key).length,
+    1,
+    "the completed part comment is not posted again",
+  );
+  assert.equal(store.state.reviewFailures[fx.part.id], 1, "the round counts once");
+  assert.equal(store.state.qaFeedback[fx.part.id]?.source, "review");
+  assert.equal(store.state.pendingReview, undefined);
+  assert.equal(store.state.pendingReviewSettle, undefined);
+});
+
 test("a failed save blocks the escalation writes and the retry decides again (MET-232)", async () => {
   const fx = reviewFixture({ withQa: false });
   const memory = memoryStore(fx.state);

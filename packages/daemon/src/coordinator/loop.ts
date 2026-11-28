@@ -1448,23 +1448,39 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       record.escalation === undefined &&
       record.verdict === "changes_requested" &&
       legacyEscalationStarted(record.done, part, parent);
+    // A send-back from before MET-243 that has started was already a fix: its part comment
+    // promised the Ready move. Finish it as a fix with no coordinator run, so an escalate
+    // reply or a missing harness can never strand the move.
+    const legacySendBack =
+      record.decision === undefined &&
+      record.notJudged === undefined &&
+      record.escalation === undefined &&
+      record.verdict === "changes_requested" &&
+      (record.done.includes(`comment on ${part.key}`) ||
+        record.done.includes(`re-queue ${part.key}`));
     if (
       record.verdict === "changes_requested" &&
       record.decision === undefined &&
       !legacyEscalation
     ) {
-      if (options.retry === true && s.inFlight.length >= config.limits.max_concurrent) {
-        // A retry does not inherit the reviewer's slot. Keep the round pending until one is
-        // free, so the coordinator run never exceeds max_concurrent (MET-243).
-        log(`${part.key}: no run slot for the review decision, the settle waits`);
-        return;
-      }
-      const decision = await decideReviewFor(s, part, parent, record);
-      if (decision === undefined) {
-        // No coordinator harness can run. Wait instead of applying an unsaved fallback that a
-        // later replay could replace with an escalation (MET-243).
-        log(`${part.key}: no coordinator harness for the review decision, the settle waits`);
-        return;
+      let decision: ReviewDecision;
+      if (legacySendBack) {
+        decision = { decision: "fix", hints: [] };
+      } else {
+        if (options.retry === true && s.inFlight.length >= config.limits.max_concurrent) {
+          // A retry does not inherit the reviewer's slot. Keep the round pending until one is
+          // free, so the coordinator run never exceeds max_concurrent (MET-243).
+          log(`${part.key}: no run slot for the review decision, the settle waits`);
+          return;
+        }
+        const decided = await decideReviewFor(s, part, parent, record);
+        if (decided === undefined) {
+          // No coordinator harness can run. Wait instead of applying an unsaved fallback that
+          // a later replay could replace with an escalation (MET-243).
+          log(`${part.key}: no coordinator harness for the review decision, the settle waits`);
+          return;
+        }
+        decision = decided;
       }
       record.decision = decision;
       try {
