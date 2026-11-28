@@ -27,6 +27,7 @@ test("no layers gives the defaults", () => {
     cached_token_weight: 0.1,
     max_turns: { S: 80, M: 160 },
     qa_max_failures: 2,
+    max_review_rounds: 6,
   });
   assert.equal(merged.slack.channel, "#harnessd");
   assert.equal(merged.daemon.port, 4747);
@@ -73,6 +74,7 @@ test("scalars override and tables deep-merge, later layer winning", () => {
     cached_token_weight: 0.1,
     max_turns: { S: 80, M: 160 },
     qa_max_failures: 2,
+    max_review_rounds: 6,
   });
   assert.deepEqual(merged.linear, { team_id: "MET", project: "harnessd" });
 });
@@ -100,7 +102,17 @@ test("limits merge per key, the cached weight included", () => {
     cached_token_weight: 0.05,
     max_turns: { S: 40, M: 90 },
     qa_max_failures: 2,
+    max_review_rounds: 6,
   });
+});
+
+test("max_review_rounds merges per layer, the workspace winning", () => {
+  const merged = mergeLayers([
+    layer("global", { settings: { limits: { max_review_rounds: 4 } } }),
+    layer("workspace", { settings: { limits: { max_review_rounds: 8 } } }),
+  ]);
+  assert.equal(merged.limits.max_review_rounds, 8);
+  assert.equal(merged.limits.qa_max_failures, 2, "the QA cap keeps its own value");
 });
 
 test("max_parents merges per layer, the workspace winning", () => {

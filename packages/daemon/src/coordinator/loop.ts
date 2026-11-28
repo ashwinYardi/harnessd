@@ -1358,7 +1358,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         part,
         findings,
         round: (s.reviewFailures[part.id] ?? 0) + 1,
-        maxRounds: config.limits.qa_max_failures,
+        maxRounds: config.limits.max_review_rounds,
         ...(memory === undefined ? {} : { memory }),
       },
       { adapter: tracked(adapter), agent, cwd: repoDir, log },
@@ -1463,34 +1463,39 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       record.decision === undefined &&
       !legacyEscalation
     ) {
-      let decision: ReviewDecision;
-      if (legacySendBack) {
-        decision = { decision: "fix", hints: [] };
-      } else {
-        if (options.retry === true && s.inFlight.length >= config.limits.max_concurrent) {
-          // A retry does not inherit the reviewer's slot. Keep the round pending until one is
-          // free, so the coordinator run never exceeds max_concurrent (MET-243).
-          log(`${part.key}: no run slot for the review decision, the settle waits`);
+      const nextRound = (s.reviewFailures[part.id] ?? 0) + 1;
+      // A legacy send-back keeps its promised Ready move; a round at the cap starts no
+      // coordinator run, because settleReview escalates with the open findings (MET-244, D-062).
+      if (legacySendBack || nextRound < config.limits.max_review_rounds) {
+        let decision: ReviewDecision;
+        if (legacySendBack) {
+          decision = { decision: "fix", hints: [] };
+        } else {
+          if (options.retry === true && s.inFlight.length >= config.limits.max_concurrent) {
+            // A retry does not inherit the reviewer's slot. Keep the round pending until one is
+            // free, so the coordinator run never exceeds max_concurrent (MET-243).
+            log(`${part.key}: no run slot for the review decision, the settle waits`);
+            return;
+          }
+          const decided = await decideReviewFor(s, part, parent, record);
+          if (decided === undefined) {
+            // No coordinator harness can run. Wait instead of applying an unsaved fallback that
+            // a later replay could replace with an escalation (MET-243).
+            log(`${part.key}: no coordinator harness for the review decision, the settle waits`);
+            return;
+          }
+          decision = decided;
+        }
+        record.decision = decision;
+        try {
+          // The decision must be durable before the first Linear write, so a restart replays
+          // it instead of running the coordinator again (MET-243).
+          await saveRequired();
+        } catch (error) {
+          delete record.decision;
+          log(`${part.key}: could not save the review decision: ${message(error)}`);
           return;
         }
-        const decided = await decideReviewFor(s, part, parent, record);
-        if (decided === undefined) {
-          // No coordinator harness can run. Wait instead of applying an unsaved fallback that
-          // a later replay could replace with an escalation (MET-243).
-          log(`${part.key}: no coordinator harness for the review decision, the settle waits`);
-          return;
-        }
-        decision = decided;
-      }
-      record.decision = decision;
-      try {
-        // The decision must be durable before the first Linear write, so a restart replays
-        // it instead of running the coordinator again (MET-243).
-        await saveRequired();
-      } catch (error) {
-        delete record.decision;
-        log(`${part.key}: could not save the review decision: ${message(error)}`);
-        return;
       }
     }
     const settled = await settleReview(
@@ -1518,6 +1523,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         linear,
         notifier,
         maxFailures: config.limits.qa_max_failures,
+        maxReviewRounds: config.limits.max_review_rounds,
         log,
         steps: {
           done: record.done,

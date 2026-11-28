@@ -5115,7 +5115,7 @@ test("a blocking design finding is sent back as a fix with the coordinator's hin
     hints: [{ id: "R1", hint: "Move the design into the review module." }],
   });
   const parentComment = t.linear.comments.filter((c) => c.key === fx.parent.key).at(-1)?.body ?? "";
-  assert.match(parentComment, /round 1 of 2 on .* PR #7: fix/);
+  assert.match(parentComment, /round 1 of 6 on .* PR #7: fix/);
   assert.match(parentComment, /R1 \(src\/shape\.ts:4\) This belongs in the review module/);
   assert.match(parentComment, /hint: Move the design into the review module\./);
 
@@ -5126,6 +5126,60 @@ test("a blocking design finding is sent back as a fix with the coordinator's hin
   assert.match(run?.prompt ?? "", /hint: Move the design into the review module\./);
   t.adapter.pending.at(-1)?.finish("ok");
   await t.loop.idle();
+});
+
+test("review round 6 at limits.max_review_rounds escalates with no coordinator run (MET-244, D-062)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  fx.state.reviewFailures = { [fx.part.id]: 5 };
+  fx.state.qaFeedback = {
+    [fx.part.id]: { source: "review", failing: ["R1 (src/old.ts:1) Still open."] },
+  };
+  const adapter = fakeAdapter({
+    reviewDecision: JSON.stringify({
+      decision: "fix",
+      findings: [{ id: "R1", hint: "This must not run at the cap." }],
+    }),
+  });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, adapter, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  await t.loop.tick();
+
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "changes_requested", findings: [blocking] }),
+  );
+  await t.loop.idle();
+
+  assert.equal(fx.part.state, "Needs input");
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(store.state.reviewFailures[fx.part.id], undefined, "the count is cleared");
+  assert.equal(store.state.qaFeedback[fx.part.id], undefined, "the review feedback is cleared");
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
+    0,
+    "no coordinator run starts at the round cap",
+  );
+  const parentComment = t.linear.comments.filter((c) => c.key === fx.parent.key).at(-1)?.body ?? "";
+  assert.match(
+    parentComment,
+    /round 6 of 6 on .* \[PR #7\]\(https:\/\/github\.test\/o\/r\/pull\/7\): review round cap reached/,
+  );
+  assert.match(parentComment, /`limits\.max_review_rounds` \(6\)/);
+  assert.match(parentComment, /R1 \(src\/api\.ts:12\) The loop reads the file on every tick\./);
+  assert.equal(
+    t.pings.filter((ping) => ping.includes("needs input (review round cap reached)")).length,
+    1,
+    "one notice with the cap reason",
+  );
 });
 
 test("a D-011 trigger escalates with the question, options and recommendation on the parent (MET-243)", async () => {
@@ -5270,7 +5324,7 @@ test("a second failed review asks the coordinator again instead of Needs input (
   assert.equal(store.state.reviewFailures[fx.part.id], 2, "the count goes up");
   assert.match(
     t.linear.comments.filter((c) => c.key === fx.parent.key).at(-1)?.body ?? "",
-    /round 2 of 2 on .* PR #7: fix/,
+    /round 2 of 6 on .* PR #7: fix/,
   );
 });
 

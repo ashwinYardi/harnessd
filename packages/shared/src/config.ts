@@ -36,6 +36,12 @@ export interface LimitsConfig {
   /** Model turns one builder part run may take, keyed by size (D-045). */
   max_turns: Record<BudgetSize, number>;
   qa_max_failures: number;
+  /**
+   * Changes_requested reviews of one part before it escalates with no coordinator run
+   * (D-062). Default 6. It does not replace `qa_max_failures`, which still caps QA, the
+   * gate and failed review runs.
+   */
+  max_review_rounds: number;
 }
 
 export interface LinearConfig {
@@ -371,6 +377,7 @@ export const DEFAULT_SETTINGS: Settings = {
     cached_token_weight: 0.1,
     max_turns: { S: 80, M: 160 },
     qa_max_failures: 2,
+    max_review_rounds: 6,
   },
   linear: {},
   slack: { channel: "#harnessd", summary_time: "21:00", time_zone: "Asia/Kolkata" },
@@ -757,6 +764,7 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
       "cached_token_weight",
       "max_turns",
       "qa_max_failures",
+      "max_review_rounds",
     ]);
     const limits: NonNullable<ConfigFile["limits"]> = {};
     if (t.max_concurrent !== undefined) {
@@ -803,6 +811,9 @@ export function parseConfigFile(value: unknown, file: string): ConfigFile {
     }
     if (t.qa_max_failures !== undefined) {
       limits.qa_max_failures = c.positiveInt(t.qa_max_failures, "limits.qa_max_failures");
+    }
+    if (t.max_review_rounds !== undefined) {
+      limits.max_review_rounds = c.positiveInt(t.max_review_rounds, "limits.max_review_rounds");
     }
     out.limits = limits;
   }

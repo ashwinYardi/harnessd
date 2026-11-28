@@ -26,7 +26,36 @@ The coordinator plans and decides. It never edits code, commits or pushes. Every
 | Codex | `--sandbox read-only` instead of `danger-full-access` (`-c sandbox_mode="read-only"` on a resume); the D-031 and D-032 isolation and approval flags stay. |
 | OpenCode | An inline `OPENCODE_CONFIG_CONTENT` that denies `edit`, `bash`, `webfetch`, `websearch`, `task`, `external_directory` and `question`. `--auto` approves only pending requests and cannot override a deny (checked on 2.3.2). |
 
-A failed QA or review round is never fixed by the coordinator: it goes back to the part's builder as a send-back, resumed when possible (D-046). At `limits.qa_max_failures` QA and the parent go to Needs input and no builder or coordinator run starts (D-014, D-056). An interactive coordinator session cannot get a harness flag from the loop, so `.harnessd/AGENTS.md` carries the same rule. The record is D-059; it amends D-031, D-032 and D-036.
+The coordinator edits no fix: a failed QA round goes back to the part's builder as a send-back, resumed when possible (D-046). A blocking review goes to a coordinator decision, which sends the builder one hint per finding or, under a D-011 trigger, asks the owner (D-062). At `limits.qa_max_failures` QA and the parent go to Needs input and no builder or coordinator run starts (D-014, D-056). An interactive coordinator session cannot get a harness flag from the loop, so `.harnessd/AGENTS.md` carries the same rule. The record is D-059; it amends D-031, D-032 and D-036.
+
+## Review decision (D-062)
+A `changes_requested` review is a message to the coordinator. Before the first Linear write, the loop runs one read-only coordinator task (`decideReview` in `packages/daemon/src/coordinator/review-decision.ts`) in the owner's checkout. It has a 10-minute budget and the coordinator turn cap (50). The decision goes to `pendingReviewSettle` in `loop.json`, so a restart replays it with no second run and sends the notice once.
+
+**Prompt.** It holds the part key, title and parent; the part's Goal, Done when, Files, Verify and Out of scope; the Done-when items; every open blocking finding as `R1`…`Rn` with its file, line and kind; `Round <n> of <limits.max_review_rounds>`; the earlier rounds' findings; the D-011 trigger list; and the reply contract. It carries no PR diff: the run opens the files it needs in the checkout. It edits nothing.
+
+**Reply contract.** The final message is strict JSON only, with no prose and no code fence. Either:
+
+```json
+{ "decision": "fix", "findings": [{ "id": "R1", "hint": "string" }] }
+```
+
+with exactly one non-empty hint per open `R<n>`, or:
+
+```json
+{
+  "decision": "escalate",
+  "trigger": "irreversible" | "money" | "secret_or_account" | "public_api_data_model_or_protected_path" | "taste_no_precedent",
+  "question": "string",
+  "options": ["string"],
+  "recommendation": "string"
+}
+```
+
+An escalate needs one D-011 trigger, a non-empty question, at least one option and a recommendation. A design finding alone is no trigger: the coordinator fixes it, and escalates only when the fix crosses a D-011 line such as the public API, the data model, a protected path, a secret or an account change, money, an irreversible step, or a taste call with no precedent.
+
+**Fix fallback.** An invalid or unusable reply, an unknown finding id, a failed or limited run, or an escalate whose trigger is missing or unknown is a fix send-back with no hints. The loop logs one `review decision failed` or `escalation without a D-011 trigger, sent back as fix` line. The verdict still counts one review round, as any `changes_requested` verdict does. Nothing waits on a human by accident.
+
+**Cap.** At or over `limits.max_review_rounds` (default 6) the loop starts no decision run. It escalates with one parent comment listing the open findings, moves both issues to Needs input and sends one notice with the reason `review round cap reached`.
 
 ## Method: grill-with-docs
 grill-with-docs (D-017) is the `grilling` and `domain-modeling` skills together. Its SKILL.md has `disable-model-invocation: true`, so a headless run cannot start it with the Skill tool. The prompt carries the method instead.

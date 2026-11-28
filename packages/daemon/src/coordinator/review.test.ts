@@ -612,6 +612,7 @@ test("a carried saved finding keeps its new evidence in the send-back and across
     },
     notifier: { async notify() {} },
     maxFailures: 3,
+    maxReviewRounds: 6,
   };
   const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
   const verdict = {
@@ -658,6 +659,7 @@ test("a re-review settle sends back only the open blocking findings and counts o
     },
     notifier: { async notify() {} },
     maxFailures: 3,
+    maxReviewRounds: 6,
   };
   const state: Parameters<typeof settleReview>[0] = {
     reviewFailures: { [part.id]: 1 },
@@ -906,6 +908,7 @@ test("an approval keeps review failures and QA feedback that is not a review sen
     },
     notifier: { async notify() {} },
     maxFailures: 2,
+    maxReviewRounds: 6,
   };
   const input = {
     part,
@@ -957,6 +960,7 @@ test("a not-judged escalation decides before its first write and a replay applie
       },
     },
     maxFailures: 2,
+    maxReviewRounds: 6,
   };
   const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
   const input = { part, parent, pr: pr(), notJudged: "timeout" as const, error: "timed out" };
@@ -1042,6 +1046,7 @@ test("a design finding takes the coordinator's fix and keeps each hint with its 
     },
     notifier: { async notify() {} },
     maxFailures: 3,
+    maxReviewRounds: 6,
   };
   const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
   const design: ReviewFinding = {
@@ -1085,7 +1090,7 @@ test("a design finding takes the coordinator's fix and keeps each hint with its 
   ]);
   assert.deepEqual(moves, [{ id: part.id, state: "Ready" }], "the part goes back to Ready");
   const parentComment = comments.find((comment) => comment.id === parent.id)?.body ?? "";
-  assert.match(parentComment, /^\*\*harnessd review\*\*: round 1 of 3 on MET-223 PR #223: fix/);
+  assert.match(parentComment, /^\*\*harnessd review\*\*: round 1 of 6 on MET-223 PR #223: fix/);
   assert.match(parentComment, /R1 \(src\/shape\.ts:4\) This belongs in the review module/);
   assert.match(parentComment, /\n {2}hint: Move the seam into the review module\./);
   assert.match(parentComment, /\n {2}hint: Read the file once per part run\./);
@@ -1114,6 +1119,7 @@ test("an escalate decision moves both issues and posts the D-011 question on the
       },
     },
     maxFailures: 2,
+    maxReviewRounds: 6,
   };
   const state: Parameters<typeof settleReview>[0] = {
     reviewFailures: { [part.id]: 1 },
@@ -1155,7 +1161,7 @@ test("an escalate decision moves both issues and posts the D-011 question on the
   const body = comments.find((comment) => comment.id === parent.id)?.body ?? "";
   assert.match(
     body,
-    /round 2 of 2 on MET-223 PR #223: escalate \(`public_api_data_model_or_protected_path`\)/,
+    /round 2 of 6 on MET-223 PR #223: escalate \(`public_api_data_model_or_protected_path`\)/,
   );
   assert.match(body, /Trigger: changes a public API, the data model or a protected path/);
   assert.match(body, /Question: May the change alter the public API\?/);
@@ -1175,6 +1181,7 @@ test("a changes_requested verdict with no decision is a fix send-back with no hi
     },
     notifier: { async notify() {} },
     maxFailures: 2,
+    maxReviewRounds: 6,
   };
   const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
   const verdict = {
@@ -1192,5 +1199,114 @@ test("a changes_requested verdict with no decision is a fix send-back with no hi
 
   assert.equal(await settleReview(state, { part, parent, pr: pr(), verdict }, deps), "sent_back");
   assert.equal(state.qaFeedback[part.id]?.hints, undefined);
-  assert.match(comments[1] ?? "", /round 1 of 2 on MET-223 PR #223: fix/);
+  assert.match(comments[1] ?? "", /round 1 of 6 on MET-223 PR #223: fix/);
+});
+
+test("round 6 at limits.max_review_rounds escalates with one notice and no send-back (MET-244, D-062)", async () => {
+  const comments: Array<{ id: string; body: string }> = [];
+  const moves: Array<{ id: string; state: string }> = [];
+  const notices: Array<{ reason: string; detail: string }> = [];
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment(id, body) {
+        comments.push({ id, body });
+        return "comment-1";
+      },
+      async moveTo(id, state) {
+        moves.push({ id, state });
+      },
+    },
+    notifier: {
+      async notify(notice) {
+        notices.push({ reason: notice.reason ?? "", detail: notice.detail ?? "" });
+      },
+    },
+    maxFailures: 2,
+    maxReviewRounds: 6,
+  };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: { [part.id]: 5 },
+    qaFeedback: { [part.id]: { source: "review", failing: ["R1 (src/a.ts:1) Fix it."] } },
+  };
+  const verdict = {
+    decision: "changes_requested" as const,
+    findings: [
+      {
+        file: "src/a.ts",
+        line: 1,
+        severity: "blocking" as const,
+        kind: "design" as const,
+        text: "The seam sits in the loop.",
+      },
+      {
+        file: "src/b.ts",
+        line: 2,
+        severity: "blocking" as const,
+        kind: "code" as const,
+        text: "The file is read on every tick.",
+      },
+    ],
+  };
+  // A saved decision would be ignored: the cap takes precedence and starts no coordinator run.
+  const input = {
+    part,
+    parent,
+    pr: pr(),
+    verdict,
+    decision: { decision: "fix" as const, hints: [] },
+  };
+
+  assert.equal(await settleReview(state, input, deps), "escalated");
+  assert.deepEqual(state.reviewFailures, {}, "the cap escalation clears the count");
+  assert.deepEqual(state.qaFeedback, {}, "the review feedback is cleared");
+  assert.deepEqual(moves, [
+    { id: parent.id, state: "Needs input" },
+    { id: part.id, state: "Needs input" },
+  ]);
+  assert.equal(notices.length, 1, "one notice");
+  assert.equal(notices[0]?.reason, "review round cap reached");
+  const parentComment = comments.find((comment) => comment.id === parent.id)?.body ?? "";
+  assert.match(
+    parentComment,
+    /round 6 of 6 on MET-223 \[PR #223\]\(https:\/\/github\.test\/o\/r\/pull\/223\): review round cap reached/,
+  );
+  assert.match(parentComment, /sent MET-223 back 6 times/);
+  assert.match(parentComment, /`limits\.max_review_rounds` \(6\)/);
+  assert.match(parentComment, /- R1 \(src\/a\.ts:1\) The seam sits in the loop\./);
+  assert.match(parentComment, /- R2 \(src\/b\.ts:2\) The file is read on every tick\./);
+  assert.equal(
+    comments.filter((comment) => comment.id === part.id).length,
+    0,
+    "nothing is sent back to the builder",
+  );
+});
+
+test("a failed review run still escalates at maxFailures, not the review round cap (MET-244, D-062)", async () => {
+  let notices = 0;
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment() {
+        return "comment-1";
+      },
+      async moveTo() {},
+    },
+    notifier: {
+      async notify() {
+        notices += 1;
+      },
+    },
+    maxFailures: 2,
+    maxReviewRounds: 6,
+  };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: { [part.id]: 1 },
+    qaFeedback: {},
+  };
+
+  assert.equal(
+    await settleReview(state, { part, parent, pr: pr(), error: "no verdict" }, deps),
+    "escalated",
+  );
+  assert.equal(notices, 1);
+  assert.deepEqual(state.reviewFailures, {}, "the failed-run escalation clears the count");
 });

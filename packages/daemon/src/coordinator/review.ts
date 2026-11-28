@@ -1026,10 +1026,12 @@ export interface ReviewSettleDeps {
   linear: ReviewLinear;
   notifier: Notifier;
   /**
-   * The review round cap shown on the parent comment, from `limits.qa_max_failures` (D-014).
-   * The cap escalation itself is a later part (MET-243).
+   * `limits.qa_max_failures`: failed review runs before a human is asked (D-014). It no
+   * longer caps changes_requested rounds, which use `maxReviewRounds` (D-062).
    */
   maxFailures: number;
+  /** `limits.max_review_rounds`: changes_requested rounds before the cap escalation (D-062). */
+  maxReviewRounds: number;
   log?: (line: string) => void;
   /**
    * The steps a retry already finished, by the name the log gives them (D-058).
@@ -1113,6 +1115,10 @@ function hintFor(decision: ReviewDecision | undefined, id: string): string | und
  * with the hints (D-046). A missing decision is sent back as a fix with no hints. An approve
  * sends nothing back and leaves nits only in the PR comment. A failed run with no verdict, or
  * two not-judged reviews on one head, keep the earlier D-014 and D-052 rules.
+ *
+ * A changes_requested round at or over `limits.max_review_rounds` escalates with no
+ * coordinator run: one parent comment names the cap and the open findings, both issues move
+ * to Needs input, one notice says `review round cap reached`, and both counts clear (D-062).
  *
  * A network error stops the writes and returns `pending` without changing any state; the
  * loop keeps the record for a retry and skips the steps already done (D-058).
@@ -1273,7 +1279,25 @@ export async function settleReview(
   }
 
   const failures = (state.reviewFailures[part.id] ?? 0) + 1;
-  const round = `round ${failures} of ${deps.maxFailures}`;
+  const round = `round ${failures} of ${deps.maxReviewRounds}`;
+
+  // At the round cap no coordinator run decides the verdict (MET-244, D-062). One parent
+  // comment names the cap and the open findings, and the shared escalation clears both counts.
+  if (failures >= deps.maxReviewRounds) {
+    const lines = reviewFindingList(blocking);
+    return escalate(
+      "review round cap reached",
+      `review round cap reached on ${part.key}: the review sent it back ${times(failures)}`,
+      [
+        `${round} on ${part.key} [PR #${pr.number}](${pr.url}): review round cap reached`,
+        "",
+        `The review sent ${part.key} back ${times(failures)} and reached \`limits.max_review_rounds\` (${deps.maxReviewRounds}).`,
+        "Open findings:",
+        ...lines.map((line) => `- ${line}`),
+      ].join("\n"),
+    );
+  }
+
   const decision = input.decision;
 
   // The coordinator asks the human only under a D-011 trigger (MET-243, D-059). The parent
