@@ -598,6 +598,25 @@ test("reviewFailures is optional, keeps positive counts and drops a malformed on
   assert.deepEqual((await store.load()).reviewFailures, state.reviewFailures);
 });
 
+test("reviewRounds is optional, keeps positive counts and drops a malformed one (MET-244, D-062)", async () => {
+  assert.equal(parseLoopState('{"inFlight":[]}').reviewRounds, undefined, "old files still load");
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { a: 1 },
+      reviewRounds: { a: 5, b: 1, c: 0, d: -1, e: 1.5, f: "2" },
+    }),
+  );
+  assert.deepEqual(parsed.reviewRounds, { a: 5, b: 1 });
+  assert.deepEqual(parsed.reviewFailures, { a: 1 }, "failed runs keep their own count");
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.reviewRounds = parsed.reviewRounds;
+  await store.save(state);
+  assert.deepEqual((await store.load()).reviewRounds, state.reviewRounds);
+});
+
 test("qaFeedback keeps the review send-back source and drops an unknown one (MET-225)", async () => {
   const parsed = parseLoopState(
     JSON.stringify({
@@ -850,4 +869,36 @@ test("pendingReviewSettle keeps a saved review decision and drops only a malform
     state.pendingReviewSettle,
     "the decision survives a reload",
   );
+});
+
+test("pendingReviewSettle keeps a saved round cap and drops a malformed one (MET-244, D-062)", () => {
+  const valid = {
+    partId: "part-1",
+    partKey: "MET-41",
+    parentId: "parent-1",
+    prNumber: 7,
+    prUrl: "https://github.test/pull/7",
+    head: "sha7",
+    verdict: "changes_requested",
+    findings: [],
+    roundCap: true,
+    done: [`comment on MET-41`],
+  };
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      pendingReviewSettle: {
+        a: valid,
+        b: { ...valid, roundCap: "yes" },
+        c: { ...valid, roundCap: false },
+      },
+    }),
+  );
+  const withoutRoundCap = { ...valid } as { roundCap?: unknown };
+  delete withoutRoundCap.roundCap;
+  assert.deepEqual(parsed.pendingReviewSettle, {
+    a: valid,
+    b: withoutRoundCap,
+    c: withoutRoundCap,
+  });
 });

@@ -942,8 +942,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       if (current === "in review") continue;
       if (current !== "in progress") {
         delete s.shipped[id];
-        // A part at Done has no review failures left to cap (MET-225).
-        if (current === "done" && s.reviewFailures !== undefined) delete s.reviewFailures[id];
+        // A part at Done has no review failures or rounds left to cap (MET-225, D-062).
+        if (current === "done") {
+          if (s.reviewFailures !== undefined) delete s.reviewFailures[id];
+          if (s.reviewRounds !== undefined) delete s.reviewRounds[id];
+        }
         changed = true;
         continue;
       }
@@ -1357,7 +1360,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       {
         part,
         findings,
-        round: (s.reviewFailures[part.id] ?? 0) + 1,
+        round: (s.reviewRounds?.[part.id] ?? 0) + 1,
         maxRounds: config.limits.max_review_rounds,
         ...(memory === undefined ? {} : { memory }),
       },
@@ -1444,6 +1447,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     // record keeps its own saved escalation.
     const legacyEscalation =
       record.decision === undefined &&
+      record.roundCap !== true &&
       record.notJudged === undefined &&
       record.escalation === undefined &&
       record.verdict === "changes_requested" &&
@@ -1461,11 +1465,13 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     if (
       record.verdict === "changes_requested" &&
       record.decision === undefined &&
+      record.roundCap !== true &&
       !legacyEscalation
     ) {
-      const nextRound = (s.reviewFailures[part.id] ?? 0) + 1;
-      // A legacy send-back keeps its promised Ready move; a round at the cap starts no
-      // coordinator run, because settleReview escalates with the open findings (MET-244, D-062).
+      const nextRound = (s.reviewRounds?.[part.id] ?? 0) + 1;
+      // A legacy send-back keeps its promised Ready move. A new round at the cap saves the cap
+      // decision before the first write, so a retry sends the cap reason, not a legacy one
+      // (MET-244, D-062).
       if (legacySendBack || nextRound < config.limits.max_review_rounds) {
         let decision: ReviewDecision;
         if (legacySendBack) {
@@ -1496,6 +1502,17 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
           log(`${part.key}: could not save the review decision: ${message(error)}`);
           return;
         }
+      } else {
+        record.roundCap = true;
+        try {
+          // The cap must be durable before the first Linear write, so a retry replays the cap
+          // escalation instead of reading the started comment as a legacy escalation (D-062).
+          await saveRequired();
+        } catch (error) {
+          delete record.roundCap;
+          log(`${part.key}: could not save the review round cap: ${message(error)}`);
+          return;
+        }
       }
     }
     const settled = await settleReview(
@@ -1513,6 +1530,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
               },
             }),
         ...(record.decision === undefined ? {} : { decision: record.decision }),
+        ...(record.roundCap === true ? { roundCap: true } : {}),
         ...(record.notJudged === undefined ? {} : { notJudged: record.notJudged }),
         ...(record.escalation === undefined ? {} : { escalation: record.escalation }),
         ...(legacyEscalation ? { legacyEscalation: true } : {}),
@@ -2568,16 +2586,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       const savedBlocking = (recorded?.findings ?? []).filter(
         (finding) => finding.severity === "blocking",
       );
-      const failures = s.reviewFailures[part.id] ?? 0;
+      const rounds = s.reviewRounds?.[part.id] ?? 0;
       // A re-review checks only the saved findings and the delta (MET-234, D-061).
       const reReview =
         recorded?.verdict === "changes_requested" &&
         savedBlocking.length > 0 &&
         recorded.sha !== pr.headRefOid &&
-        failures > 0;
-      // An escalated review cleared its failure count, so the next review after the head
+        rounds > 0;
+      // An escalated review cleared its round count, so the next review after the head
       // moves is a full first review, not a delta from the rejected head (D-061).
-      const useSince = recorded !== undefined && (recorded.verdict === "approved" || failures > 0);
+      const useSince = recorded !== undefined && (recorded.verdict === "approved" || rounds > 0);
       try {
         result = await runReview(
           {

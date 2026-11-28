@@ -1,6 +1,6 @@
 # D-062 A blocking review goes to the coordinator
 
-Status: accepted 2026-11-28. Issue: MET-244 (parent MET-241). Amends D-059 (a design finding no longer goes straight to Needs input) and D-014 (a changes_requested review uses `limits.max_review_rounds`, default 6). D-060 and D-061 are unchanged except for the design line.
+Status: accepted 2026-11-28. Issue: MET-244 (parent MET-241). Amends D-059 (a design finding no longer goes straight to Needs input) and D-014 (a changes_requested review uses `limits.max_review_rounds`, default 6). D-060 and D-061 are unchanged except for the design line and the re-review trigger, which reads `reviewRounds`.
 
 On 2026-11-27, MET-239 stopped in Needs input after each of six review rounds. Two rules routed a review past the coordinator: a blocking `design` finding went straight to the owner (D-059), and a second failed review escalated (D-014). Each time a human did the coordinator's job by hand: read the findings, write a fix hint and send them to the builder's session. That breaks the loop's promise that a ticket ships with no human help.
 
@@ -19,14 +19,16 @@ The decision is written to `pendingReviewSettle` in `loop.json` before the first
 
 ## Round cap
 
-`limits.max_review_rounds` is a positive integer, default 6, merged per layer like the other `limits` keys (see D-050 for the key pattern). It counts `changes_requested` reviews per part in the existing `reviewFailures` entry.
+`limits.max_review_rounds` is a positive integer, default 6, merged per layer like the other `limits` keys (see D-050 for the key pattern). It counts `changes_requested` reviews per part in a new `reviewRounds` entry. `reviewFailures` keeps its own meaning: failed review runs with no verdict. The counters are separate, so one failed run and five blocking verdicts stay five rounds, and one blocking verdict plus the first failed run stays one failure.
 
-At or over the cap, the loop starts no coordinator run. It escalates with the existing `escalate()`: one parent comment says the review sent the part back `<n>` times, hit `limits.max_review_rounds` and lists the open findings; both issues move to Needs input; one `needs_input` notice goes out with the reason `review round cap reached`; and `reviewFailures` and `qaFeedback` are cleared, as an escalation does today.
+At or over the cap, the loop starts no coordinator run. It saves the cap on the pending settlement before the first Linear write, so a retry sends the same reason and never reads the started escalation as a legacy one. It then escalates with the existing `escalate()`: one parent comment says the review sent the part back `<n>` times, hit `limits.max_review_rounds` and lists the open findings; both issues move to Needs input; one `needs_input` notice goes out with the reason `review round cap reached`; and `reviewRounds`, `reviewFailures` and `qaFeedback` are cleared, as an escalation does today.
+
+The cap applies only when the loop chooses a new settlement. A saved coordinator decision is honored on replay, so a saved fix still sends back even when the cap was lowered below the current round, and the fix synthesized for a started legacy send-back stays a fix. Only a saved cap decision escalates for the cap.
 
 `limits.qa_max_failures` no longer applies to a `changes_requested` review. It still applies to QA, the merge gate and a review run that gives no verdict, which keeps the D-014 failed-run rule.
 
 ## Unchanged
 
-D-060 (the review run, delta review and verdict) and D-061 (the re-review) keep their rules. Their only change is the design line: a new blocking design finding in a re-review takes the coordinator route above instead of escalating by itself.
+D-060 (the review run, delta review and verdict) and D-061 (the re-review) keep their rules. Their only changes are the design line, where a new blocking design finding in a re-review takes the coordinator route above instead of escalating by itself, and the re-review trigger, which now reads `reviewRounds` rather than `reviewFailures`.
 
 Why: a human was the hidden cost of every review round, and six rounds became six human decisions. Fix hints are the same work either way; the coordinator can do it read-only, in the open, and only asks the owner when the fix crosses a D-011 line. The trade-off: a fix decision costs one coordinator run per review round. The round cap bounds that spend, and a resumed builder session keeps the fix cheap (D-046).

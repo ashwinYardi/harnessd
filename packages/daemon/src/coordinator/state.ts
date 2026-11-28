@@ -246,6 +246,12 @@ export interface PendingReviewSettle {
    * (MET-243). A replay applies it instead of running the coordinator again.
    */
   decision?: ReviewDecision;
+  /**
+   * The round cap decided this settlement before the first write (MET-244, D-062). A replay
+   * escalates with the cap reason instead of asking the coordinator or treating the started
+   * escalation as a legacy one.
+   */
+  roundCap?: true;
   /** The run's error, for a failed review. */
   error?: string;
   /** The posted review, when there is one. */
@@ -338,8 +344,13 @@ export interface LoopState {
   attempts: Record<string, number>;
   /** Failed QA rounds per parent issue id (D-014: the second one escalates). */
   qaFailures: Record<string, number>;
-  /** Failed review rounds per part id (MET-225, D-014: the second one escalates). */
+  /** Failed review runs per part id (MET-225, D-014: at `qa_max_failures` they escalate). */
   reviewFailures: Record<string, number>;
+  /**
+   * Changes_requested review rounds per part id, capped by `limits.max_review_rounds`
+   * (D-062). Optional for old files; a missing count starts at 0.
+   */
+  reviewRounds?: Record<string, number>;
   /** Open QA requests per part sub-issue id, cleared when the part's next run succeeds. */
   qaFeedback: Record<string, QaFeedback>;
   /** QA approvals the merge gate has not finished, one per QA sub-issue. */
@@ -822,6 +833,7 @@ function pendingReviewSettles(value: unknown): Record<string, PendingReviewSettl
       ...(r.notJudged === undefined ? {} : { notJudged: r.notJudged }),
       ...(escalation === undefined ? {} : { escalation }),
       ...(decision === undefined ? {} : { decision }),
+      ...(r.roundCap === true ? { roundCap: true as const } : {}),
       ...(r.error === undefined ? {} : { error: r.error }),
       ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
       done: r.done,
@@ -1044,6 +1056,7 @@ export function parseLoopState(text: string): LoopState {
     attempts: counts(raw.attempts),
     qaFailures: counts(raw.qaFailures),
     reviewFailures: counts(raw.reviewFailures),
+    ...(raw.reviewRounds === undefined ? {} : { reviewRounds: counts(raw.reviewRounds) }),
     qaFeedback: feedback(raw.qaFeedback),
     merges: merges(raw.merges),
     gateFailures: counts(raw.gateFailures),

@@ -3629,7 +3629,7 @@ test("a failed review post is kept in pendingReview and retried with no failure 
   assert.deepEqual(store.state.qaFeedback[fx.part.id]?.failing, [
     "R1 (src/api.ts:12) The loop reads the file on every tick.",
   ]);
-  assert.equal(store.state.reviewFailures[fx.part.id], 1);
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 1);
 });
 
 test("a network error while a review settles keeps the record and retries its unfinished writes (MET-230, D-058)", async () => {
@@ -3670,7 +3670,7 @@ test("a network error while a review settles keeps the record and retries its un
     undefined,
     "no feedback until the move succeeds",
   );
-  assert.equal(store.state.reviewFailures[fx.part.id], undefined, "no failure is counted");
+  assert.equal(store.state.reviewRounds?.[fx.part.id], undefined, "no round is counted yet");
   assert.deepEqual(
     store.state.pendingReviewSettle?.[fx.part.id]?.done,
     [`comment on ${fx.part.key}`],
@@ -3696,7 +3696,7 @@ test("a network error while a review settles keeps the record and retries its un
   assert.deepEqual(store.state.qaFeedback[fx.part.id]?.failing, [
     "R1 (src/api.ts:12) The loop reads the file on every tick.",
   ]);
-  assert.equal(store.state.reviewFailures[fx.part.id], 1);
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 1);
   assert.equal(
     t.linear.comments.filter((comment) => comment.key === fx.part.key).length,
     1,
@@ -3822,7 +3822,7 @@ test("a pending review written without a verdict recovers it from reviewerHeads 
   assert.deepEqual(store.state.qaFeedback[fx.part.id]?.failing, [
     "R1 (src/api.ts:12) The loop reads the file on every tick.",
   ]);
-  assert.equal(store.state.reviewFailures[fx.part.id], 1, "the send-back counts one review round");
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 1, "the send-back counts one review round");
   assert.ok(
     !t.logs.some((line) => line.includes("review failed")),
     "a recovered verdict is never a run failure",
@@ -4238,7 +4238,7 @@ test("a retried review decision waits for a free run slot (MET-243)", async () =
     second.linear.moves.some((move) => move.key === fx.part.key && move.state === "Ready"),
     "the freed slot lets the round settle",
   );
-  assert.deepEqual(store.state.reviewFailures, { [fx.part.id]: 1 });
+  assert.deepEqual(store.state.reviewRounds, { [fx.part.id]: 1 });
   assert.equal(
     next.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
     1,
@@ -4418,14 +4418,15 @@ test("an upgrade keeps a legacy send-back's completed steps and posts no comment
     1,
     "the completed part comment is not posted again",
   );
-  assert.equal(store.state.reviewFailures[fx.part.id], 1, "the round counts once");
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 1, "the round counts once");
   assert.equal(store.state.qaFeedback[fx.part.id]?.source, "review");
   t.adapter.pending.at(-1)?.finish("cancelled");
   await t.loop.idle();
 });
 
-test("an upgrade finishes a legacy send-back as fix even when the coordinator would escalate (MET-243)", async () => {
+test("an upgrade finishes a started legacy send-back as fix even at the round cap (MET-243, MET-244)", async () => {
   const fx = reviewFixture({ withQa: false });
+  fx.state.reviewRounds = { [fx.part.id]: 5 };
   const blocking: ReviewFinding = {
     file: "src/api.ts",
     line: 12,
@@ -4489,6 +4490,11 @@ test("an upgrade finishes a legacy send-back as fix even when the coordinator wo
     /: fix/,
     "the parent comment records a fix round",
   );
+  assert.equal(
+    store.state.reviewRounds?.[fx.part.id],
+    6,
+    "the started legacy send-back counts its round at the cap",
+  );
   assert.equal(store.state.qaFeedback[fx.part.id]?.source, "review");
   assert.equal(store.state.pendingReview, undefined);
   assert.equal(store.state.pendingReviewSettle, undefined);
@@ -4543,7 +4549,7 @@ test("an upgrade finishes a legacy send-back's Ready move with no coordinator ha
     1,
     "the completed part comment is not posted again",
   );
-  assert.equal(store.state.reviewFailures[fx.part.id], 1, "the round counts once");
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 1, "the round counts once");
   assert.equal(store.state.qaFeedback[fx.part.id]?.source, "review");
   assert.equal(store.state.pendingReview, undefined);
   assert.equal(store.state.pendingReviewSettle, undefined);
@@ -4635,7 +4641,7 @@ test("a blocking code finding sends the part back and the next run resumes the b
   await t.loop.idle();
 
   assert.equal(fx.part.state, "Ready", "a blocking code finding sends the part back");
-  assert.deepEqual(store.state.reviewFailures, { [fx.part.id]: 1 });
+  assert.deepEqual(store.state.reviewRounds, { [fx.part.id]: 1 });
   assert.deepEqual(store.state.qaFeedback[fx.part.id], {
     source: "review",
     prUrl: "https://github.test/o/r/pull/7",
@@ -4730,7 +4736,7 @@ test("a re-review checks only the saved findings and sends back only the open on
       at: "2026-11-27T10:00:00.000Z",
     },
   };
-  state.reviewFailures = { [part.id]: 1 };
+  state.reviewRounds = { [part.id]: 1 };
   const config = mergeLayers([
     {
       scope: "workspace",
@@ -4777,7 +4783,7 @@ test("a re-review checks only the saved findings and sends back only the open on
   await t.loop.idle();
 
   assert.equal(part.state, "Ready", "the part is sent back");
-  assert.equal(store.state.reviewFailures[part.id], 2, "the re-review counts one failure");
+  assert.equal(store.state.reviewRounds?.[part.id], 2, "the re-review counts one round");
   assert.deepEqual(store.state.qaFeedback[part.id]?.failing, [
     "R1 (api.ts:1) The cache grows without a limit. (not fixed: The cache is still unbounded.)",
   ]);
@@ -4808,7 +4814,7 @@ test("a re-review with no readable delta falls back to the full review (MET-234,
       at: "2026-11-27T10:00:00.000Z",
     },
   };
-  fx.state.reviewFailures = { [fx.part.id]: 1 };
+  fx.state.reviewRounds = { [fx.part.id]: 1 };
   const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store: memoryStore(fx.state) });
   const opened = t.gh.open(fx.part.key, 7);
   opened.headRefOid = "sha8";
@@ -5007,7 +5013,7 @@ test("the review after a fix round is still a re-review (MET-243, D-061)", async
       at: "2026-11-27T10:00:00.000Z",
     },
   };
-  state.reviewFailures = { [part.id]: 1 };
+  state.reviewRounds = { [part.id]: 1 };
   const config = mergeLayers([
     {
       scope: "workspace",
@@ -5064,6 +5070,7 @@ test("a nit never sends a part back (MET-225)", async () => {
   assert.equal(fx.part.state, "In Review", "an approve with a nit leaves the part alone");
   assert.equal(store.state.qaFeedback[fx.part.id], undefined);
   assert.equal(store.state.reviewFailures[fx.part.id], undefined);
+  assert.equal(store.state.reviewRounds?.[fx.part.id], undefined);
   assert.deepEqual((await t.loop.tick()).dispatched, [], "no builder run starts");
 });
 
@@ -5106,7 +5113,7 @@ test("a blocking design finding is sent back as a fix with the coordinator's hin
   await t.loop.idle();
 
   assert.equal(fx.part.state, "Ready", "the coordinator's fix sends the part back");
-  assert.equal(store.state.reviewFailures[fx.part.id], 1);
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 1);
   assert.deepEqual(store.state.qaFeedback[fx.part.id], {
     source: "review",
     prUrl: "https://github.test/o/r/pull/7",
@@ -5130,7 +5137,7 @@ test("a blocking design finding is sent back as a fix with the coordinator's hin
 
 test("review round 6 at limits.max_review_rounds escalates with no coordinator run (MET-244, D-062)", async () => {
   const fx = reviewFixture({ withQa: false });
-  fx.state.reviewFailures = { [fx.part.id]: 5 };
+  fx.state.reviewRounds = { [fx.part.id]: 5 };
   fx.state.qaFeedback = {
     [fx.part.id]: { source: "review", failing: ["R1 (src/old.ts:1) Still open."] },
   };
@@ -5161,7 +5168,8 @@ test("review round 6 at limits.max_review_rounds escalates with no coordinator r
 
   assert.equal(fx.part.state, "Needs input");
   assert.equal(fx.parent.state, "Needs input");
-  assert.equal(store.state.reviewFailures[fx.part.id], undefined, "the count is cleared");
+  assert.equal(store.state.reviewRounds?.[fx.part.id], undefined, "the round count is cleared");
+  assert.equal(store.state.reviewFailures[fx.part.id], undefined, "the failed-run count is clear");
   assert.equal(store.state.qaFeedback[fx.part.id], undefined, "the review feedback is cleared");
   assert.equal(
     t.adapter.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
@@ -5180,6 +5188,136 @@ test("review round 6 at limits.max_review_rounds escalates with no coordinator r
     1,
     "one notice with the cap reason",
   );
+});
+
+test("a cap escalation whose parent move fails retries with the cap reason (MET-244, D-062)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  fx.state.reviewRounds = { [fx.part.id]: 5 };
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  await t.loop.tick();
+
+  const moveTo = fx.linear.moveTo.bind(fx.linear);
+  let down = true;
+  fx.linear.moveTo = async (id, state) => {
+    if (down && id === fx.parent.id && state === "Needs input") {
+      down = false;
+      throw new Error("fetch failed");
+    }
+    return moveTo(id, state);
+  };
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "changes_requested", findings: [blocking] }),
+  );
+  await t.loop.idle();
+
+  const saved = store.state.pendingReviewSettle?.[fx.part.id];
+  assert.equal(saved?.roundCap, true, "the cap decision is saved before the first write");
+  assert.deepEqual(saved?.done, [`comment on ${fx.parent.key}`], "the comment is the done step");
+  assert.equal(fx.parent.state, "In Progress", "the parent move did not land");
+  assert.equal(fx.part.state, "In Review", "the part move waits");
+  assert.equal(t.pings.length, 0, "no notice before the moves finish");
+
+  await t.loop.tick();
+
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(fx.part.state, "Needs input");
+  assert.equal(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key).length,
+    1,
+    "the parent comment is posted once",
+  );
+  assert.equal(
+    t.pings.filter((ping) => ping.includes("needs input (review round cap reached)")).length,
+    1,
+    "the retry sends the cap reason",
+  );
+  assert.equal(
+    t.pings.filter((ping) => ping.includes("after the upgrade")).length,
+    0,
+    "a saved cap decision is never read as a legacy escalation",
+  );
+  assert.equal((await store.load()).pendingReviewSettle, undefined, "the record goes when done");
+});
+
+test("a saved fix replays as a send-back after the cap is lowered (MET-244, D-062)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.reviewRounds = { [fx.part.id]: 5 };
+  fx.state.pendingReviewSettle = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      decision: { decision: "fix", hints: [{ id: "R1", hint: "Fix it." }] },
+      done: [],
+    },
+  };
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 1, max_review_rounds: 3 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const store = memoryStore(fx.state);
+  const t = setup({ config, linear: fx.linear, store });
+
+  await t.loop.tick();
+
+  assert.ok(
+    t.linear.moves.some((move) => move.key === fx.part.key && move.state === "Ready"),
+    "the saved fix keeps its send-back route",
+  );
+  assert.equal(
+    t.linear.moves.some((move) => move.state === "Needs input"),
+    false,
+    "no escalation overrides the saved fix",
+  );
+  assert.equal(fx.parent.state, "In Progress", "the parent is left alone");
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 6, "the replayed round is counted");
+  assert.deepEqual(store.state.qaFeedback[fx.part.id]?.hints, [{ id: "R1", hint: "Fix it." }]);
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
+    0,
+    "no second coordinator run",
+  );
+  t.adapter.pending.at(-1)?.finish("cancelled");
+  await t.loop.idle();
 });
 
 test("a D-011 trigger escalates with the question, options and recommendation on the parent (MET-243)", async () => {
@@ -5216,6 +5354,7 @@ test("a D-011 trigger escalates with the question, options and recommendation on
   assert.equal(fx.parent.state, "Needs input");
   assert.equal(store.state.qaFeedback[fx.part.id], undefined, "nothing goes to the builder");
   assert.equal(store.state.reviewFailures[fx.part.id], undefined, "the escalation clears it");
+  assert.equal(store.state.reviewRounds?.[fx.part.id], undefined, "the round count is cleared");
   const comments = t.linear.comments.filter((c) => c.key === fx.parent.key);
   assert.equal(comments.length, 1, "one parent comment");
   const body = comments[0]?.body ?? "";
@@ -5258,7 +5397,7 @@ test("an escalation without a D-011 trigger is sent back as fix (MET-243)", asyn
   await t.loop.idle();
 
   assert.equal(fx.part.state, "Ready", "no trigger means a fix send-back");
-  assert.equal(store.state.reviewFailures[fx.part.id], 1);
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 1);
   assert.ok(
     t.logs.some((line) => line.includes("escalation without a D-011 trigger, sent back as fix")),
     t.logs.join("\n"),
@@ -5288,7 +5427,7 @@ test("an invalid coordinator reply is sent back as fix (MET-243)", async () => {
   await t.loop.idle();
 
   assert.equal(fx.part.state, "Ready", "an unusable reply is still a fix send-back");
-  assert.equal(store.state.reviewFailures[fx.part.id], 1);
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 1);
   assert.equal(store.state.qaFeedback[fx.part.id]?.hints, undefined, "no hints");
   assert.ok(
     t.logs.some((line) => line.includes("review decision failed")),
@@ -5299,7 +5438,7 @@ test("an invalid coordinator reply is sent back as fix (MET-243)", async () => {
 test("a second failed review asks the coordinator again instead of Needs input (MET-243, D-014)", async () => {
   const fx = reviewFixture({ withQa: false });
   const state = fx.state;
-  state.reviewFailures = { [fx.part.id]: 1 };
+  state.reviewRounds = { [fx.part.id]: 1 };
   const store = memoryStore(state);
   const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
   t.gh.open(fx.part.key, 7);
@@ -5321,7 +5460,7 @@ test("a second failed review asks the coordinator again instead of Needs input (
 
   assert.equal(fx.part.state, "Ready", "the second failure is sent back, not escalated");
   assert.equal(fx.parent.state, "In Progress");
-  assert.equal(store.state.reviewFailures[fx.part.id], 2, "the count goes up");
+  assert.equal(store.state.reviewRounds?.[fx.part.id], 2, "the round count goes up");
   assert.match(
     t.linear.comments.filter((c) => c.key === fx.parent.key).at(-1)?.body ?? "",
     /round 2 of 6 on .* PR #7: fix/,
@@ -5357,14 +5496,16 @@ test("a review run failure that is not a not-judged reason counts one review fai
   assert.equal(fx.part.state, "In Review", "the same head is re-queued");
   assert.equal(store.state.reviewerHeads?.[fx.part.id], undefined, "no verdict is recorded");
   assert.deepEqual(store.state.reviewFailures, { [fx.part.id]: 1 });
+  assert.equal(store.state.reviewRounds?.[fx.part.id], undefined, "no round is counted");
   assert.deepEqual((await t.loop.tick()).dispatched, [fx.part.key], "the review runs again");
   t.adapter.pending.at(-1)?.finish("cancelled");
   await t.loop.idle();
 });
 
-test("a part at Done clears its review failures (MET-225, D-014)", async () => {
+test("a part at Done clears its review failures and rounds (MET-225, D-014, D-062)", async () => {
   const fx = reviewFixture({ withQa: false });
   fx.state.reviewFailures = { [fx.part.id]: 1 };
+  fx.state.reviewRounds = { [fx.part.id]: 1 };
   const store = memoryStore(fx.state);
   const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
   t.gh.open(fx.part.key, 7);
@@ -5373,6 +5514,7 @@ test("a part at Done clears its review failures (MET-225, D-014)", async () => {
   await t.loop.tick();
 
   assert.equal(store.state.reviewFailures[fx.part.id], undefined);
+  assert.equal(store.state.reviewRounds?.[fx.part.id], undefined);
   assert.equal(store.state.shipped?.[fx.part.id], undefined);
 });
 
