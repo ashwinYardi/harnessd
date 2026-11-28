@@ -5380,6 +5380,61 @@ test("a D-011 trigger escalates with the question, options and recommendation on
   );
 });
 
+test("a design finding that needs a data model change escalates under D-011 (MET-244, D-062)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const adapter = fakeAdapter({
+    reviewDecision: JSON.stringify({
+      decision: "escalate",
+      trigger: "public_api_data_model_or_protected_path",
+      question: "May the fix add a field to the persisted loop state?",
+      options: ["Change the data model", "Keep the model and re-plan"],
+      recommendation: "Keep the model and re-plan the part.",
+    }),
+  });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, adapter, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  await t.loop.tick();
+
+  const design: ReviewFinding = {
+    file: "src/state.ts",
+    line: 42,
+    severity: "blocking",
+    kind: "design",
+    text: "The fix needs a new persisted field on LoopState.",
+  };
+  const reviewRun = t.adapter.pending[0];
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "changes_requested", findings: [design] }),
+  );
+  await t.loop.idle();
+
+  const decisionTask = t.adapter.tasks.find((task) => task.id.includes("-review-decision-r"));
+  assert.ok(decisionTask, "the coordinator decided the design finding");
+  assert.match(decisionTask.prompt, /The fix needs a new persisted field on LoopState\./);
+  assert.match(decisionTask.prompt, /D-011 escalation triggers/);
+
+  assert.equal(reviewRun?.task.readOnly, true, "the reviewer edits nothing");
+  assert.equal(fx.part.state, "Needs input");
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(store.state.qaFeedback[fx.part.id], undefined, "nothing goes to the builder");
+  const body = t.linear.comments.filter((c) => c.key === fx.parent.key).at(-1)?.body ?? "";
+  assert.match(body, /escalate \(`public_api_data_model_or_protected_path`\)/);
+  assert.match(body, /Trigger: changes a public API, the data model or a protected path/);
+  assert.match(body, /Question: May the fix add a field to the persisted loop state\?/);
+  assert.match(body, /- Change the data model\n- Keep the model and re-plan/);
+  assert.match(body, /Recommendation: Keep the model and re-plan the part\./);
+  assert.equal(
+    t.pings.filter((ping) =>
+      ping.includes("needs a human (public_api_data_model_or_protected_path)"),
+    ).length,
+    1,
+    "one notice",
+  );
+});
+
 test("an escalation without a D-011 trigger is sent back as fix (MET-243)", async () => {
   const fx = reviewFixture({ withQa: false });
   const adapter = fakeAdapter({
