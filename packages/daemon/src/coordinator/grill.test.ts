@@ -517,6 +517,10 @@ test("parseGrillReply reads an optional normalizedDoneWhen list", () => {
     bad('{"calls":[],"escalation":null,"normalizedDoneWhen":"One"}'),
     /normalizedDoneWhen: expected an array/,
   );
+  assert.match(
+    bad('{"calls":[],"escalation":null,"normalizedDoneWhen":["One","Two\\n# Hidden"]}'),
+    /normalizedDoneWhen\[1\]: must be one line/,
+  );
 });
 
 test("a term or draft that already exists is not announced as new", async () => {

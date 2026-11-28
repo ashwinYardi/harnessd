@@ -71,15 +71,25 @@ export function parseDoneWhen(body: string): DoneWhenItem[] {
 
 /** One unchecked checklist line per item, in the body's own line-ending style. */
 function checklist(items: string[]): string[] {
-  return items.map((item) => `- [ ] ${item}`);
+  return items.map((item) => `- [ ] ${item.trim()}`);
 }
 
 /**
  * Rewrites the checklist of the first "Done when" section, the one parseDoneWhen reads.
  * The header, the text before it, the section's other lines and every later section stay.
- * New items are unchecked. When the section has no checklist, the items go at its end.
+ * New items are unchecked and one line each. When the section has no checklist, the items
+ * go at its end. An item that is blank or spans lines is rejected: parseDoneWhen reads one
+ * line per item, so it would silently drop the rest and could mistake a heading for a section.
  */
 export function replaceDoneWhen(body: string, items: string[]): string {
+  for (const [i, item] of items.entries()) {
+    if (item.trim() === "") {
+      throw new Error(`replaceDoneWhen: item ${i} must be a non-empty string`);
+    }
+    if (/[\r\n]/.test(item)) {
+      throw new Error(`replaceDoneWhen: item ${i} must be one line`);
+    }
+  }
   const eol = body.includes("\r\n") ? "\r\n" : "\n";
   const lines = body.split(/\r?\n/);
   const result: string[] = [];

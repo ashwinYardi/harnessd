@@ -210,6 +210,9 @@ export function parseGrillReply(text: string): ParsedGrillReply {
       if (typeof item !== "string" || item.trim() === "") {
         return { ok: false, error: `normalizedDoneWhen[${i}]: expected a non-empty string` };
       }
+      if (/[\r\n]/.test(item)) {
+        return { ok: false, error: `normalizedDoneWhen[${i}]: must be one line` };
+      }
       normalizedDoneWhen.push(item.trim());
     }
     parsed.normalizedDoneWhen = normalizedDoneWhen;
