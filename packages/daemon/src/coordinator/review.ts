@@ -1011,6 +1011,11 @@ export interface ReviewSettleInput {
   notJudged?: ReviewNotJudged;
   /** A not-judged escalation a previous tick already decided (MET-232). */
   escalation?: ReviewEscalation;
+  /**
+   * A settle from before MET-243 that had already escalated and stopped. The loop sets it so
+   * only its remaining writes run; the parent comment is already in the done steps.
+   */
+  legacyEscalation?: boolean;
   /** The run's error, for the log line of a failed review. */
   error?: string;
   /** The GitHub review comment, when it was posted. */
@@ -1207,6 +1212,17 @@ export async function settleReview(
   if (input.escalation !== undefined) {
     const saved = notJudgedEscalation(input.escalation.reasons);
     return escalate(saved.reason, saved.detail, saved.comment);
+  }
+
+  // A settle from before MET-243 had already escalated: finish its remaining writes. The
+  // parent comment is in the done steps, so this only moves the issues and sends the notice,
+  // and no decision runs and no comment posts twice.
+  if (input.legacyEscalation === true) {
+    return escalate(
+      "review needs input after the upgrade",
+      `the review settle on ${part.key} escalated before the upgrade and its writes stopped`,
+      `the review settle on ${part.key} [PR #${pr.number}](${pr.url}) escalated before the upgrade. Finishing it now (D-059).`,
+    );
   }
 
   if (input.notJudged !== undefined) {

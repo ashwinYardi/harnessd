@@ -1254,7 +1254,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
    * settle write or the Linear reads it needs keep the record, so a later tick finishes the
    * settle without running the reviewer again for that verdict.
    */
-  async function settlePendingReview(s: LoopState, partId: string): Promise<void> {
+  async function settlePendingReview(
+    s: LoopState,
+    partId: string,
+    options: { retry?: boolean } = {},
+  ): Promise<void> {
     const record = s.pendingReview?.[partId];
     if (record === undefined || record.posted !== true) return;
     const prepared = await preparePendingReview(s, partId);
@@ -1284,17 +1288,26 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       parentKey: parent.key,
       blockers: [],
     };
-    await settleReviewPersisted(s, linked, parent, pr, {
-      ...(verdict === undefined
-        ? {}
-        : {
-            verdict: {
-              decision: verdict === "approved" ? "approve" : "changes_requested",
-              findings: findings ?? [],
-            },
-          }),
-      ...(record.reviewUrl === undefined ? {} : { reviewUrl: record.reviewUrl }),
-    });
+    await settleReviewPersisted(
+      s,
+      linked,
+      parent,
+      pr,
+      {
+        ...(verdict === undefined
+          ? {}
+          : {
+              verdict: {
+                decision: verdict === "approved" ? "approve" : "changes_requested",
+                findings: findings ?? [],
+              },
+            }),
+        ...(record.reviewUrl === undefined ? {} : { reviewUrl: record.reviewUrl }),
+      },
+      // A legacy record's done steps carry over, so a completed comment is never posted
+      // twice after the upgrade (MET-243).
+      { ...options, legacyDone: record.done ?? [] },
+    );
     if (s.pendingReviewSettle?.[partId] !== undefined) {
       // A network error stopped a write: keep the PR record and the settle record for the
       // next tick, as QA does (D-058).
@@ -1312,9 +1325,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   /**
    * Asks the coordinator to decide one blocking review (MET-243). It picks the next coordinator
    * harness by D-048, runs `decideReview` read-only in the owner's checkout, adds the run's
-   * usage to the parent's budget and records the switch. Undefined means no coordinator run
-   * could start (or there are no open findings); the settle then sends the findings back as a
-   * fix with no hints.
+   * usage to the parent's budget and records the switch. Undefined means no coordinator harness
+   * is available; the settle then waits without writing, so a fallback fix is never applied
+   * without being saved (MET-243).
    */
   async function decideReviewFor(
     s: LoopState,
@@ -1323,7 +1336,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     record: PendingReviewSettle,
   ): Promise<ReviewDecision | undefined> {
     const findings = (record.findings ?? []).filter((finding) => finding.severity === "blocking");
-    if (findings.length === 0) return undefined;
+    if (findings.length === 0) return { decision: "fix", hints: [] };
     const name = agentForRole(config, "coordinator");
     if (name === undefined) {
       log("no agent has role coordinator");
@@ -1369,13 +1382,29 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
   }
 
   /**
+   * True when a pending settle from before MET-243 had already escalated: the parent comment
+   * went out and no part send-back step did. A legacy fix send-back always posts the part
+   * comment first, so its done steps name the part.
+   */
+  function legacyEscalationStarted(
+    done: readonly string[],
+    part: LinkedIssue,
+    parent: Issue,
+  ): boolean {
+    if (!done.includes(`comment on ${parent.key}`)) return false;
+    return !done.includes(`comment on ${part.key}`) && !done.includes(`re-queue ${part.key}`);
+  }
+
+  /**
    * Saves a direct review settlement before its writes and keeps it until every step is
    * done (MET-230, D-058). Not-judged and failed-run settles have no PR comment record, so
    * an escalation that times out needs its own record to retry.
    *
    * A changes_requested verdict takes the coordinator's decision here, once, before the first
    * Linear write (MET-243). The saved decision is replayed after a restart with no second
-   * coordinator run; a save that fails writes nothing and returns pending.
+   * coordinator run; a save that fails writes nothing and returns pending. A retry needs a
+   * free run slot before a new coordinator run, and no coordinator harness leaves the round
+   * pending with no writes. A legacy settle that already escalated only finishes its writes.
    */
   async function settleReviewPersisted(
     s: LoopState,
@@ -1383,6 +1412,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     parent: Issue,
     pr: PullRequest,
     input: Omit<ReviewSettleInput, "part" | "parent" | "pr">,
+    options: { retry?: boolean; legacyDone?: readonly string[] } = {},
   ): Promise<void> {
     s.pendingReviewSettle ??= {};
     let record = s.pendingReviewSettle[part.id];
@@ -1403,24 +1433,48 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         ...(input.notJudged === undefined ? {} : { notJudged: input.notJudged }),
         ...(input.error === undefined ? {} : { error: input.error }),
         ...(input.reviewUrl === undefined ? {} : { reviewUrl: input.reviewUrl }),
-        done: [],
+        done: [...(options.legacyDone ?? [])],
       };
       s.pendingReviewSettle[part.id] = record;
       await save();
     }
-    if (record.verdict === "changes_requested" && record.decision === undefined) {
+    // A settle from before MET-243 already decided to escalate (a design finding or a second
+    // failed round) and its writes stopped. Finish it instead of asking the coordinator again,
+    // so the part is not sent back against the comment already on the parent. A not-judged
+    // record keeps its own saved escalation.
+    const legacyEscalation =
+      record.decision === undefined &&
+      record.notJudged === undefined &&
+      record.escalation === undefined &&
+      record.verdict === "changes_requested" &&
+      legacyEscalationStarted(record.done, part, parent);
+    if (
+      record.verdict === "changes_requested" &&
+      record.decision === undefined &&
+      !legacyEscalation
+    ) {
+      if (options.retry === true && s.inFlight.length >= config.limits.max_concurrent) {
+        // A retry does not inherit the reviewer's slot. Keep the round pending until one is
+        // free, so the coordinator run never exceeds max_concurrent (MET-243).
+        log(`${part.key}: no run slot for the review decision, the settle waits`);
+        return;
+      }
       const decision = await decideReviewFor(s, part, parent, record);
-      if (decision !== undefined) {
-        record.decision = decision;
-        try {
-          // The decision must be durable before the first Linear write, so a restart replays
-          // it instead of running the coordinator again (MET-243).
-          await saveRequired();
-        } catch (error) {
-          delete record.decision;
-          log(`${part.key}: could not save the review decision: ${message(error)}`);
-          return;
-        }
+      if (decision === undefined) {
+        // No coordinator harness can run. Wait instead of applying an unsaved fallback that a
+        // later replay could replace with an escalation (MET-243).
+        log(`${part.key}: no coordinator harness for the review decision, the settle waits`);
+        return;
+      }
+      record.decision = decision;
+      try {
+        // The decision must be durable before the first Linear write, so a restart replays
+        // it instead of running the coordinator again (MET-243).
+        await saveRequired();
+      } catch (error) {
+        delete record.decision;
+        log(`${part.key}: could not save the review decision: ${message(error)}`);
+        return;
       }
     }
     const settled = await settleReview(
@@ -1440,6 +1494,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         ...(record.decision === undefined ? {} : { decision: record.decision }),
         ...(record.notJudged === undefined ? {} : { notJudged: record.notJudged }),
         ...(record.escalation === undefined ? {} : { escalation: record.escalation }),
+        ...(legacyEscalation ? { legacyEscalation: true } : {}),
         ...(record.error === undefined ? {} : { error: record.error }),
         ...(record.reviewUrl === undefined ? {} : { reviewUrl: record.reviewUrl }),
       },
@@ -1524,7 +1579,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         blockers: [],
       };
       // The record already holds the inputs; the empty input is only a type placeholder.
-      await settleReviewPersisted(s, linked, parent, pr, {});
+      await settleReviewPersisted(s, linked, parent, pr, {}, { retry: true });
     }
   }
 
@@ -1535,7 +1590,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       // published, and leaves reviewer dispatch free (MET-230).
       if ((await preparePendingReview(s, partId)) === undefined) continue;
       if (!(await postPendingReview(s, partId))) continue;
-      await settlePendingReview(s, partId);
+      await settlePendingReview(s, partId, { retry: true });
     }
   }
 
