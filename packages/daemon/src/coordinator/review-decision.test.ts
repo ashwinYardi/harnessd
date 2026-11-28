@@ -306,6 +306,32 @@ test("a valid trigger still needs a question, options and a recommendation", () 
   }
 });
 
+test("a malformed escalation in prose falls back to fix with no hints", async () => {
+  const prose = `Here is the decision:\n${escalateReply("money")}\nThat is all.`;
+  const lines: string[] = [];
+  const result = await decideReview(
+    { part, findings: open, round: 1, maxRounds: 5 },
+    { ...deps(adapterReplying(prose).adapter), log: (line) => lines.push(line) },
+  );
+  assert.deepEqual(result.decision, { decision: "fix", hints: [] });
+  assert.match(result.error ?? "", /not JSON/);
+  assert.match(lines[0] ?? "", /review decision failed \(not JSON: .*\), sent back as fix/);
+});
+
+test("a valid escalation rejects a findings field instead of asking the human", async () => {
+  const reply = escalateReply("public_api_data_model_or_protected_path", { findings: 42 });
+  const parsed = parseReviewDecision(reply, open, part.key);
+  assert.equal(parsed.ok, false);
+  if (!parsed.ok) assert.match(parsed.error, /unknown key "findings"/);
+
+  const result = await decideReview(
+    { part, findings: open, round: 1, maxRounds: 5 },
+    deps(adapterReplying(reply).adapter),
+  );
+  assert.deepEqual(result.decision, { decision: "fix", hints: [] });
+  assert.match(result.error ?? "", /unknown key "findings"/);
+});
+
 test("invalid JSON and a schema error fall back to fix with no hints", async () => {
   const invalid = await decideReview(
     { part, findings: open, round: 1, maxRounds: 5 },

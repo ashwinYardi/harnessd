@@ -19,7 +19,7 @@ import {
 import { agentPromptHeader, COORDINATOR_MAX_TURNS } from "./dispatch.ts";
 import { coordinatorTask, runForReply } from "./grill.ts";
 import { type AgentMemory, memorySection } from "./prompt.ts";
-import { parseStrictJson, partItems } from "./qa.ts";
+import { partItems } from "./qa.ts";
 import type { ReviewFinding } from "./review.ts";
 import { extractSection } from "./split.ts";
 
@@ -182,11 +182,15 @@ export function parseReviewDecision(
 ): ParsedReviewDecision {
   const blocking = findings.filter((finding) => finding.severity === "blocking");
   const openIds = openBlockerIds(blocking);
-  const parsed = parseStrictJson(text);
-  if ("error" in parsed) {
-    return { ok: false, error: `not JSON: ${parsed.error.message}`, kind: "not_json" };
+  // The whole message is the reply: unlike QA and review verdicts, never pull an object out
+  // of prose or repair an escape. A malformed escalation must fall back to fix, not ask the
+  // human something the coordinator did not strictly say.
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch (error) {
+    return { ok: false, error: `not JSON: ${(error as Error).message}`, kind: "not_json" };
   }
-  const value = parsed.value;
   if (!isObj(value)) return { ok: false, error: "expected a JSON object" };
   if (value.decision !== "fix" && value.decision !== "escalate") {
     return { ok: false, error: 'decision: expected "fix" or "escalate"' };
@@ -219,8 +223,7 @@ export function parseReviewDecision(
       key !== "trigger" &&
       key !== "question" &&
       key !== "options" &&
-      key !== "recommendation" &&
-      key !== "findings"
+      key !== "recommendation"
     ) {
       return { ok: false, error: `unknown key "${key}"` };
     }
