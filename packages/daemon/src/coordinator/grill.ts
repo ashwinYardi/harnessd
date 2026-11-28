@@ -61,10 +61,12 @@ export type ParsedGrillReply =
       terms?: GlossaryTerm[];
       /** Present when the reply has `precedents`. */
       precedents?: Precedent[];
+      /** Present when the ticket's Done-when list cannot pass the plan check. */
+      normalizedDoneWhen?: string[];
     }
   | { ok: false; error: string };
 
-const REPLY_KEYS = ["calls", "escalation", "terms", "precedents"];
+const REPLY_KEYS = ["calls", "escalation", "terms", "precedents", "normalizedDoneWhen"];
 
 /**
  * The JSON inside a reply: the whole text, the first ``` / ```json fenced block, or a JSON
@@ -194,6 +196,26 @@ export function parseGrillReply(text: string): ParsedGrillReply {
       });
     }
     parsed.precedents = precedents;
+  }
+
+  if ("normalizedDoneWhen" in value) {
+    if (!Array.isArray(value.normalizedDoneWhen)) {
+      return { ok: false, error: "normalizedDoneWhen: expected an array" };
+    }
+    if (value.normalizedDoneWhen.length === 0) {
+      return { ok: false, error: "normalizedDoneWhen: expected a non-empty array" };
+    }
+    const normalizedDoneWhen: string[] = [];
+    for (const [i, item] of value.normalizedDoneWhen.entries()) {
+      if (typeof item !== "string" || item.trim() === "") {
+        return { ok: false, error: `normalizedDoneWhen[${i}]: expected a non-empty string` };
+      }
+      if (/[\r\n\u2028\u2029]/.test(item)) {
+        return { ok: false, error: `normalizedDoneWhen[${i}]: must be one line` };
+      }
+      normalizedDoneWhen.push(item.trim());
+    }
+    parsed.normalizedDoneWhen = normalizedDoneWhen;
   }
   return parsed;
 }
