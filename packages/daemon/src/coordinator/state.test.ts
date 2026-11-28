@@ -645,6 +645,53 @@ test("a pre-split file keeps the re-review trigger for a confirmed send-back (ME
   assert.equal(parsed.reviewFailures["part-2"], undefined, "an approved head keeps no round");
 });
 
+test("a failed-run-only legacy count with a pending blocking head seeds no round (MET-244, D-062)", () => {
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { "part-1": 2 },
+      reviewerHeads: {
+        "part-1": {
+          sha: "sha7",
+          verdict: "changes_requested",
+          findings: [
+            {
+              file: "api.ts",
+              line: 1,
+              severity: "blocking",
+              kind: "code",
+              text: "The cache grows without a limit.",
+            },
+          ],
+          at: "2026-11-27T10:00:00.000Z",
+        },
+      },
+      pendingReviewSettle: {
+        "part-1": {
+          partId: "part-1",
+          partKey: "MET-41",
+          parentId: "parent-1",
+          prNumber: 7,
+          prUrl: "https://github.test/o/r/pull/7",
+          head: "sha7",
+          verdict: "changes_requested",
+          findings: [
+            {
+              file: "api.ts",
+              line: 1,
+              severity: "blocking",
+              kind: "code",
+              text: "The cache grows without a limit.",
+            },
+          ],
+          done: [],
+        },
+      },
+    }),
+  );
+  assert.equal(parsed.reviewFailures["part-1"], undefined, "a pending send-back keeps no round");
+});
+
 test("reviewRunFailures defaults empty and keeps positive counts apart from rounds (MET-244, D-062)", async () => {
   assert.deepEqual(parseLoopState('{"inFlight":[]}').reviewRunFailures, {}, "old files still load");
   const parsed = parseLoopState(

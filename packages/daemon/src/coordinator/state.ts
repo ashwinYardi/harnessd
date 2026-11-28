@@ -1064,23 +1064,24 @@ export function parseLoopState(text: string): LoopState {
   const legacyCounts = counts(raw.reviewFailures);
   const legacyRounds: Record<string, number> = {};
   if (!splitCounters) {
-    // Keep the D-061 re-review trigger for a confirmed legacy send-back: one round keeps
-    // `reviewFailures > 0` true without trusting the mixed legacy magnitude.
+    // Keep the D-061 re-review trigger for a completed legacy send-back: one round keeps
+    // `reviewFailures > 0` true without trusting the mixed legacy magnitude. A pending or
+    // partly done settle stays at 0, so its replay counts that same verdict once.
     const heads = raw.reviewerHeads === undefined ? {} : reviewerHeads(raw.reviewerHeads);
+    const pending = raw.pendingReview === undefined ? {} : pendingReviews(raw.pendingReview);
     const settles =
       raw.pendingReviewSettle === undefined ? {} : pendingReviewSettles(raw.pendingReviewSettle);
-    const feedbacks = feedback(raw.qaFeedback);
     for (const [id, head] of Object.entries(heads)) {
       if (head.verdict !== "changes_requested") continue;
       if (!head.findings.some((finding) => finding.severity === "blocking")) continue;
-      const settle = Object.values(settles).find((record) => record.partId === id);
-      const confirmed =
-        (legacyCounts[id] ?? 0) > 0 ||
-        feedbacks[id]?.source === "review" ||
-        (settle !== undefined &&
-          (settle.done.includes(`comment on ${settle.partKey}`) ||
-            settle.done.includes(`re-queue ${settle.partKey}`)));
-      if (confirmed) legacyRounds[id] = 1;
+      if ((legacyCounts[id] ?? 0) <= 0) continue;
+      const settle = settles[id];
+      const pendingRecord = pending[id] !== undefined || settle !== undefined;
+      const sendBackComplete =
+        !pendingRecord ||
+        (settle?.done.includes(`comment on ${settle.partKey}`) === true &&
+          settle.done.includes(`re-queue ${settle.partKey}`));
+      if (sendBackComplete) legacyRounds[id] = 1;
     }
   }
   return {

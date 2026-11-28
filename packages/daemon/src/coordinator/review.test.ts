@@ -1420,6 +1420,118 @@ test("failed review runs and changes_requested rounds have separate caps (MET-24
   assert.deepEqual(notices, ["review failed twice"], "the round count does not change the cap");
 });
 
+test("a partly done legacy send-back starts at round 0 and replay counts it once (MET-244, D-062)", async () => {
+  const finding = {
+    file: "src/a.ts",
+    line: 1,
+    severity: "blocking" as const,
+    kind: "code" as const,
+    text: "A blocking fault.",
+  };
+  const state = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { [part.id]: 1 },
+      reviewerHeads: {
+        [part.id]: {
+          sha: "sha223",
+          verdict: "changes_requested",
+          findings: [finding],
+          at: "2026-11-27T10:00:00.000Z",
+        },
+      },
+      pendingReviewSettle: {
+        [part.id]: {
+          partId: part.id,
+          partKey: part.key,
+          parentId: parent.id,
+          prNumber: 223,
+          prUrl: "https://github.test/o/r/pull/223",
+          head: "sha223",
+          verdict: "changes_requested",
+          findings: [finding],
+          done: [`comment on ${part.key}`],
+        },
+      },
+    }),
+  );
+  assert.equal(state.reviewFailures[part.id], undefined, "a partly done send-back starts at 0");
+
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment() {
+        return "comment-1";
+      },
+      async moveTo() {},
+    },
+    notifier: { async notify() {} },
+    maxFailures: 2,
+    maxReviewRounds: 6,
+  };
+  assert.equal(
+    await settleReview(
+      state,
+      {
+        part,
+        parent,
+        pr: pr(),
+        verdict: { decision: "changes_requested", findings: [finding] },
+        decision: { decision: "fix", hints: [] },
+      },
+      deps,
+    ),
+    "sent_back",
+  );
+  assert.equal(state.reviewFailures[part.id], 1, "the replay counts the verdict once");
+});
+
+test("the default round cap escalates on the sixth blocking verdict, not before (MET-244, D-062)", async () => {
+  const notices: string[] = [];
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment() {
+        return "comment-1";
+      },
+      async moveTo() {},
+    },
+    notifier: {
+      async notify(notice) {
+        notices.push(notice.reason ?? "");
+      },
+    },
+    maxFailures: 2,
+    maxReviewRounds: 6,
+  };
+  const finding = {
+    file: "src/a.ts",
+    line: 1,
+    severity: "blocking" as const,
+    kind: "code" as const,
+    text: "A blocking fault.",
+  };
+  const verdict = { decision: "changes_requested" as const, findings: [finding] };
+  const decision = { decision: "fix" as const, hints: [{ id: "R1", hint: "Fix it." }] };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: {},
+    reviewRunFailures: {},
+    qaFeedback: {},
+  };
+
+  for (let round = 1; round <= 5; round++) {
+    assert.equal(
+      await settleReview(state, { part, parent, pr: pr(), verdict, decision }, deps),
+      "sent_back",
+    );
+    assert.equal(state.reviewFailures[part.id], round);
+  }
+  assert.deepEqual(notices, [], "five blocking verdicts stay below the default cap");
+  assert.equal(
+    await settleReview(state, { part, parent, pr: pr(), verdict, roundCap: true }, deps),
+    "escalated",
+  );
+  assert.deepEqual(notices, ["review round cap reached"]);
+});
+
 test("a saved fix is honored when the round count is at or over a lowered cap (MET-244, D-062)", async () => {
   const notices: string[] = [];
   const deps: ReviewSettleDeps = {
