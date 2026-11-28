@@ -69,6 +69,62 @@ export function parseDoneWhen(body: string): DoneWhenItem[] {
   return items;
 }
 
+/** One unchecked checklist line per item, in the body's own line-ending style. */
+function checklist(items: string[]): string[] {
+  return items.map((item) => `- [ ] ${item}`);
+}
+
+/**
+ * Rewrites the checklist of the first "Done when" section, the one parseDoneWhen reads.
+ * The header, the text before it, the section's other lines and every later section stay.
+ * New items are unchecked. When the section has no checklist, the items go at its end.
+ */
+export function replaceDoneWhen(body: string, items: string[]): string {
+  const eol = body.includes("\r\n") ? "\r\n" : "\n";
+  const lines = body.split(/\r?\n/);
+  const result: string[] = [];
+  let inSection = false;
+  let placed = false;
+  let done = false;
+
+  /** Adds the items before the section's trailing blank lines. */
+  const insertAtSectionEnd = () => {
+    let at = result.length;
+    while (at > 0 && result[at - 1]?.trim() === "") at -= 1;
+    result.splice(at, 0, ...checklist(items));
+  };
+
+  for (const line of lines) {
+    if (done) {
+      result.push(line);
+      continue;
+    }
+    if (!inSection) {
+      result.push(line);
+      inSection = DONE_WHEN_HEADER.test(line);
+      continue;
+    }
+    if (SECTION_START.test(line)) {
+      if (!placed) insertAtSectionEnd();
+      placed = true;
+      done = true;
+      inSection = false;
+      result.push(line);
+      continue;
+    }
+    if (CHECKLIST_ITEM.test(line)) {
+      if (!placed) {
+        result.push(...checklist(items));
+        placed = true;
+      }
+      continue;
+    }
+    result.push(line);
+  }
+  if (inSection && !placed) insertAtSectionEnd();
+  return result.join(eol);
+}
+
 export function parsePriority(value: number | null | undefined): Priority {
   return value === 1 || value === 2 || value === 3 || value === 4 ? value : 0;
 }

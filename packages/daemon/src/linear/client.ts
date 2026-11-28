@@ -356,6 +356,17 @@ export class LinearClient {
     }
   }
 
+  /** Replaces an issue's description (markdown body). */
+  async updateDescription(issueId: string, description: string): Promise<void> {
+    const data: { issueUpdate: { success: boolean } } = await this.request(ISSUE_UPDATE_MUTATION, {
+      id: issueId,
+      input: { description },
+    });
+    if (!data.issueUpdate?.success) {
+      throw new LinearError("graphql", `Linear did not update the description of ${issueId}.`);
+    }
+  }
+
   /** Posts a markdown comment; returns the comment id. */
   async comment(issueId: string, body: string): Promise<string> {
     const data: { commentCreate: { success: boolean; comment: { id: string } | null } } =

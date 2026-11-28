@@ -488,6 +488,37 @@ test("parseGrillReply validates terms and precedents", () => {
   );
 });
 
+test("parseGrillReply reads an optional normalizedDoneWhen list", () => {
+  const items = ["One requirement", "Two requirements", "Three requirements"];
+  const ok = parseGrillReply(
+    JSON.stringify({ calls: [], escalation: null, normalizedDoneWhen: items }),
+  );
+  assert.deepEqual(ok, { ok: true, calls: [], escalation: null, normalizedDoneWhen: items });
+  assert.deepEqual(
+    parseGrillReply('{"calls":[],"escalation":null}'),
+    { ok: true, calls: [], escalation: null },
+    "a reply without the key stays valid",
+  );
+
+  const bad = (text: string) => {
+    const r = parseGrillReply(text);
+    assert.equal(r.ok, false, text);
+    return r.ok ? "" : r.error;
+  };
+  assert.match(
+    bad('{"calls":[],"escalation":null,"normalizedDoneWhen":[]}'),
+    /normalizedDoneWhen: expected a non-empty array/,
+  );
+  assert.match(
+    bad('{"calls":[],"escalation":null,"normalizedDoneWhen":["One","  "]}'),
+    /normalizedDoneWhen\[1\]: expected a non-empty string/,
+  );
+  assert.match(
+    bad('{"calls":[],"escalation":null,"normalizedDoneWhen":"One"}'),
+    /normalizedDoneWhen: expected an array/,
+  );
+});
+
 test("a term or draft that already exists is not announced as new", async () => {
   const s = setup([
     reply({

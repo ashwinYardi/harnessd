@@ -80,11 +80,14 @@ The prompt carries the method, the coordinator instructions, the issue (title, b
   "calls": [{ "question": "…", "answer": "…", "basis": "…" }],
   "escalation": null,
   "terms": [{ "term": "…", "definition": "…", "avoid": ["…"] }],
-  "precedents": [{ "title": "…", "decision": "…", "why": "…" }]
+  "precedents": [{ "title": "…", "decision": "…", "why": "…" }],
+  "normalizedDoneWhen": ["…"]
 }
 ```
 
-`terms` and `precedents` are optional; a reply without them is valid. `avoid` is optional. A precedent is a call that is hard to reverse, surprising without context and the result of a real trade-off (the domain-modeling decision-record test). It is also listed in `calls`.
+`terms`, `precedents` and `normalizedDoneWhen` are optional; a reply without them is valid. `avoid` is optional. A precedent is a call that is hard to reverse, surprising without context and the result of a real trade-off (the domain-modeling decision-record test). It is also listed in `calls`.
+
+`normalizedDoneWhen` is set only when the ticket's Done-when list cannot pass the plan check: a docs-only ticket with more than 3 items, or more than 18 items (`MAX_PLAN_PARTS` x `MAX_PART_DONE_WHEN`). The list keeps every original requirement and fits the plan rules. The loop saves it on the parent's description with a comment that shows the old and new lists, then plans from it (D-063). An empty array or a blank entry is invalid. This is a reversible ticket clarification, not a D-011 trigger.
 
 `escalation` is `null` or `{ "trigger", "question", "why" }`. `trigger` is one of the D-011 categories (`ESCALATION_TRIGGERS`): `irreversible`, `money`, `secret_or_account`, `public_api_data_model_or_protected_path`, `taste_no_precedent`.
 

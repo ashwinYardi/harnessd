@@ -7,6 +7,7 @@ import {
   parseIssue,
   parseSize,
   type RawIssue,
+  replaceDoneWhen,
 } from "./parse.ts";
 
 test("parseSize reads the Size line in its common spellings", () => {
@@ -41,6 +42,67 @@ test("parseDoneWhen collects the checklist up to the next section", () => {
     { text: "CRLF works", checked: false },
   ]);
   assert.deepEqual(parseDoneWhen("no checklist"), []);
+});
+
+test("replaceDoneWhen rewrites only the first Done when checklist", () => {
+  const body = [
+    "**Why**",
+    "The old list was too long.",
+    "",
+    "## Done when",
+    "Every item below:",
+    "- [ ] Lists Ready issues",
+    "- [x] Moves states",
+    "",
+    "**Spec links**",
+    "- [ ] keep this after the section",
+    "",
+    "## Done when",
+    "- [ ] a second section stays untouched",
+  ].join("\n");
+  const items = ["Lists Ready issues and moves states", "Posts comments", "Passes the tests"];
+  const result = replaceDoneWhen(body, items);
+
+  assert.equal(
+    result,
+    [
+      "**Why**",
+      "The old list was too long.",
+      "",
+      "## Done when",
+      "Every item below:",
+      "- [ ] Lists Ready issues and moves states",
+      "- [ ] Posts comments",
+      "- [ ] Passes the tests",
+      "",
+      "**Spec links**",
+      "- [ ] keep this after the section",
+      "",
+      "## Done when",
+      "- [ ] a second section stays untouched",
+    ].join("\n"),
+  );
+  assert.deepEqual(
+    parseDoneWhen(result),
+    items.map((text) => ({ text, checked: false })),
+  );
+  assert.deepEqual(parseDoneWhen(body).length, 2, "the original body is not mutated");
+});
+
+test("replaceDoneWhen keeps CRLF line endings", () => {
+  const body = "**Goal**\r\n\r\n**Done when:**\r\n- [ ] old\r\n\r\n**Verify**\r\npnpm test";
+  assert.equal(
+    replaceDoneWhen(body, ["new one", "new two"]),
+    "**Goal**\r\n\r\n**Done when:**\r\n- [ ] new one\r\n- [ ] new two\r\n\r\n**Verify**\r\npnpm test",
+  );
+});
+
+test("replaceDoneWhen adds items when the section has no checklist yet", () => {
+  const body = "**Done when**\nNo list yet.\n\n**Verify**\nrun it";
+  assert.equal(
+    replaceDoneWhen(body, ["one"]),
+    "**Done when**\nNo list yet.\n- [ ] one\n\n**Verify**\nrun it",
+  );
 });
 
 test("parseIssue maps a raw node and tolerates nulls", () => {

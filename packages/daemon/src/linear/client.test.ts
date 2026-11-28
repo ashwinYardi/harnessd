@@ -442,6 +442,28 @@ test("comment posts a commentCreate mutation and returns the comment id", async 
   });
 });
 
+test("updateDescription sends the description in an issueUpdate mutation", async () => {
+  const { linear, sent } = client([{ fixture: "issue-update" }]);
+  const description = "**Goal**\n\n**Done when**\n- [ ] One";
+  await linear.updateDescription(MET12_ID, description);
+
+  assert.match(
+    sent[0]?.query ?? "",
+    /mutation IssueUpdate\(\$id: String!, \$input: IssueUpdateInput!\)/,
+  );
+  assert.deepEqual(sent[0]?.variables, { id: MET12_ID, input: { description } });
+});
+
+test("updateDescription fails clearly when Linear does not update the issue", async () => {
+  const { linear } = client([{ body: { data: { issueUpdate: { success: false, issue: null } } } }]);
+  await assert.rejects(linear.updateDescription(MET12_ID, "new body"), (error: unknown) => {
+    assert.ok(error instanceof LinearError);
+    assert.equal(error.code, "graphql");
+    assert.match(error.message, /did not update the description/);
+    return true;
+  });
+});
+
 test("a missing API key fails before any request", async () => {
   for (const apiKey of [secrets(undefined), secrets("  "), async () => undefined]) {
     const fake = replay([]);
