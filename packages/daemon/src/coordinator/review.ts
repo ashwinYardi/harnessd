@@ -1129,8 +1129,7 @@ function hintFor(decision: ReviewDecision | undefined, id: string): string | und
  * loop keeps the record for a retry and skips the steps already done (D-058).
  */
 export async function settleReview(
-  state: Pick<LoopState, "reviewFailures" | "qaFeedback"> & {
-    reviewRounds?: LoopState["reviewRounds"];
+  state: Pick<LoopState, "reviewFailures" | "reviewRunFailures" | "qaFeedback"> & {
     harnessSwitch?: LoopState["harnessSwitch"];
   },
   input: ReviewSettleInput,
@@ -1192,7 +1191,7 @@ export async function settleReview(
     );
     if (stopped) return "pending";
     delete state.reviewFailures[part.id];
-    if (state.reviewRounds !== undefined) delete state.reviewRounds[part.id];
+    delete state.reviewRunFailures[part.id];
     delete state.qaFeedback[part.id];
     if (state.harnessSwitch !== undefined) {
       // Needs input ends any harness switch for the part and the parent (D-048).
@@ -1260,7 +1259,8 @@ export async function settleReview(
   }
 
   if (input.verdict === undefined) {
-    const failures = (state.reviewFailures[part.id] ?? 0) + 1;
+    // A failed run is not a review round: it has its own count and its own cap (D-014, D-062).
+    const failures = (state.reviewRunFailures[part.id] ?? 0) + 1;
     if (failures >= deps.maxFailures) {
       return escalate(
         `review failed ${times(failures)}`,
@@ -1268,7 +1268,7 @@ export async function settleReview(
         `the review failed ${times(failures)} on ${part.key} [PR #${pr.number}](${pr.url}), so this needs a human (D-014). ${part.key} and ${parent.key} are in Needs input.\n\n${oneLine(input.error ?? "no verdict")}`,
       );
     }
-    state.reviewFailures[part.id] = failures;
+    state.reviewRunFailures[part.id] = failures;
     log(`${part.key}: review failed (${oneLine(input.error ?? "no verdict")}), re-queued`);
     return "requeued";
   }
@@ -1286,7 +1286,7 @@ export async function settleReview(
   }
 
   // A changes_requested verdict counts one review round, apart from failed review runs (D-062).
-  const rounds = (state.reviewRounds?.[part.id] ?? 0) + 1;
+  const rounds = (state.reviewFailures[part.id] ?? 0) + 1;
   const round = `round ${rounds} of ${deps.maxReviewRounds}`;
 
   // The cap applies only to a new settlement, or to a cap the loop already saved. A saved
@@ -1363,8 +1363,7 @@ export async function settleReview(
   );
   if (stopped) return "pending";
   state.qaFeedback[part.id] = feedback;
-  state.reviewRounds ??= {};
-  state.reviewRounds[part.id] = rounds;
+  state.reviewFailures[part.id] = rounds;
   log(
     `${part.key}: review changes requested, sent back with ${blocking.length} finding${blocking.length === 1 ? "" : "s"}`,
   );

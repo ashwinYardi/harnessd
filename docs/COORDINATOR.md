@@ -55,7 +55,7 @@ An escalate needs one D-011 trigger, a non-empty question, at least one option a
 
 **Fix fallback.** An invalid or unusable reply, an unknown finding id, a failed or limited run, or an escalate whose trigger is missing or unknown is a fix send-back with no hints. The loop logs one `review decision failed` or `escalation without a D-011 trigger, sent back as fix` line. The verdict still counts one review round, as any `changes_requested` verdict does. Nothing waits on a human by accident.
 
-**Cap.** At or over `limits.max_review_rounds` (default 6) the loop starts no decision run. It saves the cap on the pending settlement before the first write, then escalates with one parent comment listing the open findings, moves both issues to Needs input and sends one notice with the reason `review round cap reached`. The round counter is separate from failed review runs, so a failed run never consumes a round and a round never consumes a failed run.
+**Cap.** At or over `limits.max_review_rounds` (default 6) the loop starts no decision run. It saves the cap on the pending settlement before the first write, then escalates with one parent comment listing the open findings, moves both issues to Needs input and sends one notice with the reason `review round cap reached`. The round counter (`reviewFailures`) is separate from failed review runs (`reviewRunFailures`), so a failed run never consumes a round and a round never consumes a failed run.
 
 ## Method: grill-with-docs
 grill-with-docs (D-017) is the `grilling` and `domain-modeling` skills together. Its SKILL.md has `disable-model-invocation: true`, so a headless run cannot start it with the Skill tool. The prompt carries the method instead.

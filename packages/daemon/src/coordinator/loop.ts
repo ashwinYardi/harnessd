@@ -945,7 +945,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         // A part at Done has no review failures or rounds left to cap (MET-225, D-062).
         if (current === "done") {
           if (s.reviewFailures !== undefined) delete s.reviewFailures[id];
-          if (s.reviewRounds !== undefined) delete s.reviewRounds[id];
+          if (s.reviewRunFailures !== undefined) delete s.reviewRunFailures[id];
         }
         changed = true;
         continue;
@@ -1360,7 +1360,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       {
         part,
         findings,
-        round: (s.reviewRounds?.[part.id] ?? 0) + 1,
+        round: (s.reviewFailures[part.id] ?? 0) + 1,
         maxRounds: config.limits.max_review_rounds,
         ...(memory === undefined ? {} : { memory }),
       },
@@ -1468,7 +1468,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       record.roundCap !== true &&
       !legacyEscalation
     ) {
-      const nextRound = (s.reviewRounds?.[part.id] ?? 0) + 1;
+      const nextRound = (s.reviewFailures[part.id] ?? 0) + 1;
       // A legacy send-back keeps its promised Ready move. A new round at the cap saves the cap
       // decision before the first write, so a retry sends the cap reason, not a legacy one
       // (MET-244, D-062).
@@ -2586,7 +2586,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       const savedBlocking = (recorded?.findings ?? []).filter(
         (finding) => finding.severity === "blocking",
       );
-      const rounds = s.reviewRounds?.[part.id] ?? 0;
+      const rounds = s.reviewFailures[part.id] ?? 0;
       // A re-review checks only the saved findings and the delta (MET-234, D-061).
       const reReview =
         recorded?.verdict === "changes_requested" &&

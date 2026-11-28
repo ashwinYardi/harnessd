@@ -614,7 +614,11 @@ test("a carried saved finding keeps its new evidence in the send-back and across
     maxFailures: 3,
     maxReviewRounds: 6,
   };
-  const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: {},
+    reviewRunFailures: {},
+    qaFeedback: {},
+  };
   const verdict = {
     decision: "changes_requested" as const,
     saved: [
@@ -662,8 +666,8 @@ test("a re-review settle sends back only the open blocking findings and counts o
     maxReviewRounds: 6,
   };
   const state: Parameters<typeof settleReview>[0] = {
-    reviewFailures: {},
-    reviewRounds: { [part.id]: 1 },
+    reviewFailures: { [part.id]: 1 },
+    reviewRunFailures: {},
     qaFeedback: {},
   };
   const open: ReviewFinding = {
@@ -699,8 +703,8 @@ test("a re-review settle sends back only the open blocking findings and counts o
   };
 
   assert.equal(await settleReview(state, { part, parent, pr: pr(), verdict }, deps), "sent_back");
-  assert.equal(state.reviewRounds?.[part.id], 2, "one more review round");
-  assert.equal(state.reviewFailures[part.id], undefined, "no failed run is counted");
+  assert.equal(state.reviewFailures[part.id], 2, "one more review round");
+  assert.equal(state.reviewRunFailures[part.id], undefined, "no failed run is counted");
   assert.deepEqual(state.qaFeedback[part.id]?.failing, [
     "R1 (src/api.ts:7) The seam sits in the wrong module.",
     "R2 (src/new.ts:3) It breaks the second item.",
@@ -921,29 +925,29 @@ test("an approval keeps review failures and QA feedback that is not a review sen
   const qaFeedback = { source: "qa" as const, failing: ["Works: no test"] };
   const state = {
     reviewFailures: { [part.id]: 1 },
-    reviewRounds: { [part.id]: 1 },
+    reviewRunFailures: { [part.id]: 1 },
     qaFeedback: { [part.id]: qaFeedback },
   };
 
   assert.equal(await settleReview(state, input, deps), "approved");
-  assert.equal(state.reviewFailures[part.id], 1, "an approval keeps the failure count");
-  assert.equal(state.reviewRounds[part.id], 1, "an approval keeps the round count");
+  assert.equal(state.reviewRunFailures[part.id], 1, "an approval keeps the failure count");
+  assert.equal(state.reviewFailures[part.id], 1, "an approval keeps the round count");
   assert.deepEqual(state.qaFeedback[part.id], qaFeedback, "QA feedback stays");
 
   const reviewState = {
     reviewFailures: { [part.id]: 1 },
-    reviewRounds: { [part.id]: 1 },
+    reviewRunFailures: { [part.id]: 1 },
     qaFeedback: {
       [part.id]: { source: "review" as const, failing: ["R1 (src/a.ts:1) Fix it."] },
     },
   };
   assert.equal(await settleReview(reviewState, input, deps), "approved");
   assert.equal(
-    reviewState.reviewFailures[part.id],
+    reviewState.reviewRunFailures[part.id],
     1,
     "the count still waits for Done or escalation",
   );
-  assert.equal(reviewState.reviewRounds[part.id], 1, "the round count waits too");
+  assert.equal(reviewState.reviewFailures[part.id], 1, "the round count waits too");
   assert.equal(reviewState.qaFeedback[part.id], undefined, "its own review send-back is cleared");
 });
 
@@ -968,7 +972,11 @@ test("a not-judged escalation decides before its first write and a replay applie
     maxFailures: 2,
     maxReviewRounds: 6,
   };
-  const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: {},
+    reviewRunFailures: {},
+    qaFeedback: {},
+  };
   const input = { part, parent, pr: pr(), notJudged: "timeout" as const, error: "timed out" };
 
   assert.equal(await settleReview(state, input, deps), "requeued");
@@ -1010,7 +1018,7 @@ test("a not-judged escalation decides before its first write and a replay applie
   };
   assert.equal(
     await settleReview(
-      { reviewFailures: {}, qaFeedback: {} },
+      { reviewFailures: {}, reviewRunFailures: {}, qaFeedback: {} },
       { ...input, escalation: decided },
       { ...deps, steps: replaySteps },
     ),
@@ -1054,7 +1062,11 @@ test("a design finding takes the coordinator's fix and keeps each hint with its 
     maxFailures: 3,
     maxReviewRounds: 6,
   };
-  const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: {},
+    reviewRunFailures: {},
+    qaFeedback: {},
+  };
   const design: ReviewFinding = {
     file: "src/shape.ts",
     line: 4,
@@ -1084,8 +1096,8 @@ test("a design finding takes the coordinator's fix and keeps each hint with its 
   };
 
   assert.equal(await settleReview(state, input, deps), "sent_back");
-  assert.deepEqual(state.reviewRounds, { [part.id]: 1 }, "a fix counts its round");
-  assert.equal(state.reviewFailures[part.id], undefined, "a round is not a failed run");
+  assert.deepEqual(state.reviewFailures, { [part.id]: 1 }, "a fix counts its round");
+  assert.equal(state.reviewRunFailures[part.id], undefined, "a round is not a failed run");
   assert.equal(state.qaFeedback[part.id]?.source, "review");
   assert.deepEqual(state.qaFeedback[part.id]?.failing, [
     "R1 (src/shape.ts:4) This belongs in the review module, not the loop.",
@@ -1130,7 +1142,7 @@ test("an escalate decision moves both issues and posts the D-011 question on the
   };
   const state: Parameters<typeof settleReview>[0] = {
     reviewFailures: { [part.id]: 1 },
-    reviewRounds: { [part.id]: 1 },
+    reviewRunFailures: { [part.id]: 1 },
     qaFeedback: {},
   };
   const input = {
@@ -1160,8 +1172,8 @@ test("an escalate decision moves both issues and posts the D-011 question on the
 
   assert.equal(await settleReview(state, input, deps), "escalated");
   assert.deepEqual(state.qaFeedback, {}, "nothing goes to the builder");
-  assert.deepEqual(state.reviewFailures, {}, "the escalation clears the failed runs");
-  assert.deepEqual(state.reviewRounds, {}, "the escalation clears the round count");
+  assert.deepEqual(state.reviewRunFailures, {}, "the escalation clears the failed runs");
+  assert.deepEqual(state.reviewFailures, {}, "the escalation clears the round count");
   assert.deepEqual(moves, [
     { id: parent.id, state: "Needs input" },
     { id: part.id, state: "Needs input" },
@@ -1192,7 +1204,11 @@ test("a changes_requested verdict with no decision is a fix send-back with no hi
     maxFailures: 2,
     maxReviewRounds: 6,
   };
-  const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: {},
+    reviewRunFailures: {},
+    qaFeedback: {},
+  };
   const verdict = {
     decision: "changes_requested" as const,
     findings: [
@@ -1234,8 +1250,8 @@ test("round 6 at limits.max_review_rounds escalates with one notice and no send-
     maxReviewRounds: 6,
   };
   const state: Parameters<typeof settleReview>[0] = {
-    reviewFailures: {},
-    reviewRounds: { [part.id]: 5 },
+    reviewFailures: { [part.id]: 5 },
+    reviewRunFailures: {},
     qaFeedback: { [part.id]: { source: "review", failing: ["R1 (src/a.ts:1) Fix it."] } },
   };
   const verdict = {
@@ -1268,8 +1284,8 @@ test("round 6 at limits.max_review_rounds escalates with one notice and no send-
   };
 
   assert.equal(await settleReview(state, input, deps), "escalated");
-  assert.deepEqual(state.reviewRounds, {}, "the cap escalation clears the round count");
-  assert.deepEqual(state.reviewFailures, {}, "the cap escalation clears failed runs too");
+  assert.deepEqual(state.reviewFailures, {}, "the cap escalation clears the round count");
+  assert.deepEqual(state.reviewRunFailures, {}, "the cap escalation clears failed runs too");
   assert.deepEqual(state.qaFeedback, {}, "the review feedback is cleared");
   assert.deepEqual(moves, [
     { id: parent.id, state: "Needs input" },
@@ -1311,7 +1327,8 @@ test("a failed review run still escalates at maxFailures, not the review round c
     maxReviewRounds: 6,
   };
   const state: Parameters<typeof settleReview>[0] = {
-    reviewFailures: { [part.id]: 1 },
+    reviewFailures: {},
+    reviewRunFailures: { [part.id]: 1 },
     qaFeedback: {},
   };
 
@@ -1320,10 +1337,11 @@ test("a failed review run still escalates at maxFailures, not the review round c
     "escalated",
   );
   assert.equal(notices, 1);
-  assert.deepEqual(state.reviewFailures, {}, "the failed-run escalation clears the count");
+  assert.deepEqual(state.reviewRunFailures, {}, "the failed-run escalation clears the count");
 });
 
 test("failed review runs and changes_requested rounds have separate caps (MET-244, D-062)", async () => {
+  const notices: string[] = [];
   const deps: ReviewSettleDeps = {
     linear: {
       async comment() {
@@ -1331,7 +1349,11 @@ test("failed review runs and changes_requested rounds have separate caps (MET-24
       },
       async moveTo() {},
     },
-    notifier: { async notify() {} },
+    notifier: {
+      async notify(notice) {
+        notices.push(notice.reason ?? "");
+      },
+    },
     maxFailures: 2,
     maxReviewRounds: 6,
   };
@@ -1343,42 +1365,59 @@ test("failed review runs and changes_requested rounds have separate caps (MET-24
     text: "A blocking fault.",
   };
   const fix = { decision: "fix" as const, hints: [{ id: "R1", hint: "Fix it." }] };
-
-  // One failed run does not consume a review round: five blocking verdicts stay below the cap.
-  const rounds: Parameters<typeof settleReview>[0] = {
-    reviewFailures: { [part.id]: 1 },
-    reviewRounds: { [part.id]: 4 },
+  const verdict = { decision: "changes_requested" as const, findings: [finding] };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: {},
+    reviewRunFailures: {},
     qaFeedback: {},
   };
+
+  // One no-verdict run first does not consume a review round.
   assert.equal(
-    await settleReview(
-      rounds,
-      {
-        part,
-        parent,
-        pr: pr(),
-        verdict: { decision: "changes_requested", findings: [finding] },
-        decision: fix,
-      },
-      deps,
-    ),
-    "sent_back",
+    await settleReview(state, { part, parent, pr: pr(), error: "no verdict" }, deps),
+    "requeued",
   );
-  assert.equal(rounds.reviewRounds?.[part.id], 5, "the fifth round is still a send-back");
-  assert.equal(rounds.reviewFailures[part.id], 1, "the failed run keeps its own count");
+  assert.equal(state.reviewRunFailures[part.id], 1, "the failed run counts once");
+  assert.equal(state.reviewFailures[part.id], undefined, "no round is counted");
+
+  // Five blocking verdicts stay below the cap, then the sixth escalates with the cap reason.
+  for (let round = 1; round <= 5; round++) {
+    assert.equal(
+      await settleReview(state, { part, parent, pr: pr(), verdict, decision: fix }, deps),
+      "sent_back",
+    );
+    assert.equal(state.reviewFailures[part.id], round);
+    assert.equal(state.reviewRunFailures[part.id], 1, "the failed run keeps its own count");
+  }
+  assert.deepEqual(notices, [], "no cap escalation before round 6");
+  assert.equal(
+    await settleReview(state, { part, parent, pr: pr(), verdict, roundCap: true }, deps),
+    "escalated",
+  );
+  assert.deepEqual(notices, ["review round cap reached"]);
+  assert.deepEqual(state.reviewFailures, {}, "the cap clears the rounds");
+  assert.deepEqual(state.reviewRunFailures, {}, "the cap clears the failed runs too");
 
   // One blocking verdict does not consume a failed-run failure: the first failed run retries.
   const failed: Parameters<typeof settleReview>[0] = {
-    reviewFailures: {},
-    reviewRounds: { [part.id]: 1 },
+    reviewFailures: { [part.id]: 1 },
+    reviewRunFailures: {},
     qaFeedback: {},
   };
   assert.equal(
     await settleReview(failed, { part, parent, pr: pr(), error: "no verdict" }, deps),
     "requeued",
   );
-  assert.equal(failed.reviewFailures[part.id], 1, "the first failed run retries");
-  assert.equal(failed.reviewRounds?.[part.id], 1, "the round count is untouched");
+  assert.equal(failed.reviewRunFailures[part.id], 1, "the first failed run retries");
+  assert.equal(failed.reviewFailures[part.id], 1, "the round count is untouched");
+
+  // The second failed run escalates under D-014, whatever the round count is.
+  notices.length = 0;
+  assert.equal(
+    await settleReview(failed, { part, parent, pr: pr(), error: "no verdict" }, deps),
+    "escalated",
+  );
+  assert.deepEqual(notices, ["review failed twice"], "the round count does not change the cap");
 });
 
 test("a saved fix is honored when the round count is at or over a lowered cap (MET-244, D-062)", async () => {
@@ -1399,8 +1438,8 @@ test("a saved fix is honored when the round count is at or over a lowered cap (M
     maxReviewRounds: 3,
   };
   const state: Parameters<typeof settleReview>[0] = {
-    reviewFailures: {},
-    reviewRounds: { [part.id]: 5 },
+    reviewFailures: { [part.id]: 5 },
+    reviewRunFailures: {},
     qaFeedback: {},
   };
   const finding = {
@@ -1426,7 +1465,7 @@ test("a saved fix is honored when the round count is at or over a lowered cap (M
     "sent_back",
     "a saved fix keeps the route it already started",
   );
-  assert.equal(state.reviewRounds?.[part.id], 6, "the replayed send-back counts its round");
+  assert.equal(state.reviewFailures?.[part.id], 6, "the replayed send-back counts its round");
   assert.deepEqual(state.qaFeedback[part.id]?.hints, [{ id: "R1", hint: "Fix it." }]);
   assert.deepEqual(notices, [], "a saved fix does not escalate at the lowered cap");
 });

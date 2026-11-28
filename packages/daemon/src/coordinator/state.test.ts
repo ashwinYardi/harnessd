@@ -52,6 +52,7 @@ const state: LoopState = {
   attempts: { "id-1": 1 },
   qaFailures: { "parent-1": 1 },
   reviewFailures: { "id-1": 1 },
+  reviewRunFailures: { "id-1": 1 },
   qaFeedback: { "id-1": { prUrl: "https://github.test/pull/7", failing: ["Works: no test"] } },
   merges: [
     {
@@ -206,6 +207,7 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
     attempts: { a: 1 },
     qaFailures: { p: 1 },
     reviewFailures: {},
+    reviewRunFailures: {},
     qaFeedback: { a: { failing: ["x"], reviewUrl: "u" } },
     merges: state.merges,
     gateFailures: { p: 2 },
@@ -581,7 +583,7 @@ test("reviewerHeads is optional, keeps a valid entry and drops a malformed one (
   assert.deepEqual((await store.load()).reviewerHeads, state.reviewerHeads);
 });
 
-test("reviewFailures is optional, keeps positive counts and drops a malformed one (MET-225)", async () => {
+test("reviewFailures keeps the judged round counts and drops a malformed one (MET-225, D-062)", async () => {
   assert.deepEqual(parseLoopState('{"inFlight":[]}').reviewFailures, {}, "old files still load");
   const parsed = parseLoopState(
     JSON.stringify({
@@ -598,23 +600,23 @@ test("reviewFailures is optional, keeps positive counts and drops a malformed on
   assert.deepEqual((await store.load()).reviewFailures, state.reviewFailures);
 });
 
-test("reviewRounds is optional, keeps positive counts and drops a malformed one (MET-244, D-062)", async () => {
-  assert.equal(parseLoopState('{"inFlight":[]}').reviewRounds, undefined, "old files still load");
+test("reviewRunFailures defaults empty and keeps positive counts apart from rounds (MET-244, D-062)", async () => {
+  assert.deepEqual(parseLoopState('{"inFlight":[]}').reviewRunFailures, {}, "old files still load");
   const parsed = parseLoopState(
     JSON.stringify({
       inFlight: [],
-      reviewFailures: { a: 1 },
-      reviewRounds: { a: 5, b: 1, c: 0, d: -1, e: 1.5, f: "2" },
+      reviewFailures: { a: 5 },
+      reviewRunFailures: { a: 1, b: 2, c: 0, d: -1, e: 1.5, f: "2" },
     }),
   );
-  assert.deepEqual(parsed.reviewRounds, { a: 5, b: 1 });
-  assert.deepEqual(parsed.reviewFailures, { a: 1 }, "failed runs keep their own count");
+  assert.deepEqual(parsed.reviewRunFailures, { a: 1, b: 2 });
+  assert.deepEqual(parsed.reviewFailures, { a: 5 }, "judged rounds keep their own count");
 
   const store = createFileLoopStore(await repo());
   const state = emptyLoopState();
-  state.reviewRounds = parsed.reviewRounds;
+  state.reviewRunFailures = parsed.reviewRunFailures;
   await store.save(state);
-  assert.deepEqual((await store.load()).reviewRounds, state.reviewRounds);
+  assert.deepEqual((await store.load()).reviewRunFailures, state.reviewRunFailures);
 });
 
 test("qaFeedback keeps the review send-back source and drops an unknown one (MET-225)", async () => {

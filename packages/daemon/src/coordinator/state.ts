@@ -344,13 +344,17 @@ export interface LoopState {
   attempts: Record<string, number>;
   /** Failed QA rounds per parent issue id (D-014: the second one escalates). */
   qaFailures: Record<string, number>;
-  /** Failed review runs per part id (MET-225, D-014: at `qa_max_failures` they escalate). */
-  reviewFailures: Record<string, number>;
   /**
    * Changes_requested review rounds per part id, capped by `limits.max_review_rounds`
-   * (D-062). Optional for old files; a missing count starts at 0.
+   * (D-062). Earlier versions also counted no-verdict runs here.
    */
-  reviewRounds?: Record<string, number>;
+  reviewFailures: Record<string, number>;
+  /**
+   * Failed review runs with no verdict per part id (MET-225, D-014: at `qa_max_failures`
+   * they escalate). Kept apart from judged rounds, so a failed run never consumes a round
+   * and a round never consumes a failed run (D-062).
+   */
+  reviewRunFailures: Record<string, number>;
   /** Open QA requests per part sub-issue id, cleared when the part's next run succeeds. */
   qaFeedback: Record<string, QaFeedback>;
   /** QA approvals the merge gate has not finished, one per QA sub-issue. */
@@ -403,6 +407,7 @@ export function emptyLoopState(): LoopState {
     attempts: {},
     qaFailures: {},
     reviewFailures: {},
+    reviewRunFailures: {},
     qaFeedback: {},
     merges: [],
     gateFailures: {},
@@ -1056,7 +1061,7 @@ export function parseLoopState(text: string): LoopState {
     attempts: counts(raw.attempts),
     qaFailures: counts(raw.qaFailures),
     reviewFailures: counts(raw.reviewFailures),
-    ...(raw.reviewRounds === undefined ? {} : { reviewRounds: counts(raw.reviewRounds) }),
+    reviewRunFailures: counts(raw.reviewRunFailures),
     qaFeedback: feedback(raw.qaFeedback),
     merges: merges(raw.merges),
     gateFailures: counts(raw.gateFailures),
