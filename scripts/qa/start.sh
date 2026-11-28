@@ -5,11 +5,15 @@
 #   frontend  the demo app, served with synthetic data
 #   backend   a sandbox daemon in setup (D-026) on the port harnessd picked
 #
-# The sandbox has its own HARNESSD_HOME and no secrets, so it never starts the loop and
-# never touches the main harnessd service or its port.
+# The sandbox has its own home and no secrets, so it never starts the loop and never touches
+# the main harnessd service or its port (MET-239).
 set -eu
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+
+# MET-239: resolve the sandbox home and refuse a real harnessd home before any write.
+. "$ROOT/scripts/qa/home.sh"
+
 cd "$ROOT"
 
 PORT=${PORT:?PORT is required}
@@ -33,25 +37,20 @@ if [ ! -f packages/cli/dist/bin.js ]; then
   exit 1
 fi
 
-# One scratch home per worktree, so seed and start agree without harnessd passing it.
-if [ -z "${HARNESSD_HOME:-}" ]; then
-  key=$(printf '%s' "$ROOT" | cksum | awk '{print $1}')
-  tmp=${TMPDIR:-/tmp}
-  HARNESSD_HOME="${tmp%/}/harnessd-qa-$key"
-fi
-export HARNESSD_HOME
-mkdir -p "$HARNESSD_HOME"
+mkdir -p "$SANDBOX_HOME"
 
 # D-026: no secret reaches the sandbox, so the daemon stays in setup.
 unset LINEAR_API_KEY HARNESSD_SLACK_WEBHOOK_URL GH_TOKEN GITHUB_TOKEN
-rm -rf "$HARNESSD_HOME/secrets"
+rm -rf "$SANDBOX_HOME/secrets"
 
 # The port harnessd picked. self_update is off: this daemon is never a service.
-cat > "$HARNESSD_HOME/config.toml" <<EOF
+cat > "$SANDBOX_HOME/config.toml" <<EOF
 # The QA sandbox (MET-181): one scratch port, no secrets, never a service.
 [daemon]
 port = $PORT
 self_update = false
 EOF
 
+# Only the sandbox daemon gets HARNESSD_HOME; the caller's value never picks the sandbox.
+export HARNESSD_HOME=$SANDBOX_HOME
 exec node packages/cli/dist/bin.js run "$ROOT"
