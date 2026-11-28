@@ -300,6 +300,57 @@ test("a review send-back carries the numbered findings and not a QA round (MET-2
   assert.ok(!resume.includes("## QA send-back"));
 });
 
+test("a review send-back prints each hint under its R<n> line (MET-243)", () => {
+  const review = {
+    source: "review" as const,
+    prUrl: "https://github.test/o/r/pull/7",
+    failing: [
+      "R1 (src/shape.ts:4) This belongs in the review module.",
+      "R2 (src/api.ts:12) The loop reads the file on every tick.",
+    ],
+    hints: [
+      { id: "R1", hint: "Move the seam into the review module." },
+      { id: "R2", hint: "Read the file once per part run." },
+    ],
+  };
+  const cold = buildPartPrompt({
+    agent,
+    issue: briefIssue,
+    branch: "met-41-serve-avatars",
+    review,
+  });
+  assert.ok(
+    cold.includes(
+      "R1 (src/shape.ts:4) This belongs in the review module.\n   hint: Move the seam into the review module.\n" +
+        "R2 (src/api.ts:12) The loop reads the file on every tick.\n   hint: Read the file once per part run.",
+    ),
+    cold,
+  );
+
+  const resume = buildResumePrompt({ issue: briefIssue, review });
+  assert.ok(
+    resume.includes(
+      "Findings to fix:\nR1 (src/shape.ts:4) This belongs in the review module.\n" +
+        "   hint: Move the seam into the review module.\n" +
+        "R2 (src/api.ts:12) The loop reads the file on every tick.\n" +
+        "   hint: Read the file once per part run.",
+    ),
+    resume,
+  );
+
+  const withoutHints = buildResumePrompt({
+    issue: briefIssue,
+    review: { source: "review", failing: review.failing },
+  });
+  assert.ok(
+    withoutHints.includes(
+      "Findings to fix:\nR1 (src/shape.ts:4) This belongs in the review module.\nR2 (src/api.ts:12)",
+    ),
+    withoutHints,
+  );
+  assert.ok(!withoutHints.includes("hint:"), withoutHints);
+});
+
 test("with memory, the part prompt names the vaults and the generated files before the ship steps", () => {
   const prompt = buildPartPrompt({
     agent,

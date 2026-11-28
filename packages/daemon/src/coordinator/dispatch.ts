@@ -122,6 +122,18 @@ function caseList(cases: readonly QaCase[]): string {
     .join("\n\n");
 }
 
+/** A finding's lines with the coordinator's hint under it (MET-243). */
+function reviewLines(review: QaFeedback): string {
+  const hints = new Map((review.hints ?? []).map((hint) => [hint.id, hint.hint]));
+  return review.failing
+    .map((line) => {
+      const id = /^(R\d+) \(/.exec(line)?.[1];
+      const hint = id === undefined ? undefined : hints.get(id);
+      return hint === undefined ? line : `${line}\n   hint: ${hint}`;
+    })
+    .join("\n");
+}
+
 /** The send-back cases, else today's failing list (D-046, D-054). */
 function reviewBlock(review: QaFeedback): string {
   if (review.cases !== undefined && review.cases.length > 0) {
@@ -132,7 +144,7 @@ function reviewBlock(review: QaFeedback): string {
   }
   if (review.source === "review") {
     return (
-      `${review.failing.join("\n")}\n\n` +
+      `${reviewLines(review)}\n\n` +
       "Fix only these findings, run focused tests and the part's Verify commands, and do not commit."
     );
   }
@@ -193,7 +205,7 @@ export function buildResumePrompt({ issue, review }: ResumePromptInput): string 
   if (hasCases) {
     parts.push(`Cases to fix:\n${caseList(review.cases ?? [])}`);
   } else if (fromReview) {
-    parts.push(`Findings to fix:\n${review.failing.join("\n")}`);
+    parts.push(`Findings to fix:\n${reviewLines(review)}`);
   } else if (review.failing.length > 0) {
     parts.push(`Failing items:\n${review.failing.map((f) => `- ${f}`).join("\n")}`);
   }

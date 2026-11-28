@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import {
   type AgentRole,
   type HarnessId,
+  isEscalationTrigger,
   isHarnessId,
   type SelfUpdateState,
   type SelfUpdateView,
@@ -14,6 +15,7 @@ import {
 import type { ReviewEvent } from "../github/client.ts";
 import type { WorktreeKeepReason } from "../worktrees/index.ts";
 import type { ReviewEscalation, ReviewFinding, ReviewNotJudged } from "./review.ts";
+import type { ReviewDecision, ReviewFixHint } from "./review-decision.ts";
 
 /** A sub-issue an agent is working on. */
 export interface InFlightRun {
@@ -104,6 +106,8 @@ export interface QaFeedback {
   testTail?: string;
   /** Each failing case with its repro, for the numbered send-back list (D-054). */
   cases?: QaCase[];
+  /** The coordinator's fix hint per finding id, printed under its `R<n>` line (MET-243). */
+  hints?: ReviewFixHint[];
 }
 
 /** A part run's session, so a QA send-back can resume it (MET-156). */
@@ -237,6 +241,11 @@ export interface PendingReviewSettle {
    * (MET-232, D-052). A replay applies it instead of counting the run again.
    */
   escalation?: ReviewEscalation;
+  /**
+   * The coordinator's decision on a changes_requested verdict, saved before the first write
+   * (MET-243). A replay applies it instead of running the coordinator again.
+   */
+  decision?: ReviewDecision;
   /** The run's error, for a failed review. */
   error?: string;
   /** The posted review, when there is one. */
@@ -480,10 +489,57 @@ function isQaCase(value: unknown): value is QaCase {
   );
 }
 
+function isText(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== "";
+}
+
 /** The cases array, or undefined when absent or any entry is malformed (D-054). */
 function qaCases(value: unknown): QaCase[] | undefined {
   if (!Array.isArray(value) || !value.every(isQaCase)) return undefined;
   return value;
+}
+
+/** One fix hint, or undefined when its id or hint is missing (MET-243). */
+function reviewFixHint(value: unknown): ReviewFixHint | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const h = value as Partial<ReviewFixHint>;
+  if (!isText(h.id) || !isText(h.hint)) return undefined;
+  return { id: h.id.trim(), hint: h.hint.trim() };
+}
+
+/** The fix hints, or undefined when absent or any entry is malformed (MET-243). */
+function reviewFixHints(value: unknown): ReviewFixHint[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: ReviewFixHint[] = [];
+  for (const raw of value) {
+    const hint = reviewFixHint(raw);
+    if (hint === undefined) return undefined;
+    out.push(hint);
+  }
+  return out;
+}
+
+/** A saved coordinator review decision, or undefined when malformed (MET-243). */
+function reviewDecision(value: unknown): ReviewDecision | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const d = value as Record<string, unknown>;
+  if (d.decision === "fix") {
+    const hints = reviewFixHints(d.hints === undefined ? [] : d.hints);
+    if (hints === undefined) return undefined;
+    return { decision: "fix", hints };
+  }
+  if (d.decision !== "escalate") return undefined;
+  if (typeof d.trigger !== "string" || !isEscalationTrigger(d.trigger)) return undefined;
+  if (!isText(d.question) || !isText(d.recommendation)) return undefined;
+  if (!Array.isArray(d.options) || d.options.length === 0) return undefined;
+  if (!d.options.every(isText)) return undefined;
+  return {
+    decision: "escalate",
+    trigger: d.trigger,
+    question: d.question.trim(),
+    options: d.options.map((option) => option.trim()),
+    recommendation: d.recommendation.trim(),
+  };
 }
 
 function feedback(value: unknown): Record<string, QaFeedback> {
@@ -499,6 +555,8 @@ function feedback(value: unknown): Record<string, QaFeedback> {
     if (typeof f.testTail === "string") entry.testTail = f.testTail;
     const cases = qaCases(f.cases);
     if (cases !== undefined) entry.cases = cases;
+    const hints = f.hints === undefined ? undefined : reviewFixHints(f.hints);
+    if (hints !== undefined) entry.hints = hints;
     out[id] = entry;
   }
   return out;
@@ -748,6 +806,9 @@ function pendingReviewSettles(value: unknown): Record<string, PendingReviewSettl
     if (r.findings !== undefined && findings === undefined) continue;
     const escalation = r.escalation === undefined ? undefined : reviewEscalation(r.escalation);
     if (r.escalation !== undefined && escalation === undefined) continue;
+    // A malformed decision drops only that field, so the settle still replays its writes and
+    // the loop decides again (MET-243).
+    const decision = r.decision === undefined ? undefined : reviewDecision(r.decision);
     if (!Array.isArray(r.done) || !r.done.every((step) => typeof step === "string")) continue;
     out[id] = {
       partId: r.partId,
@@ -760,6 +821,7 @@ function pendingReviewSettles(value: unknown): Record<string, PendingReviewSettl
       ...(findings === undefined ? {} : { findings }),
       ...(r.notJudged === undefined ? {} : { notJudged: r.notJudged }),
       ...(escalation === undefined ? {} : { escalation }),
+      ...(decision === undefined ? {} : { decision }),
       ...(r.error === undefined ? {} : { error: r.error }),
       ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
       done: r.done,
