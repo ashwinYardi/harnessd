@@ -1191,7 +1191,7 @@ export async function settleReview(
     );
     if (stopped) return "pending";
     delete state.reviewFailures[part.id];
-    delete state.reviewRunFailures[part.id];
+    if (state.reviewRunFailures !== undefined) delete state.reviewRunFailures[part.id];
     delete state.qaFeedback[part.id];
     if (state.harnessSwitch !== undefined) {
       // Needs input ends any harness switch for the part and the parent (D-048).
@@ -1260,7 +1260,7 @@ export async function settleReview(
 
   if (input.verdict === undefined) {
     // A failed run is not a review round: it has its own count and its own cap (D-014, D-062).
-    const failures = (state.reviewRunFailures[part.id] ?? 0) + 1;
+    const failures = (state.reviewRunFailures?.[part.id] ?? 0) + 1;
     if (failures >= deps.maxFailures) {
       return escalate(
         `review failed ${times(failures)}`,
@@ -1268,6 +1268,7 @@ export async function settleReview(
         `the review failed ${times(failures)} on ${part.key} [PR #${pr.number}](${pr.url}), so this needs a human (D-014). ${part.key} and ${parent.key} are in Needs input.\n\n${oneLine(input.error ?? "no verdict")}`,
       );
     }
+    state.reviewRunFailures ??= {};
     state.reviewRunFailures[part.id] = failures;
     log(`${part.key}: review failed (${oneLine(input.error ?? "no verdict")}), re-queued`);
     return "requeued";

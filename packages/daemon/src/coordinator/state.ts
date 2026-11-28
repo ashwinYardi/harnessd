@@ -352,9 +352,10 @@ export interface LoopState {
   /**
    * Failed review runs with no verdict per part id (MET-225, D-014: at `qa_max_failures`
    * they escalate). Kept apart from judged rounds, so a failed run never consumes a round
-   * and a round never consumes a failed run (D-062).
+   * and a round never consumes a failed run (D-062). Optional for a file from before the
+   * split; a missing key also marks its `reviewFailures` count as mixed and unusable.
    */
-  reviewRunFailures: Record<string, number>;
+  reviewRunFailures?: Record<string, number>;
   /** Open QA requests per part sub-issue id, cleared when the part's next run succeeds. */
   qaFeedback: Record<string, QaFeedback>;
   /** QA approvals the merge gate has not finished, one per QA sub-issue. */
@@ -407,6 +408,7 @@ export function emptyLoopState(): LoopState {
     attempts: {},
     qaFailures: {},
     reviewFailures: {},
+    // Written even when empty, so a new file is never mistaken for a pre-split one.
     reviewRunFailures: {},
     qaFeedback: {},
     merges: [],
@@ -1053,6 +1055,12 @@ export function parseLoopState(text: string): LoopState {
     throw new Error("no inFlight array");
   }
   const update = selfUpdate(raw.selfUpdate);
+  // Before D-062, reviewFailures mixed judged rounds with failed runs, so it cannot be used
+  // as a round count. A new file always writes reviewRunFailures, even when it is empty.
+  const splitCounters =
+    typeof raw.reviewRunFailures === "object" &&
+    raw.reviewRunFailures !== null &&
+    !Array.isArray(raw.reviewRunFailures);
   return {
     version: 1,
     lastPollAt: typeof raw.lastPollAt === "string" ? raw.lastPollAt : null,
@@ -1060,7 +1068,7 @@ export function parseLoopState(text: string): LoopState {
     interrupted: interruptedRuns(raw.interrupted),
     attempts: counts(raw.attempts),
     qaFailures: counts(raw.qaFailures),
-    reviewFailures: counts(raw.reviewFailures),
+    reviewFailures: splitCounters ? counts(raw.reviewFailures) : {},
     reviewRunFailures: counts(raw.reviewRunFailures),
     qaFeedback: feedback(raw.qaFeedback),
     merges: merges(raw.merges),

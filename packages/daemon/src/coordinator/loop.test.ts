@@ -3869,7 +3869,7 @@ test("a pending review with no matching recorded head is dropped with one line (
 
   assert.equal(store.state.pendingReview, undefined, "the record is dropped");
   assert.equal(fx.part.state, "In Review", "nothing is settled from a missing verdict");
-  assert.equal(store.state.reviewRunFailures[fx.part.id], undefined, "no failure is counted");
+  assert.equal(store.state.reviewRunFailures?.[fx.part.id], undefined, "no failure is counted");
   assert.equal(
     t.logs.filter((line) => line.includes("dropped the pending review")).length,
     1,
@@ -3944,7 +3944,7 @@ test("a timed-out part move in a not-judged escalation is retried to Needs input
 
   assert.equal(fx.parent.state, "Needs input");
   assert.equal(fx.part.state, "In Review", "the part move did not land");
-  assert.equal(store.state.reviewRunFailures[fx.part.id], undefined, "no review failure counted");
+  assert.equal(store.state.reviewRunFailures?.[fx.part.id], undefined, "no review failure counted");
   const pending = store.state.pendingReviewSettle?.[fx.part.id];
   assert.ok(pending, "the unfinished escalation is saved");
   assert.deepEqual(pending?.done, [
@@ -5073,7 +5073,7 @@ test("a nit never sends a part back (MET-225)", async () => {
 
   assert.equal(fx.part.state, "In Review", "an approve with a nit leaves the part alone");
   assert.equal(store.state.qaFeedback[fx.part.id], undefined);
-  assert.equal(store.state.reviewRunFailures[fx.part.id], undefined);
+  assert.equal(store.state.reviewRunFailures?.[fx.part.id], undefined);
   assert.equal(store.state.reviewFailures[fx.part.id], undefined);
   assert.deepEqual((await t.loop.tick()).dispatched, [], "no builder run starts");
 });
@@ -5174,7 +5174,7 @@ test("review round 6 at limits.max_review_rounds escalates with no coordinator r
   assert.equal(fx.parent.state, "Needs input");
   assert.equal(store.state.reviewFailures[fx.part.id], undefined, "the round count is cleared");
   assert.equal(
-    store.state.reviewRunFailures[fx.part.id],
+    store.state.reviewRunFailures?.[fx.part.id],
     undefined,
     "the failed-run count is clear",
   );
@@ -5361,7 +5361,7 @@ test("a D-011 trigger escalates with the question, options and recommendation on
   assert.equal(fx.part.state, "Needs input");
   assert.equal(fx.parent.state, "Needs input");
   assert.equal(store.state.qaFeedback[fx.part.id], undefined, "nothing goes to the builder");
-  assert.equal(store.state.reviewRunFailures[fx.part.id], undefined, "the escalation clears it");
+  assert.equal(store.state.reviewRunFailures?.[fx.part.id], undefined, "the escalation clears it");
   assert.equal(store.state.reviewFailures[fx.part.id], undefined, "the round count is cleared");
   const comments = t.linear.comments.filter((c) => c.key === fx.parent.key);
   assert.equal(comments.length, 1, "one parent comment");
@@ -5522,7 +5522,7 @@ test("a part at Done clears its review failures and rounds (MET-225, D-014, D-06
   await t.loop.tick();
 
   assert.equal(store.state.reviewFailures[fx.part.id], undefined);
-  assert.equal(store.state.reviewRunFailures[fx.part.id], undefined);
+  assert.equal(store.state.reviewRunFailures?.[fx.part.id], undefined);
   assert.equal(store.state.shipped?.[fx.part.id], undefined);
 });
 
@@ -5538,7 +5538,7 @@ test("two not-judged reviews on one head go to Needs input with no review failur
 
   assert.equal(fx.part.state, "In Review", "the first timeout re-queues the same head");
   assert.equal(store.state.reviewerHeads?.[fx.part.id], undefined);
-  assert.equal(store.state.reviewRunFailures[fx.part.id], undefined, "no review failure counted");
+  assert.equal(store.state.reviewRunFailures?.[fx.part.id], undefined, "no review failure counted");
   assert.ok(
     t.logs.includes(`${fx.part.key}: review not judged (timed out), re-queued`),
     t.logs.join("\n"),
@@ -5550,7 +5550,7 @@ test("two not-judged reviews on one head go to Needs input with no review failur
 
   assert.equal(fx.part.state, "Needs input");
   assert.equal(fx.parent.state, "Needs input");
-  assert.equal(store.state.reviewRunFailures[fx.part.id], undefined);
+  assert.equal(store.state.reviewRunFailures?.[fx.part.id], undefined);
   assert.equal(t.pings.filter((ping) => ping.includes("review not judged twice")).length, 1);
 });
 

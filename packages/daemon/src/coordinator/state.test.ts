@@ -589,6 +589,7 @@ test("reviewFailures keeps the judged round counts and drops a malformed one (ME
     JSON.stringify({
       inFlight: [],
       reviewFailures: { a: 1, b: 2, c: 0, d: -1, e: 1.5, f: "2" },
+      reviewRunFailures: {},
     }),
   );
   assert.deepEqual(parsed.reviewFailures, { a: 1, b: 2 });
@@ -598,6 +599,17 @@ test("reviewFailures keeps the judged round counts and drops a malformed one (ME
   state.reviewFailures = parsed.reviewFailures;
   await store.save(state);
   assert.deepEqual((await store.load()).reviewFailures, state.reviewFailures);
+});
+
+test("a pre-split file drops its mixed reviewFailures count (MET-244, D-062)", () => {
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { a: 1, b: 5 },
+    }),
+  );
+  assert.deepEqual(parsed.reviewFailures, {}, "a mixed legacy count is not a round count");
+  assert.deepEqual(parsed.reviewRunFailures, {}, "a legacy count is not a failed-run count either");
 });
 
 test("reviewRunFailures defaults empty and keeps positive counts apart from rounds (MET-244, D-062)", async () => {

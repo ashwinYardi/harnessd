@@ -704,7 +704,7 @@ test("a re-review settle sends back only the open blocking findings and counts o
 
   assert.equal(await settleReview(state, { part, parent, pr: pr(), verdict }, deps), "sent_back");
   assert.equal(state.reviewFailures[part.id], 2, "one more review round");
-  assert.equal(state.reviewRunFailures[part.id], undefined, "no failed run is counted");
+  assert.equal(state.reviewRunFailures?.[part.id], undefined, "no failed run is counted");
   assert.deepEqual(state.qaFeedback[part.id]?.failing, [
     "R1 (src/api.ts:7) The seam sits in the wrong module.",
     "R2 (src/new.ts:3) It breaks the second item.",
@@ -930,7 +930,7 @@ test("an approval keeps review failures and QA feedback that is not a review sen
   };
 
   assert.equal(await settleReview(state, input, deps), "approved");
-  assert.equal(state.reviewRunFailures[part.id], 1, "an approval keeps the failure count");
+  assert.equal(state.reviewRunFailures?.[part.id], 1, "an approval keeps the failure count");
   assert.equal(state.reviewFailures[part.id], 1, "an approval keeps the round count");
   assert.deepEqual(state.qaFeedback[part.id], qaFeedback, "QA feedback stays");
 
@@ -1097,7 +1097,7 @@ test("a design finding takes the coordinator's fix and keeps each hint with its 
 
   assert.equal(await settleReview(state, input, deps), "sent_back");
   assert.deepEqual(state.reviewFailures, { [part.id]: 1 }, "a fix counts its round");
-  assert.equal(state.reviewRunFailures[part.id], undefined, "a round is not a failed run");
+  assert.equal(state.reviewRunFailures?.[part.id], undefined, "a round is not a failed run");
   assert.equal(state.qaFeedback[part.id]?.source, "review");
   assert.deepEqual(state.qaFeedback[part.id]?.failing, [
     "R1 (src/shape.ts:4) This belongs in the review module, not the loop.",
@@ -1377,7 +1377,7 @@ test("failed review runs and changes_requested rounds have separate caps (MET-24
     await settleReview(state, { part, parent, pr: pr(), error: "no verdict" }, deps),
     "requeued",
   );
-  assert.equal(state.reviewRunFailures[part.id], 1, "the failed run counts once");
+  assert.equal(state.reviewRunFailures?.[part.id], 1, "the failed run counts once");
   assert.equal(state.reviewFailures[part.id], undefined, "no round is counted");
 
   // Five blocking verdicts stay below the cap, then the sixth escalates with the cap reason.
@@ -1387,7 +1387,7 @@ test("failed review runs and changes_requested rounds have separate caps (MET-24
       "sent_back",
     );
     assert.equal(state.reviewFailures[part.id], round);
-    assert.equal(state.reviewRunFailures[part.id], 1, "the failed run keeps its own count");
+    assert.equal(state.reviewRunFailures?.[part.id], 1, "the failed run keeps its own count");
   }
   assert.deepEqual(notices, [], "no cap escalation before round 6");
   assert.equal(
@@ -1408,7 +1408,7 @@ test("failed review runs and changes_requested rounds have separate caps (MET-24
     await settleReview(failed, { part, parent, pr: pr(), error: "no verdict" }, deps),
     "requeued",
   );
-  assert.equal(failed.reviewRunFailures[part.id], 1, "the first failed run retries");
+  assert.equal(failed.reviewRunFailures?.[part.id], 1, "the first failed run retries");
   assert.equal(failed.reviewFailures[part.id], 1, "the round count is untouched");
 
   // The second failed run escalates under D-014, whatever the round count is.
