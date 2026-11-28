@@ -550,6 +550,7 @@ export function buildPlanPrompt({
       "- Area split: backend and UI work go in separate parts. The backend part (shared types, API, daemon) comes first and blocks the frontend part, which builds against the merged contract.",
       '- A part lists the repo paths it changes. A backend part lists no file under "packages/ui/app/". A frontend part lists no file in "packages/daemon/", "packages/shared/" or "packages/cli/". Docs, DESIGN.md and decision records may sit in either part.',
       "- Docs changes go in the part whose code they describe, never in a separate docs part.",
+      "A docs-only ticket stays one part with at most 3 parent Done-when items; when the filed list is longer, the coordinator has already normalized it.",
       "- Only plan parts with real work. An issue with no UI work gets no frontend part; one with only UI work gets no backend part.",
       "- Each part is size S (about 30 minutes) or M (about 2 hours). L is not allowed: split larger work into more parts (D-014).",
       '- "reason" must say why the issue stayed one part or why it split, also for a one-part plan. A plan with no reason is invalid.',
