@@ -46,15 +46,15 @@ The run merged PRs [ashwinYardi/harnessd#104](https://github.com/ashwinYardi/har
 
 | Break | Cause | Fix (issue) |
 | --- | --- | --- |
-| A Linear network error left a part In Progress. | The request failed before the loop could settle the part. | MET-184 |
-| Two long M builds stopped emitting events. | OpenCode went silent. The evidence does not show why. | MET-121 (the watchdog and harness switch; the runs were MET-224 and MET-226) |
+| A Linear network error left a part In Progress. | The request failed before the loop could settle the part. A human restarted the daemon to recover. | MET-184 |
+| Two long M builds stopped emitting events. | OpenCode went silent for no recorded reason. The watchdog ended both stalled OpenCode runs, and the loop retried them on Codex. | MET-121 (the watchdog and harness switch; the runs were MET-224 and MET-226) |
 | Live QA could not check Linear in the sandbox. | The sandbox has no secrets (D-051), so the running product had no Linear access. | MET-229 |
 | A MET-225 run used all its turns. | The turn allowance ran out before the run finished. | MET-142 (per-role caps) |
 | PR #114 merged with blocking reviewer findings. | The merge gate did not yet need a reviewer approval. | MET-226 and MET-230 |
-| Review took many rounds: four on MET-230 and seven on MET-239. | Each re-review read the whole diff and could add new blockers. | MET-231, and MET-239 moved path handling from POSIX sh into one Node helper |
-| The health-by-path test failed in the full parallel CI run. | The test did not wait on real signals. | MET-236 |
-| Blocking design findings and a second failed review went straight to a human. | The loop had no coordinator route for a blocking verdict. | MET-241 |
-| A coordinator review reply was not JSON. | The reply could not be parsed as a review decision. | none, as designed (MET-244) |
+| Review took many rounds: four on MET-230 and seven on MET-239. | Each new review found rarer edge cases, so the review rounds did not converge. | MET-231 limited a re-review to the saved findings and the diff since the previous review. MET-239 moved path handling from POSIX sh into one Node helper. |
+| The health-by-path test failed in the full parallel CI run. | The health by path QA app test failed on CI by chance. | MET-236 |
+| Every blocking design finding and every second failed review went to Needs input. | A human sent each one back to the builder by hand. | MET-241 |
+| A coordinator review reply was not JSON. | The loop fell back to a fix send-back, as D-062 specifies. | none, as designed (MET-244) |
 
 ### What a human still did
 
