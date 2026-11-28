@@ -78,15 +78,16 @@ function checklist(items: string[]): string[] {
  * Rewrites the checklist of the first "Done when" section, the one parseDoneWhen reads.
  * The header, the text before it, the section's other lines and every later section stay.
  * New items are unchecked and one line each. When the section has no checklist, the items
- * go at its end. An item that is blank or spans lines is rejected: parseDoneWhen reads one
- * line per item, so it would silently drop the rest and could mistake a heading for a section.
+ * go at its end. An item that is blank or holds CR, LF, U+2028 or U+2029 is rejected:
+ * parseDoneWhen reads one line per item, so it would silently drop the rest and could
+ * mistake a heading for a section.
  */
 export function replaceDoneWhen(body: string, items: string[]): string {
   for (const [i, item] of items.entries()) {
     if (item.trim() === "") {
       throw new Error(`replaceDoneWhen: item ${i} must be a non-empty string`);
     }
-    if (/[\r\n]/.test(item)) {
+    if (/[\r\n\u2028\u2029]/.test(item)) {
       throw new Error(`replaceDoneWhen: item ${i} must be one line`);
     }
   }

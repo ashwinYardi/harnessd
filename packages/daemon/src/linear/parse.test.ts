@@ -129,6 +129,13 @@ test("replaceDoneWhen round-trips items and cannot hide later ones", () => {
 
   assert.throws(() => replaceDoneWhen(body, ["One\n# Hidden"]), /item 0 must be one line/);
   assert.throws(() => replaceDoneWhen(body, ["One\r\nTwo"]), /item 0 must be one line/);
+  for (const separator of ["\u2028", "\u2029"]) {
+    assert.throws(
+      () => replaceDoneWhen(body, [`One${separator}Two`]),
+      /item 0 must be one line/,
+      "U+2028 and U+2029 are line breaks to the checklist regex too",
+    );
+  }
   assert.throws(() => replaceDoneWhen(body, ["  "]), /item 0 must be a non-empty string/);
 });
 
