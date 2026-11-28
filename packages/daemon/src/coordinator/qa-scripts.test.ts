@@ -306,6 +306,22 @@ test("a padded caller HARNESSD_HOME with an unrelated sandbox still runs", (t) =
   assert.equal(dirname(readFileSync(s.out, "utf8")), realpathSync(s.temp));
 });
 
+test("an inherited SANDBOX_HOME is ignored and the scratch home is used", (t) => {
+  const s = sandbox(t);
+  const real = realHome(join(s.root, "real-home"));
+
+  const seeded = run(s, "seed.sh", { SANDBOX_HOME: `${real}/.` });
+  assert.equal(seeded.status, 0, seeded.stderr);
+  const started = run(s, "start.sh", { SANDBOX_HOME: `${real}/.`, HARNESSD_QA_AREA: "backend" });
+  assert.equal(started.status, 0, started.stderr);
+
+  kept(real);
+  const scratch = readFileSync(s.out, "utf8");
+  assert.equal(dirname(scratch), realpathSync(s.temp), "the scratch home is used");
+  const seededHome = dirname(seeded.stdout.trim().replace(/^seeded /, ""));
+  assert.equal(realpathSync(seededHome), scratch, "seed and start reach the same scratch home");
+});
+
 test("a trailing slash and space after the real home are refused", (t) => {
   const s = sandbox(t);
   const real = realHome(join(s.home, ".harnessd"));

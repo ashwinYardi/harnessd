@@ -18,6 +18,9 @@ resolve_home() {
 # The caller's own HARNESSD_HOME is the home a daemon in this shell would use.
 caller_home=${HARNESSD_HOME:-}
 
+# The sandbox always comes from HARNESSD_QA_HOME or the TMPDIR default, never inherited.
+SANDBOX_HOME=
+
 # HARNESSD_QA_HOME picks the sandbox. Otherwise one scratch folder per worktree, the
 # same key seed and start already agreed on, so the loop passes no value (D-051).
 if [ -n "${HARNESSD_QA_HOME:-}" ]; then
