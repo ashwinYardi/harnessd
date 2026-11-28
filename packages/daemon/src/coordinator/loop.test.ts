@@ -4038,6 +4038,55 @@ test("a restart finishes a not-judged escalation saved before its writes (MET-23
   assert.equal((await store.load()).pendingReviewSettle, undefined, "the record goes when done");
 });
 
+test("a legacy failed-review escalation with no verdict finishes its remaining writes (MET-244, D-062)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  fx.state.reviewFailures = { [fx.part.id]: 1 };
+  fx.state.pendingReviewSettle = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      error: "no verdict",
+      done: [`comment on ${fx.parent.key}`],
+    },
+  };
+  // Reload the legacy record from loop.json: it has no verdict, only the saved comment step.
+  const store = memoryStore(parseLoopState(JSON.stringify(fx.state)));
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+
+  await t.loop.tick();
+
+  assert.equal(fx.parent.state, "Needs input", "the parent move finishes");
+  assert.equal(fx.part.state, "Needs input", "the part move finishes");
+  assert.equal(
+    t.linear.moves.some((move) => move.state === "Ready"),
+    false,
+    "the part is never re-queued",
+  );
+  assert.equal(
+    t.adapter.tasks.length,
+    0,
+    "no review and no coordinator run answer a started legacy escalation",
+  );
+  assert.equal(
+    t.pings.filter((ping) => ping.includes("needs input (review needs input after the upgrade)"))
+      .length,
+    1,
+    "one notice",
+  );
+  assert.equal(store.state.reviewFailures[fx.part.id], undefined, "the round count is cleared");
+  assert.equal(
+    store.state.reviewRunFailures?.[fx.part.id],
+    undefined,
+    "the failed-run count is cleared",
+  );
+  assert.equal(store.state.pendingReviewSettle, undefined, "the pending settle is deleted");
+});
+
 test("a restart replays a saved not-judged escalation with no writes done (MET-232)", async () => {
   const root = await mkdtemp(join(tmpdir(), "harnessd-resettle-"));
   roots.push(root);
@@ -5045,6 +5094,122 @@ test("the review after a fix round is still a re-review (MET-243, D-061)", async
   assert.match(pending.task.prompt, /## Saved findings \(1\)/);
   assert.match(pending.task.prompt, /R1 \(api\.ts:1\) The cache grows without a limit\./);
   assert.doesNotMatch(pending.task.prompt, /## Senior-dev rubric/);
+
+  pending.finish("cancelled");
+  await t.loop.idle();
+});
+
+test("a legacy confirmed send-back still gets a re-review on its next head (MET-244, D-062)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-legacy-rereview-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
+  await writeFile(join(repo, "README.md"), "hi\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+  const branch = "met-244-api";
+  git(repo, "checkout", "-q", "-b", branch);
+  await writeFile(join(repo, "api.ts"), "export const cache = [];\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "round 1");
+  const savedHead = git(repo, "rev-parse", "HEAD");
+  await writeFile(join(repo, "api.ts"), "export const cache = new Map();\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "round 2");
+  const nextHead = git(repo, "rev-parse", "HEAD");
+  const worktrees = createGitWorktrees({ repoDir: repo, root: join(root, "worktrees") });
+
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const part = linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: "In Review",
+    description: [
+      partMarker("backend"),
+      "",
+      "**Goal**",
+      "Ship the API.",
+      "",
+      "**Done when**",
+      "- [ ] Works",
+      "",
+      "**Size**: S",
+    ].join("\n"),
+  });
+  const state = emptyLoopState();
+  state.splits = {
+    [parent.id]: {
+      key: parent.key,
+      parts: [part.id],
+      qa: "qa-1",
+      at: "2026-11-23T10:00:00.000Z",
+    },
+  };
+  state.shipped = {
+    [part.id]: {
+      key: part.key,
+      branch,
+      prUrl: "https://github.test/o/r/pull/7",
+      at: "2026-11-23T10:01:00.000Z",
+    },
+  };
+  const blocking: ReviewFinding = {
+    file: "api.ts",
+    line: 1,
+    severity: "blocking",
+    kind: "code",
+    text: "The cache grows without a limit.",
+  };
+  state.reviewerHeads = {
+    [part.id]: {
+      sha: savedHead,
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  // A pre-split file: mixed reviewFailures, no reviewRunFailures key.
+  state.reviewFailures = { [part.id]: 3 };
+  state.qaFeedback = {
+    [part.id]: { source: "review", failing: ["R1 (api.ts:1) The cache grows without a limit."] },
+  };
+  const raw = JSON.parse(JSON.stringify(state));
+  delete raw.reviewRunFailures;
+  const legacy = parseLoopState(JSON.stringify(raw));
+  assert.equal(legacy.reviewFailures[part.id], 1, "a confirmed legacy send-back keeps one round");
+
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 1 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const t = setup({ config, linear, worktrees, store: memoryStore(legacy) });
+  const opened = t.gh.open(part.key, 7, branch);
+  opened.headRefOid = nextHead;
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+  let pending = t.adapter.pending[0];
+  for (let i = 0; i < 200 && pending === undefined; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    pending = t.adapter.pending[0];
+  }
+  assert.ok(pending, "the re-review run started");
+  assert.match(
+    pending.task.prompt,
+    /## Delta since the last review/,
+    "the next head is a re-review",
+  );
+  assert.match(pending.task.prompt, /export const cache = new Map\(\);/);
+  assert.match(pending.task.prompt, /## Saved findings \(1\)/);
+  assert.match(pending.task.prompt, /R1 \(api\.ts:1\) The cache grows without a limit\./);
 
   pending.finish("cancelled");
   await t.loop.idle();

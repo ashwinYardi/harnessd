@@ -1061,6 +1061,28 @@ export function parseLoopState(text: string): LoopState {
     typeof raw.reviewRunFailures === "object" &&
     raw.reviewRunFailures !== null &&
     !Array.isArray(raw.reviewRunFailures);
+  const legacyCounts = counts(raw.reviewFailures);
+  const legacyRounds: Record<string, number> = {};
+  if (!splitCounters) {
+    // Keep the D-061 re-review trigger for a confirmed legacy send-back: one round keeps
+    // `reviewFailures > 0` true without trusting the mixed legacy magnitude.
+    const heads = raw.reviewerHeads === undefined ? {} : reviewerHeads(raw.reviewerHeads);
+    const settles =
+      raw.pendingReviewSettle === undefined ? {} : pendingReviewSettles(raw.pendingReviewSettle);
+    const feedbacks = feedback(raw.qaFeedback);
+    for (const [id, head] of Object.entries(heads)) {
+      if (head.verdict !== "changes_requested") continue;
+      if (!head.findings.some((finding) => finding.severity === "blocking")) continue;
+      const settle = Object.values(settles).find((record) => record.partId === id);
+      const confirmed =
+        (legacyCounts[id] ?? 0) > 0 ||
+        feedbacks[id]?.source === "review" ||
+        (settle !== undefined &&
+          (settle.done.includes(`comment on ${settle.partKey}`) ||
+            settle.done.includes(`re-queue ${settle.partKey}`)));
+      if (confirmed) legacyRounds[id] = 1;
+    }
+  }
   return {
     version: 1,
     lastPollAt: typeof raw.lastPollAt === "string" ? raw.lastPollAt : null,
@@ -1068,7 +1090,7 @@ export function parseLoopState(text: string): LoopState {
     interrupted: interruptedRuns(raw.interrupted),
     attempts: counts(raw.attempts),
     qaFailures: counts(raw.qaFailures),
-    reviewFailures: splitCounters ? counts(raw.reviewFailures) : {},
+    reviewFailures: splitCounters ? legacyCounts : legacyRounds,
     reviewRunFailures: counts(raw.reviewRunFailures),
     qaFeedback: feedback(raw.qaFeedback),
     merges: merges(raw.merges),

@@ -612,6 +612,39 @@ test("a pre-split file drops its mixed reviewFailures count (MET-244, D-062)", (
   assert.deepEqual(parsed.reviewRunFailures, {}, "a legacy count is not a failed-run count either");
 });
 
+test("a pre-split file keeps the re-review trigger for a confirmed send-back (MET-244, D-062)", () => {
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { "part-1": 3, "part-2": 2 },
+      reviewerHeads: {
+        "part-1": {
+          sha: "sha7",
+          verdict: "changes_requested",
+          findings: [
+            {
+              file: "api.ts",
+              line: 1,
+              severity: "blocking",
+              kind: "code",
+              text: "The cache grows without a limit.",
+            },
+          ],
+          at: "2026-11-27T10:00:00.000Z",
+        },
+        "part-2": {
+          sha: "sha8",
+          verdict: "approved",
+          findings: [],
+          at: "2026-11-27T10:00:00.000Z",
+        },
+      },
+    }),
+  );
+  assert.equal(parsed.reviewFailures["part-1"], 1, "a saved blocking finding keeps one round");
+  assert.equal(parsed.reviewFailures["part-2"], undefined, "an approved head keeps no round");
+});
+
 test("reviewRunFailures defaults empty and keeps positive counts apart from rounds (MET-244, D-062)", async () => {
   assert.deepEqual(parseLoopState('{"inFlight":[]}').reviewRunFailures, {}, "old files still load");
   const parsed = parseLoopState(

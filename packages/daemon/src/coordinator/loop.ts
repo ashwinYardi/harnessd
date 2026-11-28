@@ -1441,16 +1441,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       s.pendingReviewSettle[part.id] = record;
       await save();
     }
-    // A settle from before MET-243 already decided to escalate (a design finding or a second
-    // failed round) and its writes stopped. Finish it instead of asking the coordinator again,
-    // so the part is not sent back against the comment already on the parent. A not-judged
-    // record keeps its own saved escalation.
+    // A settle from before MET-243 already decided to escalate (a design finding, a second
+    // failed round or a failed review with no verdict) and its writes stopped. The saved
+    // parent comment is the proof, with no verdict needed: finish the remaining writes instead
+    // of asking the coordinator again or re-queueing the run. A not-judged record keeps its
+    // own saved escalation.
     const legacyEscalation =
       record.decision === undefined &&
       record.roundCap !== true &&
       record.notJudged === undefined &&
       record.escalation === undefined &&
-      record.verdict === "changes_requested" &&
       legacyEscalationStarted(record.done, part, parent);
     // A send-back from before MET-243 that has started was already a fix: its part comment
     // promised the Ready move. Finish it as a fix with no coordinator run, so an escalate
