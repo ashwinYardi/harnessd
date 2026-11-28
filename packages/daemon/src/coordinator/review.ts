@@ -6,6 +6,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import {
+  ESCALATION_TRIGGER_LABELS,
   emptyTokenUsage,
   type HarnessAdapter,
   type Issue,
@@ -23,6 +24,7 @@ import { runForReply } from "./grill.ts";
 import type { Notifier } from "./notifier.ts";
 import { type AgentMemory, memorySection } from "./prompt.ts";
 import { cutDiff, MAX_PROMPT_DIFF, parseStrictJson, partItems } from "./qa.ts";
+import type { ReviewDecision, ReviewFixHint } from "./review-decision.ts";
 import { extractSection } from "./split.ts";
 import type { LoopState, QaFeedback } from "./state.ts";
 
@@ -597,7 +599,6 @@ export function buildReReviewPrompt(input: ReReviewPromptInput): string {
       "- Raise a new blocking finding only for code in the delta that breaks a named Done-when item. Name that item exactly in `item`.",
       "- Mark any other new finding as a nit. It must not block.",
       "- Edit nothing: do not edit files, commit, push, comment or review. This worktree is a detached checkout of the PR head, and harnessd posts the review from your verdict.",
-      "- A new blocking design finding in the delta still goes to a human by D-059.",
     ].join("\n"),
     `## Verdict\nYour final message is strict JSON only, no prose and no code fence:\n${RE_REVIEW_VERDICT_SHAPE}\n` +
       `\`saved\` has exactly one entry for each saved id (${savedFindings.map((_, i) => `R${i + 1}`).join(", ")}), ` +
@@ -1001,10 +1002,20 @@ export interface ReviewSettleInput {
   pr: PullRequest;
   /** The judged verdict; unset when the run gave no verdict. */
   verdict?: ReviewVerdict;
+  /**
+   * The coordinator's decision on a changes_requested verdict (MET-243). The loop decides
+   * before the settle and passes it in; a missing decision sends the findings back as a fix.
+   */
+  decision?: ReviewDecision;
   /** Why the run could not judge the head, when it could not (D-052). */
   notJudged?: ReviewNotJudged;
   /** A not-judged escalation a previous tick already decided (MET-232). */
   escalation?: ReviewEscalation;
+  /**
+   * A settle from before MET-243 that had already escalated and stopped. The loop sets it so
+   * only its remaining writes run; the parent comment is already in the done steps.
+   */
+  legacyEscalation?: boolean;
   /** The run's error, for the log line of a failed review. */
   error?: string;
   /** The GitHub review comment, when it was posted. */
@@ -1014,7 +1025,10 @@ export interface ReviewSettleInput {
 export interface ReviewSettleDeps {
   linear: ReviewLinear;
   notifier: Notifier;
-  /** `limits.qa_max_failures`: failed reviews on one part before a human is asked (D-014). */
+  /**
+   * The review round cap shown on the parent comment, from `limits.qa_max_failures` (D-014).
+   * The cap escalation itself is a later part (MET-243).
+   */
   maxFailures: number;
   log?: (line: string) => void;
   /**
@@ -1085,13 +1099,20 @@ export function reviewFindingList(findings: readonly ReviewFinding[]): string[] 
     });
 }
 
+/** The hint the coordinator's fix decision gives one `R<n>`, if it gives one (MET-243). */
+function hintFor(decision: ReviewDecision | undefined, id: string): string | undefined {
+  if (decision?.decision !== "fix") return undefined;
+  return decision.hints.find((hint) => hint.id === id)?.hint;
+}
+
 /**
- * Applies one review. A blocking design finding moves the part and parent to Needs input
- * with one parent comment and one notice: the coordinator cannot re-plan by itself (D-059).
- * A blocking code finding sets `qaFeedback` with source `review` and moves the part to
- * Ready, so its next run resumes the builder (D-046). An approve sends nothing back and
- * leaves nits only in the PR comment. Two failed reviews, or two not-judged reviews on one
- * head, move the part and parent to Needs input (D-014, D-052).
+ * Applies one review (MET-243). A changes_requested verdict takes the coordinator's decision.
+ * An `escalate` decision moves the part and parent to Needs input with one parent comment and
+ * one notice. A `fix` decision sets `qaFeedback` with source `review`, the numbered findings
+ * and each finding's hint, and moves the part to Ready, so its next run resumes the builder
+ * with the hints (D-046). A missing decision is sent back as a fix with no hints. An approve
+ * sends nothing back and leaves nits only in the PR comment. A failed run with no verdict, or
+ * two not-judged reviews on one head, keep the earlier D-014 and D-052 rules.
  *
  * A network error stops the writes and returns `pending` without changing any state; the
  * loop keeps the record for a retry and skips the steps already done (D-058).
@@ -1173,7 +1194,6 @@ export async function settleReview(
   const blocking = (input.verdict?.findings ?? []).filter(
     (finding) => finding.severity === "blocking",
   );
-  const design = blocking.filter((finding) => finding.kind === "design");
 
   /** The comment, detail and reason a not-judged escalation sends, from its saved reasons. */
   const notJudgedEscalation = (reasons: readonly string[]) => {
@@ -1194,17 +1214,14 @@ export async function settleReview(
     return escalate(saved.reason, saved.detail, saved.comment);
   }
 
-  // The design rule wins in a mixed verdict: nothing goes back to the builder (D-059).
-  if (design.length > 0) {
+  // A settle from before MET-243 had already escalated: finish its remaining writes. The
+  // parent comment is in the done steps, so this only moves the issues and sends the notice,
+  // and no decision runs and no comment posts twice.
+  if (input.legacyEscalation === true) {
     return escalate(
-      "reviewer found a design fault",
-      `review found a design fault on ${part.key} PR #${pr.number}`,
-      [
-        `the review found ${design.length} blocking design finding${design.length === 1 ? "" : "s"} on ${part.key} [PR #${pr.number}](${pr.url}).`,
-        "A human decides; nothing was sent back to the builder (D-059).",
-        "",
-        ...design.map(findingLine),
-      ].join("\n"),
+      "review needs input after the upgrade",
+      `the review settle on ${part.key} escalated before the upgrade and its writes stopped`,
+      `the review settle on ${part.key} [PR #${pr.number}](${pr.url}) escalated before the upgrade. Finishing it now (D-059).`,
     );
   }
 
@@ -1256,31 +1273,61 @@ export async function settleReview(
   }
 
   const failures = (state.reviewFailures[part.id] ?? 0) + 1;
-  if (failures >= deps.maxFailures) {
+  const round = `round ${failures} of ${deps.maxFailures}`;
+  const decision = input.decision;
+
+  // The coordinator asks the human only under a D-011 trigger (MET-243, D-059). The parent
+  // comment carries the trigger, the question, the options and the recommendation.
+  if (decision?.decision === "escalate") {
     return escalate(
-      `review failed ${times(failures)}`,
-      `review failed ${times(failures)} on ${part.key}`,
+      `review needs input on ${part.key}`,
+      `review ${round} on ${part.key} needs a human (${decision.trigger})`,
       [
-        `the review found blocking findings ${times(failures)} on ${part.key} [PR #${pr.number}](${pr.url}), so this needs a human (D-014). ${part.key} and ${parent.key} are in Needs input, and nothing is sent back again.`,
+        `${round} on ${part.key} PR #${pr.number}: escalate (\`${decision.trigger}\`)`,
         "",
-        ...blocking.map(findingLine),
+        `Trigger: ${ESCALATION_TRIGGER_LABELS[decision.trigger]}`,
+        `Question: ${decision.question}`,
+        "Options:",
+        ...decision.options.map((option) => `- ${option}`),
+        `Recommendation: ${decision.recommendation}`,
       ].join("\n"),
     );
   }
 
+  const lines = reviewFindingList(blocking);
+  const hints: ReviewFixHint[] = [];
+  for (const [i] of blocking.entries()) {
+    const id = `R${i + 1}`;
+    const hint = hintFor(decision, id);
+    if (hint !== undefined) hints.push({ id, hint });
+  }
   const feedback: QaFeedback = {
     source: "review",
     prUrl: pr.url,
-    failing: reviewFindingList(blocking),
+    failing: lines,
   };
   if (input.reviewUrl !== undefined) feedback.reviewUrl = input.reviewUrl;
+  if (hints.length > 0) feedback.hints = hints;
   const body = [
-    `**harnessd review**: changes requested on [PR #${pr.number}](${pr.url}) (round ${failures} of ${deps.maxFailures}, D-014). Back to Ready so the builder fixes these findings.`,
+    `**harnessd review**: changes requested on [PR #${pr.number}](${pr.url}) (${round}, D-014). Back to Ready so the builder fixes these findings.`,
     "",
-    ...reviewFindingList(blocking).map((line) => `- ${line}`),
+    ...lines.map((line) => `- ${line}`),
   ].join("\n");
   await safely(`comment on ${part.key}`, () => deps.linear.comment(part.id, `${body}\n`));
   await safely(`re-queue ${part.key}`, () => deps.linear.moveTo(part.id, "Ready"));
+  // One parent comment per round, with each finding and its hint, so the owner can follow
+  // the loop without a chat session (MET-243).
+  const parentBody = [
+    `${round} on ${part.key} PR #${pr.number}: fix`,
+    "",
+    ...lines.map((line, i) => {
+      const hint = hintFor(decision, `R${i + 1}`);
+      return hint === undefined ? `- ${line}` : `- ${line}\n  hint: ${hint}`;
+    }),
+  ].join("\n");
+  await safely(`comment on ${parent.key}`, () =>
+    deps.linear.comment(parent.id, `**harnessd review**: ${parentBody}\n`),
+  );
   if (stopped) return "pending";
   state.qaFeedback[part.id] = feedback;
   state.reviewFailures[part.id] = failures;

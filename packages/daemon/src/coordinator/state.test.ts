@@ -750,3 +750,104 @@ test("pendingReviewSettle keeps a saved not-judged escalation and drops a malfor
     "the escalation survives a reload",
   );
 });
+
+test("qaFeedback hints are optional, and a malformed hint drops only the field (MET-243)", async () => {
+  const base = {
+    source: "review",
+    failing: ["R1 (src/a.ts:1) Fix it."],
+  };
+  const withHints = { ...base, hints: [{ id: "R1", hint: "Do the fix." }] };
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      qaFeedback: {
+        a: withHints,
+        b: { ...base, hints: [] },
+        c: { ...base, hints: [{ id: "R1", hint: " " }] },
+        d: { ...base, hints: [{ id: "R1" }] },
+        e: { ...base, hints: "R1" },
+      },
+    }),
+  );
+  assert.deepEqual(
+    parsed.qaFeedback,
+    { a: withHints, b: { ...base, hints: [] }, c: base, d: base, e: base },
+    "an old file and a malformed field still load",
+  );
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.qaFeedback = parsed.qaFeedback;
+  await store.save(state);
+  assert.deepEqual((await store.load()).qaFeedback, state.qaFeedback, "the hints survive a reload");
+});
+
+test("pendingReviewSettle keeps a saved review decision and drops only a malformed one (MET-243)", async () => {
+  const fix = { decision: "fix", hints: [{ id: "R1", hint: "Fix it." }] };
+  const escalate = {
+    decision: "escalate",
+    trigger: "money",
+    question: "May it spend the paid seat?",
+    options: ["Spend it", "Re-plan"],
+    recommendation: "Re-plan.",
+  };
+  const valid = {
+    partId: "part-1",
+    partKey: "MET-41",
+    parentId: "parent-1",
+    prNumber: 7,
+    prUrl: "https://github.test/pull/7",
+    head: "sha7",
+    verdict: "changes_requested",
+    findings: [
+      {
+        file: "src/a.ts",
+        line: 12,
+        severity: "blocking",
+        kind: "design",
+        text: "The seam sits in the wrong module.",
+      },
+    ],
+    decision: fix,
+    done: [`comment on MET-41`],
+  };
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      pendingReviewSettle: {
+        a: valid,
+        b: { ...valid, decision: { decision: "fix", hints: [{ id: "R1" }] } },
+        c: { ...valid, decision: { decision: "escalate", trigger: "unknown" } },
+        d: { ...valid, decision: { decision: "escalate", trigger: "money", options: [] } },
+        e: { ...valid, decision: "fix" },
+        f: { ...valid, decision: escalate },
+        g: { ...valid, decision: undefined },
+      },
+    }),
+  );
+  const withoutDecision = { ...valid } as { decision?: unknown };
+  delete withoutDecision.decision;
+  assert.deepEqual(
+    parsed.pendingReviewSettle,
+    {
+      a: valid,
+      b: withoutDecision,
+      c: withoutDecision,
+      d: withoutDecision,
+      e: withoutDecision,
+      f: { ...valid, decision: escalate },
+      g: withoutDecision,
+    },
+    "a malformed decision drops only that field",
+  );
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.pendingReviewSettle = parsed.pendingReviewSettle ?? {};
+  await store.save(state);
+  assert.deepEqual(
+    (await store.load()).pendingReviewSettle,
+    state.pendingReviewSettle,
+    "the decision survives a reload",
+  );
+});

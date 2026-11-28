@@ -1026,3 +1026,171 @@ test("a not-judged escalation decides before its first write and a replay applie
   assert.equal(await settleReview(state, input, { ...deps, steps: unsaved }), "pending");
   assert.equal(calls.length, 0, "no write when the decision did not save");
 });
+
+test("a design finding takes the coordinator's fix and keeps each hint with its finding (MET-243, D-059)", async () => {
+  const comments: Array<{ id: string; body: string }> = [];
+  const moves: Array<{ id: string; state: string }> = [];
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment(id, body) {
+        comments.push({ id, body });
+        return "comment-1";
+      },
+      async moveTo(id, state) {
+        moves.push({ id, state });
+      },
+    },
+    notifier: { async notify() {} },
+    maxFailures: 3,
+  };
+  const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
+  const design: ReviewFinding = {
+    file: "src/shape.ts",
+    line: 4,
+    severity: "blocking",
+    kind: "design",
+    text: "This belongs in the review module, not the loop.",
+  };
+  const code: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  const input = {
+    part,
+    parent,
+    pr: pr(),
+    verdict: { decision: "changes_requested" as const, findings: [design, code] },
+    decision: {
+      decision: "fix" as const,
+      hints: [
+        { id: "R1", hint: "Move the seam into the review module." },
+        { id: "R2", hint: "Read the file once per part run." },
+      ],
+    },
+  };
+
+  assert.equal(await settleReview(state, input, deps), "sent_back");
+  assert.deepEqual(state.reviewFailures, { [part.id]: 1 }, "a fix counts its round");
+  assert.equal(state.qaFeedback[part.id]?.source, "review");
+  assert.deepEqual(state.qaFeedback[part.id]?.failing, [
+    "R1 (src/shape.ts:4) This belongs in the review module, not the loop.",
+    "R2 (src/api.ts:12) The loop reads the file on every tick.",
+  ]);
+  assert.deepEqual(state.qaFeedback[part.id]?.hints, [
+    { id: "R1", hint: "Move the seam into the review module." },
+    { id: "R2", hint: "Read the file once per part run." },
+  ]);
+  assert.deepEqual(moves, [{ id: part.id, state: "Ready" }], "the part goes back to Ready");
+  const parentComment = comments.find((comment) => comment.id === parent.id)?.body ?? "";
+  assert.match(parentComment, /^\*\*harnessd review\*\*: round 1 of 3 on MET-223 PR #223: fix/);
+  assert.match(parentComment, /R1 \(src\/shape\.ts:4\) This belongs in the review module/);
+  assert.match(parentComment, /\n {2}hint: Move the seam into the review module\./);
+  assert.match(parentComment, /\n {2}hint: Read the file once per part run\./);
+  const partComment = comments.find((comment) => comment.id === part.id)?.body ?? "";
+  assert.match(partComment, /changes requested on \[PR #223\]/);
+  assert.match(partComment, /- R1 \(src\/shape\.ts:4\)/);
+});
+
+test("an escalate decision moves both issues and posts the D-011 question on the parent (MET-243)", async () => {
+  const comments: Array<{ id: string; body: string }> = [];
+  const moves: Array<{ id: string; state: string }> = [];
+  let notices = 0;
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment(id, body) {
+        comments.push({ id, body });
+        return "comment-1";
+      },
+      async moveTo(id, state) {
+        moves.push({ id, state });
+      },
+    },
+    notifier: {
+      async notify() {
+        notices += 1;
+      },
+    },
+    maxFailures: 2,
+  };
+  const state: Parameters<typeof settleReview>[0] = {
+    reviewFailures: { [part.id]: 1 },
+    qaFeedback: {},
+  };
+  const input = {
+    part,
+    parent,
+    pr: pr(),
+    verdict: {
+      decision: "changes_requested" as const,
+      findings: [
+        {
+          file: "src/shape.ts",
+          line: 4,
+          severity: "blocking" as const,
+          kind: "design" as const,
+          text: "This changes the public API.",
+        },
+      ],
+    },
+    decision: {
+      decision: "escalate" as const,
+      trigger: "public_api_data_model_or_protected_path" as const,
+      question: "May the change alter the public API?",
+      options: ["Alter it", "Keep it internal"],
+      recommendation: "Keep it internal.",
+    },
+  };
+
+  assert.equal(await settleReview(state, input, deps), "escalated");
+  assert.deepEqual(state.qaFeedback, {}, "nothing goes to the builder");
+  assert.deepEqual(state.reviewFailures, {}, "the escalation clears the count");
+  assert.deepEqual(moves, [
+    { id: parent.id, state: "Needs input" },
+    { id: part.id, state: "Needs input" },
+  ]);
+  assert.equal(notices, 1, "one notice");
+  const body = comments.find((comment) => comment.id === parent.id)?.body ?? "";
+  assert.match(
+    body,
+    /round 2 of 2 on MET-223 PR #223: escalate \(`public_api_data_model_or_protected_path`\)/,
+  );
+  assert.match(body, /Trigger: changes a public API, the data model or a protected path/);
+  assert.match(body, /Question: May the change alter the public API\?/);
+  assert.match(body, /Options:\n- Alter it\n- Keep it internal/);
+  assert.match(body, /Recommendation: Keep it internal\./);
+});
+
+test("a changes_requested verdict with no decision is a fix send-back with no hints (MET-243)", async () => {
+  const comments: string[] = [];
+  const deps: ReviewSettleDeps = {
+    linear: {
+      async comment(_id, body) {
+        comments.push(body);
+        return "comment-1";
+      },
+      async moveTo() {},
+    },
+    notifier: { async notify() {} },
+    maxFailures: 2,
+  };
+  const state: Parameters<typeof settleReview>[0] = { reviewFailures: {}, qaFeedback: {} };
+  const verdict = {
+    decision: "changes_requested" as const,
+    findings: [
+      {
+        file: "src/a.ts",
+        line: 1,
+        severity: "blocking" as const,
+        kind: "design" as const,
+        text: "A design fault.",
+      },
+    ],
+  };
+
+  assert.equal(await settleReview(state, { part, parent, pr: pr(), verdict }, deps), "sent_back");
+  assert.equal(state.qaFeedback[part.id]?.hints, undefined);
+  assert.match(comments[1] ?? "", /round 1 of 2 on MET-223 PR #223: fix/);
+});

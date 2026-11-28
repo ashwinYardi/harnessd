@@ -238,6 +238,15 @@ class FakeLinear implements LoopLinear {
 
 // --- fake adapter ----------------------------------------------------------
 
+/** One valid fix hint per open finding the decision prompt lists (MET-243). */
+function fixDecisionReply(prompt: string): string {
+  const ids = [...new Set([...prompt.matchAll(/^- (R\d+) \(/gm)].map((match) => match[1]))];
+  return JSON.stringify({
+    decision: "fix",
+    findings: ids.map((id) => ({ id, hint: `Fix ${id}.` })),
+  });
+}
+
 interface PendingRun {
   task: Task;
   cwd: string;
@@ -255,8 +264,9 @@ interface PendingRun {
 }
 
 /**
- * Answers grill runs with `grillReply`, plan runs with `plans[key]` (or "not json"),
- * and keeps every other run open until the test finishes it.
+ * Answers grill runs with `grillReply`, plan runs with `plans[key]` (or "not json"), a review
+ * decision with one valid fix hint per open finding, and keeps every other run open until the
+ * test finishes it.
  */
 function fakeAdapter(
   options: {
@@ -273,6 +283,8 @@ function fakeAdapter(
     planReason?: RunResult["reason"];
     /** True when the fake adapter honors `Task.resumeSessionId` (MET-156). */
     canResume?: boolean;
+    /** The coordinator's strict reply to a review decision (MET-243). */
+    reviewDecision?: string;
   } = {},
 ) {
   const tasks: Task[] = [];
@@ -337,6 +349,10 @@ function fakeAdapter(
             undefined,
             options.planReason,
           ),
+        );
+      } else if (task.id.includes("-review-decision-r")) {
+        promise = Promise.resolve(
+          result("ok", options.reviewDecision ?? fixDecisionReply(task.prompt)),
         );
       } else {
         promise = new Promise((r) => {
@@ -3656,7 +3672,7 @@ test("a network error while a review settles keeps the record and retries its un
   );
   assert.equal(store.state.reviewFailures[fx.part.id], undefined, "no failure is counted");
   assert.deepEqual(
-    pending?.done,
+    store.state.pendingReviewSettle?.[fx.part.id]?.done,
     [`comment on ${fx.part.key}`],
     "the done comment is kept; the failed move is not",
   );
@@ -3736,12 +3752,16 @@ test("a part whose Ready move landed before a timeout waits for its review settl
   assert.equal(fx.part.state, "Ready", "the move landed before the timeout");
   assert.ok(store.state.pendingReview?.[fx.part.id], "the settlement stays pending");
   assert.equal(store.state.qaFeedback[fx.part.id], undefined, "the findings are not saved yet");
-  assert.deepEqual(store.state.pendingReview?.[fx.part.id]?.done, [`comment on ${fx.part.key}`]);
+  assert.deepEqual(store.state.pendingReviewSettle?.[fx.part.id]?.done, [
+    `comment on ${fx.part.key}`,
+  ]);
 
   const blocked = await t.loop.tick();
   assert.deepEqual(blocked.dispatched, [], "the builder waits for the settlement");
   assert.equal(
-    t.adapter.runs().filter((run) => run.role !== "reviewer").length,
+    t.adapter
+      .runs()
+      .filter((run) => run.role !== "reviewer" && !run.id.includes("-review-decision-")).length,
     0,
     "no builder run starts without the findings",
   );
@@ -4057,6 +4077,478 @@ test("a restart replays a saved not-judged escalation with no writes done (MET-2
   );
 });
 
+test("a restart replays a saved review decision with no second coordinator run and one notice (MET-243)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-redecision-"));
+  roots.push(root);
+  const fx = reviewFixture({ withQa: false });
+  const decision = {
+    decision: "escalate" as const,
+    trigger: "money" as const,
+    question: "May the fix spend the paid seat?",
+    options: ["Spend it", "Re-plan with the free seat"],
+    recommendation: "Re-plan with the free seat.",
+  };
+  const store = createFileLoopStore(root);
+  await store.save(fx.state);
+  const started = setup({
+    config: ONE_AT_A_TIME,
+    adapter: fakeAdapter({ reviewDecision: JSON.stringify(decision) }),
+    linear: fx.linear,
+    store,
+  });
+  started.gh.open(fx.part.key, 7);
+  await started.loop.tick();
+
+  // The escalation's parent comment lands, then the parent move times out, so the record holds
+  // the saved decision and one done step.
+  const moveTo = fx.linear.moveTo.bind(fx.linear);
+  let down = true;
+  fx.linear.moveTo = async (id, state) => {
+    if (down && id === fx.parent.id && state === "Needs input") {
+      down = false;
+      throw new Error("fetch failed");
+    }
+    return moveTo(id, state);
+  };
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  started.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "changes_requested", findings: [blocking] }),
+  );
+  await started.loop.idle();
+
+  const saved = await store.load();
+  assert.deepEqual(saved.pendingReviewSettle?.[fx.part.id]?.decision, decision, "durable");
+  assert.equal(fx.parent.state, "In Progress", "the parent move did not land");
+  assert.equal(fx.part.state, "In Review", "the part stays In Review until the settle");
+
+  // The daemon restarts: a new loop and a new adapter read loop.json.
+  const next = fakeAdapter();
+  const second = setup({ config: ONE_AT_A_TIME, adapter: next, linear: fx.linear, store });
+  second.gh.open(fx.part.key, 7);
+  await second.loop.tick();
+
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(fx.part.state, "Needs input");
+  assert.equal(
+    next.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
+    0,
+    "the saved decision is replayed with no second coordinator run",
+  );
+  assert.equal(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key).length,
+    1,
+    "the parent comment is posted once",
+  );
+  assert.equal(
+    second.pings.filter((ping) => ping.includes("needs a human (money)")).length,
+    1,
+    "the notice is sent once",
+  );
+  assert.equal(
+    (await store.load()).pendingReviewSettle,
+    undefined,
+    "the replayed record is dropped",
+  );
+  assert.equal((await store.load()).pendingReview, undefined, "the PR record is dropped");
+});
+
+test("a retried review decision waits for a free run slot (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  fx.state.pendingReviewSettle = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      done: [],
+    },
+  };
+  // A run this process cannot retire still owns the only slot: its issue is gone, so the
+  // re-queue move fails and the entry stays.
+  fx.state.inFlight = [
+    {
+      issueId: "gone-1",
+      issueKey: "MET-999",
+      role: "backend",
+      agent: "backend",
+      worktree: "",
+      branch: "met-999",
+      startedAt: "2026-11-27T10:00:00.000Z",
+      pid: 1,
+    },
+  ];
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 1 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const store = memoryStore(fx.state);
+  const t = setup({ config, linear: fx.linear, store });
+
+  await t.loop.tick();
+
+  const waiting = store.state.pendingReviewSettle?.[fx.part.id];
+  assert.ok(waiting, "the settlement stays pending");
+  assert.equal(waiting?.decision, undefined, "no decision is saved without a slot");
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
+    0,
+    "no coordinator run starts while every slot is busy",
+  );
+  assert.deepEqual(t.linear.comments, [], "no write goes out");
+  assert.deepEqual(t.linear.moves, [], "no issue moves");
+  assert.ok(
+    t.logs.some((line) => line.includes("no run slot for the review decision")),
+    t.logs.join("\n"),
+  );
+
+  // A restart with the slot free runs the decision and settles the round.
+  store.state.inFlight = [];
+  const next = fakeAdapter();
+  const second = setup({ config, adapter: next, linear: fx.linear, store });
+  await second.loop.tick();
+
+  assert.ok(
+    second.linear.moves.some((move) => move.key === fx.part.key && move.state === "Ready"),
+    "the freed slot lets the round settle",
+  );
+  assert.deepEqual(store.state.reviewFailures, { [fx.part.id]: 1 });
+  assert.equal(
+    next.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
+    1,
+    "the coordinator runs once a slot is free",
+  );
+  next.pending.at(-1)?.finish("cancelled");
+  await second.loop.idle();
+});
+
+test("no coordinator harness keeps the review round pending with no writes (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  fx.state.pendingReviewSettle = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      done: [],
+    },
+  };
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store, extra: { adapters: {} } });
+
+  await t.loop.tick();
+
+  assert.equal(fx.part.state, "In Review", "the round waits, nothing is sent back");
+  assert.ok(store.state.pendingReviewSettle?.[fx.part.id], "the settlement stays pending");
+  assert.equal(
+    store.state.pendingReviewSettle?.[fx.part.id]?.decision,
+    undefined,
+    "no fallback decision is saved",
+  );
+  assert.deepEqual(t.linear.comments, [], "no comment goes out");
+  assert.deepEqual(t.linear.moves, [], "no issue moves");
+  assert.deepEqual(t.pings, [], "no notice goes out");
+
+  // The next run has the harness back: the saved round is decided and settled once.
+  const next = fakeAdapter();
+  const secondSetup = setup({ config: ONE_AT_A_TIME, adapter: next, linear: fx.linear, store });
+  await secondSetup.loop.tick();
+
+  assert.ok(
+    secondSetup.linear.moves.some((move) => move.key === fx.part.key && move.state === "Ready"),
+    "the round settles once a coordinator can run",
+  );
+  assert.equal(
+    store.state.pendingReviewSettle?.[fx.part.id],
+    undefined,
+    "the record goes when the settle finishes",
+  );
+  assert.match(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key).at(-1)?.body ?? "",
+    /: fix/,
+  );
+  next.pending.at(-1)?.finish("cancelled");
+  await secondSetup.loop.idle();
+});
+
+test("an upgrade finishes a legacy escalation without posting its comment twice (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/shape.ts",
+    line: 4,
+    severity: "blocking",
+    kind: "design",
+    text: "This belongs in the review module, not the loop.",
+  };
+  const legacyComment = "**harnessd review**: the review found 1 blocking design finding.";
+  // The old daemon posted the escalation comment, then its parent move timed out.
+  await fx.linear.comment(fx.parent.id, legacyComment);
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.pendingReview = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      body: "**harnessd review**: changes requested.",
+      verdict: "changes_requested",
+      findings: [blocking],
+      posted: true,
+      done: [`comment on ${fx.parent.key}`],
+    },
+  };
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+
+  await t.loop.tick();
+
+  assert.equal(fx.parent.state, "Needs input", "the legacy escalation finishes");
+  assert.equal(fx.part.state, "Needs input");
+  assert.equal(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key).length,
+    1,
+    "the parent comment is not posted twice",
+  );
+  assert.equal(
+    t.pings.filter((ping) => ping.includes("review needs input after the upgrade")).length,
+    1,
+    "the remaining notice is sent once",
+  );
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
+    0,
+    "no coordinator runs for a legacy escalation",
+  );
+  assert.equal(store.state.pendingReview, undefined, "the legacy record is dropped");
+  assert.equal(store.state.pendingReviewSettle, undefined, "the settle record is dropped");
+});
+
+test("an upgrade keeps a legacy send-back's completed steps and posts no comment twice (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  const legacyComment = "**harnessd review**: changes requested on PR #7.";
+  // The old daemon posted the part comment, then its Ready move timed out.
+  await fx.linear.comment(fx.part.id, legacyComment);
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.pendingReview = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      body: "**harnessd review**: changes requested.",
+      verdict: "changes_requested",
+      findings: [blocking],
+      posted: true,
+      done: [`comment on ${fx.part.key}`],
+    },
+  };
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+
+  await t.loop.tick();
+
+  assert.ok(
+    t.linear.moves.some((move) => move.key === fx.part.key && move.state === "Ready"),
+    "the send-back finishes",
+  );
+  assert.equal(
+    fx.linear.comments.filter((comment) => comment.key === fx.part.key).length,
+    1,
+    "the completed part comment is not posted again",
+  );
+  assert.equal(store.state.reviewFailures[fx.part.id], 1, "the round counts once");
+  assert.equal(store.state.qaFeedback[fx.part.id]?.source, "review");
+  t.adapter.pending.at(-1)?.finish("cancelled");
+  await t.loop.idle();
+});
+
+test("an upgrade finishes a legacy send-back as fix even when the coordinator would escalate (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  await fx.linear.comment(fx.part.id, "**harnessd review**: changes requested on PR #7.");
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.pendingReview = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      body: "**harnessd review**: changes requested.",
+      verdict: "changes_requested",
+      findings: [blocking],
+      posted: true,
+      done: [`comment on ${fx.part.key}`],
+    },
+  };
+  const adapter = fakeAdapter({
+    reviewDecision: JSON.stringify({
+      decision: "escalate",
+      trigger: "money",
+      question: "May it spend the paid seat?",
+      options: ["Spend it", "Re-plan"],
+      recommendation: "Re-plan.",
+    }),
+  });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, adapter, linear: fx.linear, store });
+
+  await t.loop.tick();
+
+  assert.ok(
+    t.linear.moves.some((move) => move.key === fx.part.key && move.state === "Ready"),
+    "the promised Ready move still happens",
+  );
+  assert.ok(
+    !t.linear.moves.some((move) => move.state === "Needs input"),
+    "an escalate reply cannot move a started legacy send-back",
+  );
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.includes("-review-decision-r")).length,
+    0,
+    "no coordinator run answers a legacy send-back",
+  );
+  assert.match(
+    fx.linear.comments.filter((comment) => comment.key === fx.parent.key).at(-1)?.body ?? "",
+    /: fix/,
+    "the parent comment records a fix round",
+  );
+  assert.equal(store.state.qaFeedback[fx.part.id]?.source, "review");
+  assert.equal(store.state.pendingReview, undefined);
+  assert.equal(store.state.pendingReviewSettle, undefined);
+  t.adapter.pending.at(-1)?.finish("cancelled");
+  await t.loop.idle();
+});
+
+test("an upgrade finishes a legacy send-back's Ready move with no coordinator harness (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  await fx.linear.comment(fx.part.id, "**harnessd review**: changes requested on PR #7.");
+  fx.state.reviewerHeads = {
+    [fx.part.id]: {
+      sha: "sha7",
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  fx.state.pendingReview = {
+    [fx.part.id]: {
+      partId: fx.part.id,
+      partKey: fx.part.key,
+      parentId: fx.parent.id,
+      prNumber: 7,
+      prUrl: "https://github.test/o/r/pull/7",
+      head: "sha7",
+      body: "**harnessd review**: changes requested.",
+      verdict: "changes_requested",
+      findings: [blocking],
+      posted: true,
+      done: [`comment on ${fx.part.key}`],
+    },
+  };
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store, extra: { adapters: {} } });
+
+  await t.loop.tick();
+
+  assert.ok(
+    t.linear.moves.some((move) => move.key === fx.part.key && move.state === "Ready"),
+    "the Ready move finishes with no coordinator harness",
+  );
+  assert.equal(
+    fx.linear.comments.filter((comment) => comment.key === fx.part.key).length,
+    1,
+    "the completed part comment is not posted again",
+  );
+  assert.equal(store.state.reviewFailures[fx.part.id], 1, "the round counts once");
+  assert.equal(store.state.qaFeedback[fx.part.id]?.source, "review");
+  assert.equal(store.state.pendingReview, undefined);
+  assert.equal(store.state.pendingReviewSettle, undefined);
+});
+
 test("a failed save blocks the escalation writes and the retry decides again (MET-232)", async () => {
   const fx = reviewFixture({ withQa: false });
   const memory = memoryStore(fx.state);
@@ -4149,6 +4641,7 @@ test("a blocking code finding sends the part back and the next run resumes the b
     prUrl: "https://github.test/o/r/pull/7",
     reviewUrl: "https://github.test/o/r/pull/7#review-1",
     failing: ["R1 (src/api.ts:12) The loop reads the file on every tick."],
+    hints: [{ id: "R1", hint: "Fix R1." }],
   });
   assert.match(
     t.linear.comments.at(-1)?.body ?? "",
@@ -4442,6 +4935,111 @@ test("an escalated review's moved head gets a full first review, not a delta (ME
   await t.loop.idle();
 });
 
+test("the review after a fix round is still a re-review (MET-243, D-061)", async () => {
+  const root = await mkdtemp(join(tmpdir(), "harnessd-rereview-fix-"));
+  roots.push(root);
+  const repo = join(root, "repo");
+  execFileSync("git", ["init", "-q", "-b", "main", repo], { timeout: TEST_GIT_TIMEOUT_MS });
+  await writeFile(join(repo, "README.md"), "hi\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "init");
+  const branch = "met-243-api";
+  git(repo, "checkout", "-q", "-b", branch);
+  await writeFile(join(repo, "api.ts"), "export const cache = [];\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "round 1");
+  const sha7 = git(repo, "rev-parse", "HEAD");
+  await writeFile(join(repo, "api.ts"), "export const cache = new Map();\n");
+  git(repo, "add", ".");
+  git(repo, "commit", "-q", "-m", "round 2");
+  const sha8 = git(repo, "rev-parse", "HEAD");
+  const worktrees = createGitWorktrees({ repoDir: repo, root: join(root, "worktrees") });
+
+  const linear = new FakeLinear();
+  const parent = linear.add({ title: "P", state: "In Progress", description: BODY("M") });
+  const part = linear.add({
+    title: "API",
+    parentId: parent.id,
+    state: "In Review",
+    description: [
+      partMarker("backend"),
+      "",
+      "**Goal**",
+      "Ship the API.",
+      "",
+      "**Done when**",
+      "- [ ] Works",
+      "",
+      "**Size**: S",
+    ].join("\n"),
+  });
+  const state = emptyLoopState();
+  state.splits = {
+    [parent.id]: {
+      key: parent.key,
+      parts: [part.id],
+      qa: "qa-1",
+      at: "2026-11-23T10:00:00.000Z",
+    },
+  };
+  state.shipped = {
+    [part.id]: {
+      key: part.key,
+      branch,
+      prUrl: "https://github.test/o/r/pull/7",
+      at: "2026-11-23T10:01:00.000Z",
+    },
+  };
+  const blocking: ReviewFinding = {
+    file: "api.ts",
+    line: 1,
+    severity: "blocking",
+    kind: "code",
+    text: "The cache grows without a limit.",
+  };
+  // What a fix send-back leaves: the saved finding at the old head, one counted failure and
+  // the builder's new head (MET-243).
+  state.reviewerHeads = {
+    [part.id]: {
+      sha: sha7,
+      verdict: "changes_requested",
+      findings: [blocking],
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  state.reviewFailures = { [part.id]: 1 };
+  const config = mergeLayers([
+    {
+      scope: "workspace",
+      dir: "/repo/.harnessd",
+      settings: { limits: { max_concurrent: 1 } },
+      agents: {},
+      rules: [],
+      skills: [],
+      mcp: {},
+      skillSettings: {},
+    },
+  ]);
+  const t = setup({ config, linear, worktrees, store: memoryStore(state) });
+  const opened = t.gh.open(part.key, 7, branch);
+  opened.headRefOid = sha8;
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [part.key]);
+  let pending = t.adapter.pending[0];
+  for (let i = 0; i < 200 && pending === undefined; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    pending = t.adapter.pending[0];
+  }
+  assert.ok(pending, "the review run started");
+  assert.match(pending.task.prompt, /## Delta since the last review/, "still a re-review");
+  assert.match(pending.task.prompt, /## Saved findings \(1\)/);
+  assert.match(pending.task.prompt, /R1 \(api\.ts:1\) The cache grows without a limit\./);
+  assert.doesNotMatch(pending.task.prompt, /## Senior-dev rubric/);
+
+  pending.finish("cancelled");
+  await t.loop.idle();
+});
+
 test("a nit never sends a part back (MET-225)", async () => {
   const fx = reviewFixture({ withQa: false });
   const store = memoryStore(fx.state);
@@ -4469,10 +5067,27 @@ test("a nit never sends a part back (MET-225)", async () => {
   assert.deepEqual((await t.loop.tick()).dispatched, [], "no builder run starts");
 });
 
-test("a blocking design finding goes to Needs input on the part and the parent (MET-225, D-059)", async () => {
+test("a blocking design finding is sent back as a fix with the coordinator's hint (MET-243, D-059)", async () => {
   const fx = reviewFixture({ withQa: false });
+  fx.part.description += "\n\n**Verify**\n- `pnpm test` → exit 0";
+  fx.state.sessions = {
+    [fx.part.id]: {
+      harness: "claude-code",
+      sessionId: "sess-1",
+      worktree: `/wt/${fx.part.key}`,
+      branch: fx.part.key.toLowerCase(),
+      at: "2026-11-27T10:00:00.000Z",
+    },
+  };
+  const adapter = fakeAdapter({
+    canResume: true,
+    reviewDecision: JSON.stringify({
+      decision: "fix",
+      findings: [{ id: "R1", hint: "Move the design into the review module." }],
+    }),
+  });
   const store = memoryStore(fx.state);
-  const t = setup({ config: ONE_AT_A_TIME, linear: fx.linear, store });
+  const t = setup({ config: ONE_AT_A_TIME, adapter, linear: fx.linear, store });
   t.gh.open(fx.part.key, 7);
   await t.loop.tick();
 
@@ -4483,7 +5098,98 @@ test("a blocking design finding goes to Needs input on the part and the parent (
     kind: "design",
     text: "This belongs in the review module, not the loop.",
   };
-  const code: ReviewFinding = {
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "changes_requested", findings: [design] }),
+  );
+  await t.loop.idle();
+
+  assert.equal(fx.part.state, "Ready", "the coordinator's fix sends the part back");
+  assert.equal(store.state.reviewFailures[fx.part.id], 1);
+  assert.deepEqual(store.state.qaFeedback[fx.part.id], {
+    source: "review",
+    prUrl: "https://github.test/o/r/pull/7",
+    reviewUrl: "https://github.test/o/r/pull/7#review-1",
+    failing: ["R1 (src/shape.ts:4) This belongs in the review module, not the loop."],
+    hints: [{ id: "R1", hint: "Move the design into the review module." }],
+  });
+  const parentComment = t.linear.comments.filter((c) => c.key === fx.parent.key).at(-1)?.body ?? "";
+  assert.match(parentComment, /round 1 of 2 on .* PR #7: fix/);
+  assert.match(parentComment, /R1 \(src\/shape\.ts:4\) This belongs in the review module/);
+  assert.match(parentComment, /hint: Move the design into the review module\./);
+
+  assert.deepEqual((await t.loop.tick()).dispatched, [fx.part.key], "the builder resumes next");
+  const run = t.adapter.runs().at(-1);
+  assert.equal(run?.resumeSessionId, "sess-1", "the builder's own session resumes");
+  assert.match(run?.prompt ?? "", /R1 \(src\/shape\.ts:4\)/);
+  assert.match(run?.prompt ?? "", /hint: Move the design into the review module\./);
+  t.adapter.pending.at(-1)?.finish("ok");
+  await t.loop.idle();
+});
+
+test("a D-011 trigger escalates with the question, options and recommendation on the parent (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const adapter = fakeAdapter({
+    reviewDecision: JSON.stringify({
+      decision: "escalate",
+      trigger: "public_api_data_model_or_protected_path",
+      question: "May the part change the public API of the review module?",
+      options: ["Change the public API", "Keep it internal and re-plan"],
+      recommendation: "Keep it internal and re-plan the part.",
+    }),
+  });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, adapter, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  await t.loop.tick();
+
+  const design: ReviewFinding = {
+    file: "src/shape.ts",
+    line: 4,
+    severity: "blocking",
+    kind: "design",
+    text: "This belongs in the review module, not the loop.",
+  };
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "changes_requested", findings: [design] }),
+  );
+  await t.loop.idle();
+
+  assert.equal(fx.part.state, "Needs input");
+  assert.equal(fx.parent.state, "Needs input");
+  assert.equal(store.state.qaFeedback[fx.part.id], undefined, "nothing goes to the builder");
+  assert.equal(store.state.reviewFailures[fx.part.id], undefined, "the escalation clears it");
+  const comments = t.linear.comments.filter((c) => c.key === fx.parent.key);
+  assert.equal(comments.length, 1, "one parent comment");
+  const body = comments[0]?.body ?? "";
+  assert.match(body, /escalate \(`public_api_data_model_or_protected_path`\)/);
+  assert.match(body, /Trigger: changes a public API, the data model or a protected path/);
+  assert.match(body, /Question: May the part change the public API of the review module\?/);
+  assert.match(body, /- Change the public API\n- Keep it internal and re-plan/);
+  assert.match(body, /Recommendation: Keep it internal and re-plan the part\./);
+  assert.equal(
+    t.pings.filter((ping) =>
+      ping.includes("needs a human (public_api_data_model_or_protected_path)"),
+    ).length,
+    1,
+    "one notice",
+  );
+});
+
+test("an escalation without a D-011 trigger is sent back as fix (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const adapter = fakeAdapter({
+    reviewDecision: JSON.stringify({ decision: "escalate" }),
+  });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, adapter, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  await t.loop.tick();
+
+  const blocking: ReviewFinding = {
     file: "src/api.ts",
     line: 12,
     severity: "blocking",
@@ -4493,26 +5199,50 @@ test("a blocking design finding goes to Needs input on the part and the parent (
   t.adapter.pending[0]?.finish(
     "ok",
     undefined,
-    JSON.stringify({ decision: "changes_requested", findings: [design, code] }),
+    JSON.stringify({ decision: "changes_requested", findings: [blocking] }),
   );
   await t.loop.idle();
 
-  assert.equal(fx.part.state, "Needs input", "the design rule wins a mixed verdict");
-  assert.equal(fx.parent.state, "Needs input");
-  assert.equal(store.state.qaFeedback[fx.part.id], undefined, "nothing goes to the builder");
-  assert.equal(store.state.reviewFailures[fx.part.id], undefined);
-  const comments = t.linear.comments.filter((c) => c.key === fx.parent.key);
-  assert.equal(comments.length, 1, "one parent comment");
-  assert.match(comments[0]?.body ?? "", /- src\/shape\.ts:4 \(blocking, design\)/);
-  assert.doesNotMatch(comments[0]?.body ?? "", /src\/api\.ts:12/);
-  assert.equal(
-    t.pings.filter((ping) => ping.includes("reviewer found a design fault")).length,
-    1,
-    "one design-fault notice",
+  assert.equal(fx.part.state, "Ready", "no trigger means a fix send-back");
+  assert.equal(store.state.reviewFailures[fx.part.id], 1);
+  assert.ok(
+    t.logs.some((line) => line.includes("escalation without a D-011 trigger, sent back as fix")),
+    t.logs.join("\n"),
   );
 });
 
-test("two failed reviews on one part go to Needs input (MET-225, D-014)", async () => {
+test("an invalid coordinator reply is sent back as fix (MET-243)", async () => {
+  const fx = reviewFixture({ withQa: false });
+  const adapter = fakeAdapter({ reviewDecision: "not a decision" });
+  const store = memoryStore(fx.state);
+  const t = setup({ config: ONE_AT_A_TIME, adapter, linear: fx.linear, store });
+  t.gh.open(fx.part.key, 7);
+  await t.loop.tick();
+
+  const blocking: ReviewFinding = {
+    file: "src/api.ts",
+    line: 12,
+    severity: "blocking",
+    kind: "code",
+    text: "The loop reads the file on every tick.",
+  };
+  t.adapter.pending[0]?.finish(
+    "ok",
+    undefined,
+    JSON.stringify({ decision: "changes_requested", findings: [blocking] }),
+  );
+  await t.loop.idle();
+
+  assert.equal(fx.part.state, "Ready", "an unusable reply is still a fix send-back");
+  assert.equal(store.state.reviewFailures[fx.part.id], 1);
+  assert.equal(store.state.qaFeedback[fx.part.id]?.hints, undefined, "no hints");
+  assert.ok(
+    t.logs.some((line) => line.includes("review decision failed")),
+    t.logs.join("\n"),
+  );
+});
+
+test("a second failed review asks the coordinator again instead of Needs input (MET-243, D-014)", async () => {
   const fx = reviewFixture({ withQa: false });
   const state = fx.state;
   state.reviewFailures = { [fx.part.id]: 1 };
@@ -4535,11 +5265,13 @@ test("two failed reviews on one part go to Needs input (MET-225, D-014)", async 
   );
   await t.loop.idle();
 
-  assert.equal(fx.part.state, "Needs input");
-  assert.equal(fx.parent.state, "Needs input");
-  assert.equal(store.state.reviewFailures[fx.part.id], undefined, "the escalation clears it");
-  assert.equal(store.state.qaFeedback[fx.part.id], undefined, "nothing is sent back again");
-  assert.equal(t.pings.filter((ping) => ping.includes("review failed twice")).length, 1);
+  assert.equal(fx.part.state, "Ready", "the second failure is sent back, not escalated");
+  assert.equal(fx.parent.state, "In Progress");
+  assert.equal(store.state.reviewFailures[fx.part.id], 2, "the count goes up");
+  assert.match(
+    t.linear.comments.filter((c) => c.key === fx.parent.key).at(-1)?.body ?? "",
+    /round 2 of 2 on .* PR #7: fix/,
+  );
 });
 
 test("a review run failure that is not a not-judged reason counts one review failure (MET-225, D-014)", async () => {
