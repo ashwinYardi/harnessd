@@ -1420,7 +1420,7 @@ test("failed review runs and changes_requested rounds have separate caps (MET-24
   assert.deepEqual(notices, ["review failed twice"], "the round count does not change the cap");
 });
 
-test("a partly done legacy send-back starts at round 0 and replay counts it once (MET-244, D-062)", async () => {
+test("a pending legacy send-back starts at round 0 and replay counts it once (MET-244, D-062)", async () => {
   const finding = {
     file: "src/a.ts",
     line: 1,
@@ -1450,12 +1450,16 @@ test("a partly done legacy send-back starts at round 0 and replay counts it once
           head: "sha223",
           verdict: "changes_requested",
           findings: [finding],
-          done: [`comment on ${part.key}`],
+          done: [`comment on ${part.key}`, `re-queue ${part.key}`],
         },
       },
     }),
   );
-  assert.equal(state.reviewFailures[part.id], undefined, "a partly done send-back starts at 0");
+  assert.equal(
+    state.reviewFailures[part.id],
+    undefined,
+    "a pending settlement starts at 0 even when both send-back steps landed",
+  );
 
   const deps: ReviewSettleDeps = {
     linear: {

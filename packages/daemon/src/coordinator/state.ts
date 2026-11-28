@@ -1065,8 +1065,9 @@ export function parseLoopState(text: string): LoopState {
   const legacyRounds: Record<string, number> = {};
   if (!splitCounters) {
     // Keep the D-061 re-review trigger for a completed legacy send-back: one round keeps
-    // `reviewFailures > 0` true without trusting the mixed legacy magnitude. A pending or
-    // partly done settle stays at 0, so its replay counts that same verdict once.
+    // `reviewFailures > 0` true without trusting the mixed legacy magnitude. Any pending
+    // record stays at 0, even with every step marked done, because its replay is about to
+    // count that same verdict once.
     const heads = raw.reviewerHeads === undefined ? {} : reviewerHeads(raw.reviewerHeads);
     const pending = raw.pendingReview === undefined ? {} : pendingReviews(raw.pendingReview);
     const settles =
@@ -1075,13 +1076,8 @@ export function parseLoopState(text: string): LoopState {
       if (head.verdict !== "changes_requested") continue;
       if (!head.findings.some((finding) => finding.severity === "blocking")) continue;
       if ((legacyCounts[id] ?? 0) <= 0) continue;
-      const settle = settles[id];
-      const pendingRecord = pending[id] !== undefined || settle !== undefined;
-      const sendBackComplete =
-        !pendingRecord ||
-        (settle?.done.includes(`comment on ${settle.partKey}`) === true &&
-          settle.done.includes(`re-queue ${settle.partKey}`));
-      if (sendBackComplete) legacyRounds[id] = 1;
+      if (pending[id] !== undefined || settles[id] !== undefined) continue;
+      legacyRounds[id] = 1;
     }
   }
   return {
