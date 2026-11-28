@@ -52,6 +52,7 @@ const state: LoopState = {
   attempts: { "id-1": 1 },
   qaFailures: { "parent-1": 1 },
   reviewFailures: { "id-1": 1 },
+  reviewRunFailures: { "id-1": 1 },
   qaFeedback: { "id-1": { prUrl: "https://github.test/pull/7", failing: ["Works: no test"] } },
   merges: [
     {
@@ -206,6 +207,7 @@ test("parseLoopState keeps only well-formed runs and attempts", () => {
     attempts: { a: 1 },
     qaFailures: { p: 1 },
     reviewFailures: {},
+    reviewRunFailures: {},
     qaFeedback: { a: { failing: ["x"], reviewUrl: "u" } },
     merges: state.merges,
     gateFailures: { p: 2 },
@@ -581,12 +583,13 @@ test("reviewerHeads is optional, keeps a valid entry and drops a malformed one (
   assert.deepEqual((await store.load()).reviewerHeads, state.reviewerHeads);
 });
 
-test("reviewFailures is optional, keeps positive counts and drops a malformed one (MET-225)", async () => {
+test("reviewFailures keeps the judged round counts and drops a malformed one (MET-225, D-062)", async () => {
   assert.deepEqual(parseLoopState('{"inFlight":[]}').reviewFailures, {}, "old files still load");
   const parsed = parseLoopState(
     JSON.stringify({
       inFlight: [],
       reviewFailures: { a: 1, b: 2, c: 0, d: -1, e: 1.5, f: "2" },
+      reviewRunFailures: {},
     }),
   );
   assert.deepEqual(parsed.reviewFailures, { a: 1, b: 2 });
@@ -596,6 +599,116 @@ test("reviewFailures is optional, keeps positive counts and drops a malformed on
   state.reviewFailures = parsed.reviewFailures;
   await store.save(state);
   assert.deepEqual((await store.load()).reviewFailures, state.reviewFailures);
+});
+
+test("a pre-split file drops its mixed reviewFailures count (MET-244, D-062)", () => {
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { a: 1, b: 5 },
+    }),
+  );
+  assert.deepEqual(parsed.reviewFailures, {}, "a mixed legacy count is not a round count");
+  assert.deepEqual(parsed.reviewRunFailures, {}, "a legacy count is not a failed-run count either");
+});
+
+test("a pre-split file keeps the re-review trigger for a confirmed send-back (MET-244, D-062)", () => {
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { "part-1": 3, "part-2": 2 },
+      reviewerHeads: {
+        "part-1": {
+          sha: "sha7",
+          verdict: "changes_requested",
+          findings: [
+            {
+              file: "api.ts",
+              line: 1,
+              severity: "blocking",
+              kind: "code",
+              text: "The cache grows without a limit.",
+            },
+          ],
+          at: "2026-11-27T10:00:00.000Z",
+        },
+        "part-2": {
+          sha: "sha8",
+          verdict: "approved",
+          findings: [],
+          at: "2026-11-27T10:00:00.000Z",
+        },
+      },
+    }),
+  );
+  assert.equal(parsed.reviewFailures["part-1"], 1, "a saved blocking finding keeps one round");
+  assert.equal(parsed.reviewFailures["part-2"], undefined, "an approved head keeps no round");
+});
+
+test("a failed-run-only legacy count with a pending blocking head seeds no round (MET-244, D-062)", () => {
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { "part-1": 2 },
+      reviewerHeads: {
+        "part-1": {
+          sha: "sha7",
+          verdict: "changes_requested",
+          findings: [
+            {
+              file: "api.ts",
+              line: 1,
+              severity: "blocking",
+              kind: "code",
+              text: "The cache grows without a limit.",
+            },
+          ],
+          at: "2026-11-27T10:00:00.000Z",
+        },
+      },
+      pendingReviewSettle: {
+        "part-1": {
+          partId: "part-1",
+          partKey: "MET-41",
+          parentId: "parent-1",
+          prNumber: 7,
+          prUrl: "https://github.test/o/r/pull/7",
+          head: "sha7",
+          verdict: "changes_requested",
+          findings: [
+            {
+              file: "api.ts",
+              line: 1,
+              severity: "blocking",
+              kind: "code",
+              text: "The cache grows without a limit.",
+            },
+          ],
+          done: [],
+        },
+      },
+    }),
+  );
+  assert.equal(parsed.reviewFailures["part-1"], undefined, "a pending send-back keeps no round");
+});
+
+test("reviewRunFailures defaults empty and keeps positive counts apart from rounds (MET-244, D-062)", async () => {
+  assert.deepEqual(parseLoopState('{"inFlight":[]}').reviewRunFailures, {}, "old files still load");
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      reviewFailures: { a: 5 },
+      reviewRunFailures: { a: 1, b: 2, c: 0, d: -1, e: 1.5, f: "2" },
+    }),
+  );
+  assert.deepEqual(parsed.reviewRunFailures, { a: 1, b: 2 });
+  assert.deepEqual(parsed.reviewFailures, { a: 5 }, "judged rounds keep their own count");
+
+  const store = createFileLoopStore(await repo());
+  const state = emptyLoopState();
+  state.reviewRunFailures = parsed.reviewRunFailures;
+  await store.save(state);
+  assert.deepEqual((await store.load()).reviewRunFailures, state.reviewRunFailures);
 });
 
 test("qaFeedback keeps the review send-back source and drops an unknown one (MET-225)", async () => {
@@ -850,4 +963,36 @@ test("pendingReviewSettle keeps a saved review decision and drops only a malform
     state.pendingReviewSettle,
     "the decision survives a reload",
   );
+});
+
+test("pendingReviewSettle keeps a saved round cap and drops a malformed one (MET-244, D-062)", () => {
+  const valid = {
+    partId: "part-1",
+    partKey: "MET-41",
+    parentId: "parent-1",
+    prNumber: 7,
+    prUrl: "https://github.test/pull/7",
+    head: "sha7",
+    verdict: "changes_requested",
+    findings: [],
+    roundCap: true,
+    done: [`comment on MET-41`],
+  };
+  const parsed = parseLoopState(
+    JSON.stringify({
+      inFlight: [],
+      pendingReviewSettle: {
+        a: valid,
+        b: { ...valid, roundCap: "yes" },
+        c: { ...valid, roundCap: false },
+      },
+    }),
+  );
+  const withoutRoundCap = { ...valid } as { roundCap?: unknown };
+  delete withoutRoundCap.roundCap;
+  assert.deepEqual(parsed.pendingReviewSettle, {
+    a: valid,
+    b: withoutRoundCap,
+    c: withoutRoundCap,
+  });
 });

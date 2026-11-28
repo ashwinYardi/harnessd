@@ -246,6 +246,12 @@ export interface PendingReviewSettle {
    * (MET-243). A replay applies it instead of running the coordinator again.
    */
   decision?: ReviewDecision;
+  /**
+   * The round cap decided this settlement before the first write (MET-244, D-062). A replay
+   * escalates with the cap reason instead of asking the coordinator or treating the started
+   * escalation as a legacy one.
+   */
+  roundCap?: true;
   /** The run's error, for a failed review. */
   error?: string;
   /** The posted review, when there is one. */
@@ -338,8 +344,18 @@ export interface LoopState {
   attempts: Record<string, number>;
   /** Failed QA rounds per parent issue id (D-014: the second one escalates). */
   qaFailures: Record<string, number>;
-  /** Failed review rounds per part id (MET-225, D-014: the second one escalates). */
+  /**
+   * Changes_requested review rounds per part id, capped by `limits.max_review_rounds`
+   * (D-062). Earlier versions also counted no-verdict runs here.
+   */
   reviewFailures: Record<string, number>;
+  /**
+   * Failed review runs with no verdict per part id (MET-225, D-014: at `qa_max_failures`
+   * they escalate). Kept apart from judged rounds, so a failed run never consumes a round
+   * and a round never consumes a failed run (D-062). Optional for a file from before the
+   * split; a missing key also marks its `reviewFailures` count as mixed and unusable.
+   */
+  reviewRunFailures?: Record<string, number>;
   /** Open QA requests per part sub-issue id, cleared when the part's next run succeeds. */
   qaFeedback: Record<string, QaFeedback>;
   /** QA approvals the merge gate has not finished, one per QA sub-issue. */
@@ -392,6 +408,8 @@ export function emptyLoopState(): LoopState {
     attempts: {},
     qaFailures: {},
     reviewFailures: {},
+    // Written even when empty, so a new file is never mistaken for a pre-split one.
+    reviewRunFailures: {},
     qaFeedback: {},
     merges: [],
     gateFailures: {},
@@ -822,6 +840,7 @@ function pendingReviewSettles(value: unknown): Record<string, PendingReviewSettl
       ...(r.notJudged === undefined ? {} : { notJudged: r.notJudged }),
       ...(escalation === undefined ? {} : { escalation }),
       ...(decision === undefined ? {} : { decision }),
+      ...(r.roundCap === true ? { roundCap: true as const } : {}),
       ...(r.error === undefined ? {} : { error: r.error }),
       ...(r.reviewUrl === undefined ? {} : { reviewUrl: r.reviewUrl }),
       done: r.done,
@@ -1036,6 +1055,31 @@ export function parseLoopState(text: string): LoopState {
     throw new Error("no inFlight array");
   }
   const update = selfUpdate(raw.selfUpdate);
+  // Before D-062, reviewFailures mixed judged rounds with failed runs, so it cannot be used
+  // as a round count. A new file always writes reviewRunFailures, even when it is empty.
+  const splitCounters =
+    typeof raw.reviewRunFailures === "object" &&
+    raw.reviewRunFailures !== null &&
+    !Array.isArray(raw.reviewRunFailures);
+  const legacyCounts = counts(raw.reviewFailures);
+  const legacyRounds: Record<string, number> = {};
+  if (!splitCounters) {
+    // Keep the D-061 re-review trigger for a completed legacy send-back: one round keeps
+    // `reviewFailures > 0` true without trusting the mixed legacy magnitude. Any pending
+    // record stays at 0, even with every step marked done, because its replay is about to
+    // count that same verdict once.
+    const heads = raw.reviewerHeads === undefined ? {} : reviewerHeads(raw.reviewerHeads);
+    const pending = raw.pendingReview === undefined ? {} : pendingReviews(raw.pendingReview);
+    const settles =
+      raw.pendingReviewSettle === undefined ? {} : pendingReviewSettles(raw.pendingReviewSettle);
+    for (const [id, head] of Object.entries(heads)) {
+      if (head.verdict !== "changes_requested") continue;
+      if (!head.findings.some((finding) => finding.severity === "blocking")) continue;
+      if ((legacyCounts[id] ?? 0) <= 0) continue;
+      if (pending[id] !== undefined || settles[id] !== undefined) continue;
+      legacyRounds[id] = 1;
+    }
+  }
   return {
     version: 1,
     lastPollAt: typeof raw.lastPollAt === "string" ? raw.lastPollAt : null,
@@ -1043,7 +1087,8 @@ export function parseLoopState(text: string): LoopState {
     interrupted: interruptedRuns(raw.interrupted),
     attempts: counts(raw.attempts),
     qaFailures: counts(raw.qaFailures),
-    reviewFailures: counts(raw.reviewFailures),
+    reviewFailures: splitCounters ? legacyCounts : legacyRounds,
+    reviewRunFailures: counts(raw.reviewRunFailures),
     qaFeedback: feedback(raw.qaFeedback),
     merges: merges(raw.merges),
     gateFailures: counts(raw.gateFailures),

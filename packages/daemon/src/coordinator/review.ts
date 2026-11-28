@@ -1012,6 +1012,11 @@ export interface ReviewSettleInput {
   /** A not-judged escalation a previous tick already decided (MET-232). */
   escalation?: ReviewEscalation;
   /**
+   * The round cap this settlement already decided before the first write (MET-244, D-062).
+   * A replay applies the cap escalation instead of asking the coordinator again.
+   */
+  roundCap?: boolean;
+  /**
    * A settle from before MET-243 that had already escalated and stopped. The loop sets it so
    * only its remaining writes run; the parent comment is already in the done steps.
    */
@@ -1026,10 +1031,12 @@ export interface ReviewSettleDeps {
   linear: ReviewLinear;
   notifier: Notifier;
   /**
-   * The review round cap shown on the parent comment, from `limits.qa_max_failures` (D-014).
-   * The cap escalation itself is a later part (MET-243).
+   * `limits.qa_max_failures`: failed review runs before a human is asked (D-014). It no
+   * longer caps changes_requested rounds, which use `maxReviewRounds` (D-062).
    */
   maxFailures: number;
+  /** `limits.max_review_rounds`: changes_requested rounds before the cap escalation (D-062). */
+  maxReviewRounds: number;
   log?: (line: string) => void;
   /**
    * The steps a retry already finished, by the name the log gives them (D-058).
@@ -1114,11 +1121,15 @@ function hintFor(decision: ReviewDecision | undefined, id: string): string | und
  * sends nothing back and leaves nits only in the PR comment. A failed run with no verdict, or
  * two not-judged reviews on one head, keep the earlier D-014 and D-052 rules.
  *
+ * A changes_requested round at or over `limits.max_review_rounds` escalates with no
+ * coordinator run: one parent comment names the cap and the open findings, both issues move
+ * to Needs input, one notice says `review round cap reached`, and both counts clear (D-062).
+ *
  * A network error stops the writes and returns `pending` without changing any state; the
  * loop keeps the record for a retry and skips the steps already done (D-058).
  */
 export async function settleReview(
-  state: Pick<LoopState, "reviewFailures" | "qaFeedback"> & {
+  state: Pick<LoopState, "reviewFailures" | "reviewRunFailures" | "qaFeedback"> & {
     harnessSwitch?: LoopState["harnessSwitch"];
   },
   input: ReviewSettleInput,
@@ -1180,6 +1191,7 @@ export async function settleReview(
     );
     if (stopped) return "pending";
     delete state.reviewFailures[part.id];
+    if (state.reviewRunFailures !== undefined) delete state.reviewRunFailures[part.id];
     delete state.qaFeedback[part.id];
     if (state.harnessSwitch !== undefined) {
       // Needs input ends any harness switch for the part and the parent (D-048).
@@ -1247,7 +1259,8 @@ export async function settleReview(
   }
 
   if (input.verdict === undefined) {
-    const failures = (state.reviewFailures[part.id] ?? 0) + 1;
+    // A failed run is not a review round: it has its own count and its own cap (D-014, D-062).
+    const failures = (state.reviewRunFailures?.[part.id] ?? 0) + 1;
     if (failures >= deps.maxFailures) {
       return escalate(
         `review failed ${times(failures)}`,
@@ -1255,7 +1268,8 @@ export async function settleReview(
         `the review failed ${times(failures)} on ${part.key} [PR #${pr.number}](${pr.url}), so this needs a human (D-014). ${part.key} and ${parent.key} are in Needs input.\n\n${oneLine(input.error ?? "no verdict")}`,
       );
     }
-    state.reviewFailures[part.id] = failures;
+    state.reviewRunFailures ??= {};
+    state.reviewRunFailures[part.id] = failures;
     log(`${part.key}: review failed (${oneLine(input.error ?? "no verdict")}), re-queued`);
     return "requeued";
   }
@@ -1264,16 +1278,36 @@ export async function settleReview(
   clearNotJudged(part.id);
 
   if (input.verdict.decision === "approve") {
-    // Keep the failure count until the part is Done or escalated (MET-230): an approval
-    // does not erase the two-failure rule set on earlier rounds (D-014).
+    // Keep both counts until the part is Done or escalated (MET-230): an approval does not
+    // erase the failure rule or the round count set on earlier rounds (D-014, D-062).
     const feedback = state.qaFeedback[part.id];
     if (feedback?.source === "review") delete state.qaFeedback[part.id];
     log(`${part.key}: review approved, PR #${pr.number}`);
     return "approved";
   }
 
-  const failures = (state.reviewFailures[part.id] ?? 0) + 1;
-  const round = `round ${failures} of ${deps.maxFailures}`;
+  // A changes_requested verdict counts one review round, apart from failed review runs (D-062).
+  const rounds = (state.reviewFailures[part.id] ?? 0) + 1;
+  const round = `round ${rounds} of ${deps.maxReviewRounds}`;
+
+  // The cap applies only to a new settlement, or to a cap the loop already saved. A saved
+  // coordinator decision, including the fix for a started legacy send-back, is honored on
+  // replay even when the round count now sits at or over the cap (MET-244, D-062).
+  if (input.roundCap === true || (input.decision === undefined && rounds >= deps.maxReviewRounds)) {
+    const lines = reviewFindingList(blocking);
+    return escalate(
+      "review round cap reached",
+      `review round cap reached on ${part.key}: the review sent it back ${times(rounds)}`,
+      [
+        `${round} on ${part.key} [PR #${pr.number}](${pr.url}): review round cap reached`,
+        "",
+        `The review sent ${part.key} back ${times(rounds)} and reached \`limits.max_review_rounds\` (${deps.maxReviewRounds}).`,
+        "Open findings:",
+        ...lines.map((line) => `- ${line}`),
+      ].join("\n"),
+    );
+  }
+
   const decision = input.decision;
 
   // The coordinator asks the human only under a D-011 trigger (MET-243, D-059). The parent
@@ -1330,7 +1364,7 @@ export async function settleReview(
   );
   if (stopped) return "pending";
   state.qaFeedback[part.id] = feedback;
-  state.reviewFailures[part.id] = failures;
+  state.reviewFailures[part.id] = rounds;
   log(
     `${part.key}: review changes requested, sent back with ${blocking.length} finding${blocking.length === 1 ? "" : "s"}`,
   );

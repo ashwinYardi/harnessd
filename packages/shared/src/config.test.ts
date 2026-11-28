@@ -31,6 +31,7 @@ test("parseConfigFile accepts a full config", () => {
       cached_token_weight: 0.25,
       max_turns: { S: 40, M: 90 },
       qa_max_failures: 1,
+      max_review_rounds: 4,
     },
     linear: { team_id: "MET", project: "harnessd" },
     slack: { channel: "#ops", summary_time: "18:30", time_zone: "Europe/Berlin" },
@@ -110,7 +111,7 @@ test("an unknown fallback_harness names the file and key", () => {
 test("unknown keys are rejected with their path", () => {
   rejects(
     { limits: { max_concurent: 2 } },
-    `${FILE}: limits.max_concurent: unknown key, expected one of max_concurrent, max_parents, budget_minutes, token_budget, cached_token_weight, max_turns, qa_max_failures`,
+    `${FILE}: limits.max_concurent: unknown key, expected one of max_concurrent, max_parents, budget_minutes, token_budget, cached_token_weight, max_turns, qa_max_failures, max_review_rounds`,
   );
   rejects(
     { colour: "red" },
@@ -171,6 +172,25 @@ test("limits.max_parents defaults to 1 and rejects a non-positive or fractional 
   rejects(
     { limits: { max_parents: 1.5 } },
     `${FILE}: limits.max_parents: expected an integer >= 1, got 1.5`,
+  );
+});
+
+test("limits.max_review_rounds defaults to 6 and rejects a non-positive or fractional value", () => {
+  assert.equal(DEFAULT_SETTINGS.limits.max_review_rounds, 6);
+  assert.deepEqual(parseConfigFile({ limits: { max_review_rounds: 3 } }, FILE), {
+    limits: { max_review_rounds: 3 },
+  });
+  rejects(
+    { limits: { max_review_rounds: 0 } },
+    `${FILE}: limits.max_review_rounds: expected an integer >= 1, got 0`,
+  );
+  rejects(
+    { limits: { max_review_rounds: -1 } },
+    `${FILE}: limits.max_review_rounds: expected an integer >= 1, got -1`,
+  );
+  rejects(
+    { limits: { max_review_rounds: 1.5 } },
+    `${FILE}: limits.max_review_rounds: expected an integer >= 1, got 1.5`,
   );
 });
 

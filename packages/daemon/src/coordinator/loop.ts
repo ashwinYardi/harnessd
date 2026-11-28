@@ -942,8 +942,11 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       if (current === "in review") continue;
       if (current !== "in progress") {
         delete s.shipped[id];
-        // A part at Done has no review failures left to cap (MET-225).
-        if (current === "done" && s.reviewFailures !== undefined) delete s.reviewFailures[id];
+        // A part at Done has no review failures or rounds left to cap (MET-225, D-062).
+        if (current === "done") {
+          if (s.reviewFailures !== undefined) delete s.reviewFailures[id];
+          if (s.reviewRunFailures !== undefined) delete s.reviewRunFailures[id];
+        }
         changed = true;
         continue;
       }
@@ -1358,7 +1361,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         part,
         findings,
         round: (s.reviewFailures[part.id] ?? 0) + 1,
-        maxRounds: config.limits.qa_max_failures,
+        maxRounds: config.limits.max_review_rounds,
         ...(memory === undefined ? {} : { memory }),
       },
       { adapter: tracked(adapter), agent, cwd: repoDir, log },
@@ -1438,15 +1441,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       s.pendingReviewSettle[part.id] = record;
       await save();
     }
-    // A settle from before MET-243 already decided to escalate (a design finding or a second
-    // failed round) and its writes stopped. Finish it instead of asking the coordinator again,
-    // so the part is not sent back against the comment already on the parent. A not-judged
-    // record keeps its own saved escalation.
+    // A settle from before MET-243 already decided to escalate (a design finding, a second
+    // failed round or a failed review with no verdict) and its writes stopped. The saved
+    // parent comment is the proof, with no verdict needed: finish the remaining writes instead
+    // of asking the coordinator again or re-queueing the run. A not-judged record keeps its
+    // own saved escalation.
     const legacyEscalation =
       record.decision === undefined &&
+      record.roundCap !== true &&
       record.notJudged === undefined &&
       record.escalation === undefined &&
-      record.verdict === "changes_requested" &&
       legacyEscalationStarted(record.done, part, parent);
     // A send-back from before MET-243 that has started was already a fix: its part comment
     // promised the Ready move. Finish it as a fix with no coordinator run, so an escalate
@@ -1461,36 +1465,54 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
     if (
       record.verdict === "changes_requested" &&
       record.decision === undefined &&
+      record.roundCap !== true &&
       !legacyEscalation
     ) {
-      let decision: ReviewDecision;
-      if (legacySendBack) {
-        decision = { decision: "fix", hints: [] };
+      const nextRound = (s.reviewFailures[part.id] ?? 0) + 1;
+      // A legacy send-back keeps its promised Ready move. A new round at the cap saves the cap
+      // decision before the first write, so a retry sends the cap reason, not a legacy one
+      // (MET-244, D-062).
+      if (legacySendBack || nextRound < config.limits.max_review_rounds) {
+        let decision: ReviewDecision;
+        if (legacySendBack) {
+          decision = { decision: "fix", hints: [] };
+        } else {
+          if (options.retry === true && s.inFlight.length >= config.limits.max_concurrent) {
+            // A retry does not inherit the reviewer's slot. Keep the round pending until one is
+            // free, so the coordinator run never exceeds max_concurrent (MET-243).
+            log(`${part.key}: no run slot for the review decision, the settle waits`);
+            return;
+          }
+          const decided = await decideReviewFor(s, part, parent, record);
+          if (decided === undefined) {
+            // No coordinator harness can run. Wait instead of applying an unsaved fallback that
+            // a later replay could replace with an escalation (MET-243).
+            log(`${part.key}: no coordinator harness for the review decision, the settle waits`);
+            return;
+          }
+          decision = decided;
+        }
+        record.decision = decision;
+        try {
+          // The decision must be durable before the first Linear write, so a restart replays
+          // it instead of running the coordinator again (MET-243).
+          await saveRequired();
+        } catch (error) {
+          delete record.decision;
+          log(`${part.key}: could not save the review decision: ${message(error)}`);
+          return;
+        }
       } else {
-        if (options.retry === true && s.inFlight.length >= config.limits.max_concurrent) {
-          // A retry does not inherit the reviewer's slot. Keep the round pending until one is
-          // free, so the coordinator run never exceeds max_concurrent (MET-243).
-          log(`${part.key}: no run slot for the review decision, the settle waits`);
+        record.roundCap = true;
+        try {
+          // The cap must be durable before the first Linear write, so a retry replays the cap
+          // escalation instead of reading the started comment as a legacy escalation (D-062).
+          await saveRequired();
+        } catch (error) {
+          delete record.roundCap;
+          log(`${part.key}: could not save the review round cap: ${message(error)}`);
           return;
         }
-        const decided = await decideReviewFor(s, part, parent, record);
-        if (decided === undefined) {
-          // No coordinator harness can run. Wait instead of applying an unsaved fallback that
-          // a later replay could replace with an escalation (MET-243).
-          log(`${part.key}: no coordinator harness for the review decision, the settle waits`);
-          return;
-        }
-        decision = decided;
-      }
-      record.decision = decision;
-      try {
-        // The decision must be durable before the first Linear write, so a restart replays
-        // it instead of running the coordinator again (MET-243).
-        await saveRequired();
-      } catch (error) {
-        delete record.decision;
-        log(`${part.key}: could not save the review decision: ${message(error)}`);
-        return;
       }
     }
     const settled = await settleReview(
@@ -1508,6 +1530,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
               },
             }),
         ...(record.decision === undefined ? {} : { decision: record.decision }),
+        ...(record.roundCap === true ? { roundCap: true } : {}),
         ...(record.notJudged === undefined ? {} : { notJudged: record.notJudged }),
         ...(record.escalation === undefined ? {} : { escalation: record.escalation }),
         ...(legacyEscalation ? { legacyEscalation: true } : {}),
@@ -1518,6 +1541,7 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         linear,
         notifier,
         maxFailures: config.limits.qa_max_failures,
+        maxReviewRounds: config.limits.max_review_rounds,
         log,
         steps: {
           done: record.done,
@@ -2562,16 +2586,16 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
       const savedBlocking = (recorded?.findings ?? []).filter(
         (finding) => finding.severity === "blocking",
       );
-      const failures = s.reviewFailures[part.id] ?? 0;
+      const rounds = s.reviewFailures[part.id] ?? 0;
       // A re-review checks only the saved findings and the delta (MET-234, D-061).
       const reReview =
         recorded?.verdict === "changes_requested" &&
         savedBlocking.length > 0 &&
         recorded.sha !== pr.headRefOid &&
-        failures > 0;
-      // An escalated review cleared its failure count, so the next review after the head
+        rounds > 0;
+      // An escalated review cleared its round count, so the next review after the head
       // moves is a full first review, not a delta from the rejected head (D-061).
-      const useSince = recorded !== undefined && (recorded.verdict === "approved" || failures > 0);
+      const useSince = recorded !== undefined && (recorded.verdict === "approved" || rounds > 0);
       try {
         result = await runReview(
           {

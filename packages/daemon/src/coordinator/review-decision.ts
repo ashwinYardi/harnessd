@@ -286,7 +286,7 @@ export interface ReviewDecisionPromptInput {
   findings: readonly ReviewFinding[];
   /** The review round this decision answers, 1-based. */
   round: number;
-  /** The round cap from `limits.qa_max_failures` (or the caller's value). */
+  /** The round cap from `limits.max_review_rounds` (or the caller's value, D-062). */
   maxRounds: number;
   /** The blocking findings of the earlier rounds. */
   earlierFindings?: readonly ReviewFinding[];
