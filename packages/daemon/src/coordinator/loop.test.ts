@@ -39,6 +39,7 @@ import { createGitWorktrees, type TaskWorktrees, type Worktree } from "../worktr
 import type { HoldEvent } from "./limits.ts";
 import {
   type CoordinatorLoopOptions,
+  checkNormalizedDoneWhen,
   createCoordinatorLoop,
   type LoopLinear,
   type LoopSelfUpdate,
@@ -104,6 +105,7 @@ class FakeLinear implements LoopLinear {
   issues = new Map<string, FakeIssue>();
   relations: Array<{ blocker: string; blocked: string }> = [];
   comments: Array<{ key: string; body: string }> = [];
+  descriptions: Array<{ key: string; description: string }> = [];
   moves: Array<{ key: string; state: WorkflowStateName }> = [];
   created: string[] = [];
   #next = 100;
@@ -225,6 +227,12 @@ class FakeLinear implements LoopLinear {
   async comment(issueId: string, body: string) {
     this.comments.push({ key: this.#get(issueId).key, body });
     return `comment-${this.comments.length}`;
+  }
+
+  async updateDescription(issueId: string, description: string) {
+    const issue = this.#get(issueId);
+    issue.description = description;
+    this.descriptions.push({ key: issue.key, description });
   }
 
   async getIssue(keyOrId: string) {
@@ -547,6 +555,14 @@ function planWithoutReason(...parts: Array<[string, string, string]>): string {
 const BODY = (size: string) =>
   `**Why**\nThe loop needs it.\n\n**Done when**\n- [ ] Works\n- [ ] Has tests\n\n**Size**: ${size}`;
 
+/** A docs-only ticket with the given Done-when list (MET-252). */
+function docsBody(items: readonly string[], size = "S"): string {
+  return (
+    `**Why**\nRecords the run.\n\n**Done when**\n` +
+    `${items.map((item) => `- [ ] ${item}`).join("\n")}\n\n**Size**: ${size}`
+  );
+}
+
 function setup(
   options: {
     config?: MergedConfig;
@@ -717,6 +733,284 @@ test("a Ready issue splits into backend and frontend parts plus a QA part they b
   assert.equal(qa.state, "Ready");
   assert.deepEqual(t.loop.running(), [backend.key]);
   assert.equal(t.memory.state.inFlight.length, 1);
+});
+
+test("a 5-item docs ticket is normalized, commented and planned from the new list (MET-252)", async () => {
+  const filed = [
+    "Records the self-hosting run",
+    "Names every break",
+    "Sets the next step",
+    "Lists the open questions",
+    "Links the PR",
+  ];
+  const normalized = [
+    "Records the self-hosting run and names every break",
+    "Sets the next step",
+    "Lists the open questions and links the PR",
+  ];
+  const adapter = fakeAdapter({
+    grillReply: JSON.stringify({ calls: [], escalation: null, normalizedDoneWhen: normalized }),
+    plans: {
+      "MET-100": JSON.stringify({
+        parts: [
+          {
+            ...briefPart("backend", "S", "Record the run", [1, 2, 3]),
+            files: ["docs/dogfood.md"],
+          },
+        ],
+        reason: "One docs part.",
+      }),
+    },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({
+    title: "Record the self-hosting run",
+    labels: ["coordinator", "p1"],
+    description: docsBody(filed),
+  });
+
+  const report = await t.loop.tick();
+
+  assert.equal(t.linear.descriptions.length, 1, "one description update");
+  assert.equal(t.linear.descriptions[0]?.key, parent.key);
+  const description = t.linear.descriptions[0]?.description ?? "";
+  assert.match(description, /- \[ \] Records the self-hosting run and names every break/);
+  assert.match(description, /- \[ \] Lists the open questions and links the PR/);
+  assert.doesNotMatch(description, /- \[ \] Links the PR/, "the old checklist is replaced");
+
+  const comment = t.linear.comments.find((c) =>
+    c.body.startsWith("**Coordinator**: normalized Done when"),
+  );
+  assert.ok(comment, "the old/new comment is posted");
+  assert.match(
+    comment.body,
+    /^\*\*Coordinator\*\*: normalized Done when \(reversible ticket clarification, D-011\)\. Old:\n/,
+  );
+  for (const item of filed) assert.ok(comment.body.includes(`- [ ] ${item}`), item);
+  assert.match(
+    comment.body,
+    /Old:\n(?:- \[ \] .+\n)+New:\n- \[ \] Records the self-hosting run and names every break/,
+  );
+  for (const item of normalized) assert.ok(comment.body.includes(`- [ ] ${item}`), item);
+
+  const planRun = t.adapter.tasks.find((task) => task.id.startsWith("plan-"));
+  assert.ok(planRun, "the plan ran");
+  assert.match(planRun.prompt, /- \[ \] Lists the open questions and links the PR/);
+  assert.doesNotMatch(planRun.prompt, /- \[ \] Links the PR/, "the plan reads the saved list");
+
+  assert.deepEqual(report.split, [parent.key]);
+  assert.deepEqual(report.escalated, [], "no human action");
+  assert.equal(parent.state, "In Progress");
+  assert.deepEqual(t.linear.children(parent).map(roleOf), ["backend", "qa"]);
+});
+
+test("a normalized list is ignored when the parent has no parsed Done when items", async () => {
+  const adapter = fakeAdapter({
+    grillReply: JSON.stringify({
+      calls: [],
+      escalation: null,
+      normalizedDoneWhen: ["One", "Two"],
+    }),
+    plans: { "MET-100": plan(["backend", "S", "API"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({
+    title: "Feature",
+    labels: ["coordinator"],
+    description: "**Why**\nNo list yet.\n\n**Size**: S",
+  });
+
+  const report = await t.loop.tick();
+
+  assert.equal(t.linear.descriptions.length, 0, "nothing is written");
+  assert.ok(
+    t.logs.includes(`${parent.key}: normalized Done when ignored (no parsed Done when items)`),
+    t.logs.join("\n"),
+  );
+  assert.deepEqual(report.split, [parent.key], "the filed list plans");
+  assert.deepEqual(report.escalated, []);
+});
+
+test("a normalized list over 18 items or equal to the filed list is ignored", async () => {
+  const filed = ["Works", "Has tests"];
+  const cases: Array<{ name: string; normalized: string[]; why: string }> = [
+    {
+      name: "too many",
+      normalized: Array.from({ length: 19 }, (_, i) => `Item ${i + 1}`),
+      why: "expected 1 to 18 items, got 19",
+    },
+    {
+      name: "unchanged",
+      normalized: [...filed],
+      why: "it matches the filed list",
+    },
+  ];
+  for (const entry of cases) {
+    const adapter = fakeAdapter({
+      grillReply: JSON.stringify({
+        calls: [],
+        escalation: null,
+        normalizedDoneWhen: entry.normalized,
+      }),
+      plans: { "MET-100": plan(["backend", "S", "API"]) },
+    });
+    const t = setup({ adapter });
+    const parent = t.linear.add({
+      title: "Feature",
+      labels: ["coordinator"],
+      description: docsBody(filed),
+    });
+
+    const report = await t.loop.tick();
+
+    assert.equal(t.linear.descriptions.length, 0, entry.name);
+    assert.ok(
+      t.logs.includes(`${parent.key}: normalized Done when ignored (${entry.why})`),
+      `${entry.name}: ${t.logs.join("\n")}`,
+    );
+    assert.deepEqual(report.split, [parent.key], `${entry.name}: the filed list plans`);
+    assert.deepEqual(report.escalated, [], entry.name);
+  }
+});
+
+test("an escalated grill ignores its normalized list and goes to Needs input", async () => {
+  const adapter = fakeAdapter({
+    grillReply: JSON.stringify({
+      calls: [],
+      escalation: {
+        trigger: "irreversible",
+        question: "Which list should stand?",
+        why: "The old one cannot be restored.",
+      },
+      normalizedDoneWhen: ["One", "Two", "Three"],
+    }),
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({
+    title: "Docs",
+    labels: ["coordinator"],
+    description: docsBody(["One", "Two", "Three", "Four", "Five"]),
+  });
+
+  await t.loop.tick();
+
+  assert.equal(t.linear.descriptions.length, 0, "nothing is written");
+  assert.ok(
+    t.logs.includes(`${parent.key}: normalized Done when ignored (the grill escalated)`),
+    t.logs.join("\n"),
+  );
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.startsWith("plan-")).length,
+    0,
+    "no plan runs",
+  );
+  assert.equal(parent.state, "Needs input");
+  assert.equal(t.pings.length, 1);
+});
+
+test("checkNormalizedDoneWhen rejects an empty, blank or unchanged list", () => {
+  assert.deepEqual(checkNormalizedDoneWhen(["Works"], undefined, false), {});
+  assert.deepEqual(checkNormalizedDoneWhen([], ["One"], false), {
+    ignored: "no parsed Done when items",
+  });
+  assert.deepEqual(checkNormalizedDoneWhen(["Works"], ["One"], true), {
+    ignored: "the grill escalated",
+  });
+  assert.deepEqual(checkNormalizedDoneWhen(["Works"], [], false), {
+    ignored: "expected 1 to 18 items, got 0",
+  });
+  assert.deepEqual(
+    checkNormalizedDoneWhen(
+      ["Works"],
+      Array.from({ length: 19 }, () => "Item"),
+      false,
+    ),
+    { ignored: "expected 1 to 18 items, got 19" },
+  );
+  assert.deepEqual(checkNormalizedDoneWhen(["Works"], ["Works", " "], false), {
+    ignored: "a blank item",
+  });
+  assert.deepEqual(checkNormalizedDoneWhen(["Works"], ["Works"], false), {
+    ignored: "it matches the filed list",
+  });
+  assert.deepEqual(checkNormalizedDoneWhen(["Works"], ["Works", "Has tests"], false), {
+    items: ["Works", "Has tests"],
+  });
+});
+
+test("a failed description update leaves the parent Ready with one line and no plan", async () => {
+  const adapter = fakeAdapter({
+    grillReply: JSON.stringify({
+      calls: [],
+      escalation: null,
+      normalizedDoneWhen: ["One", "Two", "Three"],
+    }),
+    plans: { "MET-100": plan(["backend", "S", "API"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({
+    title: "Docs",
+    labels: ["coordinator"],
+    description: docsBody(["One", "Two", "Three", "Four", "Five"]),
+  });
+  t.linear.updateDescription = async () => {
+    throw new Error("description down");
+  };
+
+  const report = await t.loop.tick();
+
+  assert.equal(parent.state, "Ready");
+  assert.deepEqual(report.split, []);
+  assert.deepEqual(report.escalated, []);
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.startsWith("plan-")).length,
+    0,
+    "no plan runs",
+  );
+  assert.equal(t.memory.state.splits?.[parent.id], undefined, "no split is recorded");
+  const lines = t.logs.filter((line) => line.includes("normalized Done when"));
+  assert.equal(lines.length, 1, t.logs.join("\n"));
+  assert.match(lines[0] ?? "", /stays Ready: description down/);
+});
+
+test("a failed old/new comment leaves the parent Ready with one line and no plan", async () => {
+  const adapter = fakeAdapter({
+    grillReply: JSON.stringify({
+      calls: [],
+      escalation: null,
+      normalizedDoneWhen: ["One", "Two", "Three"],
+    }),
+    plans: { "MET-100": plan(["backend", "S", "API"]) },
+  });
+  const t = setup({ adapter });
+  const parent = t.linear.add({
+    title: "Docs",
+    labels: ["coordinator"],
+    description: docsBody(["One", "Two", "Three", "Four", "Five"]),
+  });
+  const comment = t.linear.comment.bind(t.linear);
+  let calls = 0;
+  t.linear.comment = async (id: string, body: string) => {
+    calls += 1;
+    if (calls === 2) throw new Error("comments down");
+    return comment(id, body);
+  };
+
+  const report = await t.loop.tick();
+
+  assert.equal(t.linear.descriptions.length, 1, "the description was saved");
+  assert.equal(parent.state, "Ready");
+  assert.deepEqual(report.split, []);
+  assert.deepEqual(report.escalated, []);
+  assert.equal(
+    t.adapter.tasks.filter((task) => task.id.startsWith("plan-")).length,
+    0,
+    "no plan runs",
+  );
+  assert.equal(t.memory.state.splits?.[parent.id], undefined, "no split is recorded");
+  const lines = t.logs.filter((line) => line.includes("normalized Done when"));
+  assert.equal(lines.length, 1, t.logs.join("\n"));
+  assert.match(lines[0] ?? "", /stays Ready: comments down/);
 });
 
 test("grill and plan runs are read-only; part and QA runs are not (D-059)", async () => {

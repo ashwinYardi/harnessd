@@ -147,6 +147,19 @@ test("prompt runs grill-with-docs headless and asks for terms and precedents", (
   assert.match(bare, /## Glossary \(GLOSSARY\.md\)\n\(none\)/);
 });
 
+test("the grill prompt asks for normalizedDoneWhen when the filed list cannot pass the plan", () => {
+  const prompt = buildGrillPrompt({
+    issue: issues.clear as Issue,
+    context: { spec: "", decisions: [] },
+  });
+  assert.match(prompt, /"normalizedDoneWhen": \["string"\]/);
+  assert.match(
+    prompt,
+    /When the filed Done-when list cannot pass the plan rules, also set normalizedDoneWhen: a docs-only ticket gets at most 3 items, no ticket gets more than 18, every original requirement stays/,
+  );
+  assert.match(prompt, /Leave it out when the filed list already passes\./);
+});
+
 test("memorySection names the memory tools, both vaults and how to commit a generated file", () => {
   const text = memorySection({
     workspaceVault: "/repo/.harnessd/vault",

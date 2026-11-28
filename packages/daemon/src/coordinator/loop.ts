@@ -31,6 +31,7 @@ import {
 import { resolveAgentConfig } from "../config/merge.ts";
 import type { GitHub, PullRequest } from "../github/client.ts";
 import type { LinearClient, ListReadyOptions } from "../linear/client.ts";
+import { replaceDoneWhen } from "../linear/parse.ts";
 import { isNetworkError } from "../net-error.ts";
 import {
   lastLines,
@@ -65,7 +66,7 @@ import {
 } from "./limits.ts";
 import { advanceMerges, pendingMerge } from "./merge.ts";
 import { type Notifier, NullNotifier } from "./notifier.ts";
-import { planIssue, type SplitPlan } from "./plan.ts";
+import { MAX_PART_DONE_WHEN, MAX_PLAN_PARTS, planIssue, type SplitPlan } from "./plan.ts";
 import { type AgentMemory, type GrillContext, loadGrillContext } from "./prompt.ts";
 import {
   type CommandRunner,
@@ -122,6 +123,7 @@ export type LoopLinear = Pick<
   | "moveTo"
   | "comment"
   | "getIssue"
+  | "updateDescription"
 > & {
   /** Drops the pooled connections after 3 failed ticks (MET-213); a fake may omit it. */
   resetConnections?(): void;
@@ -469,6 +471,55 @@ function outcomeFor(reviews: readonly PrReview[]): QaRunResult["outcome"] {
   if (reviews.some((r) => r.decision === "request_changes")) return "changes_requested";
   if (reviews.some((r) => r.decision === "error")) return "error";
   return "approved";
+}
+
+/** A Done-when list must fit the parts the plan check allows (D-063). */
+export const MAX_NORMALIZED_DONE_WHEN = MAX_PLAN_PARTS * MAX_PART_DONE_WHEN;
+
+export interface NormalizedDoneWhenDecision {
+  /** The accepted list to save on the parent. */
+  items?: string[];
+  /** Why the loop ignores the proposed list and plans from the filed one. */
+  ignored?: string;
+}
+
+/**
+ * Decides whether the grill's `normalizedDoneWhen` may replace the parent's list (D-063).
+ * The parent must have parsed items, the grill must not have escalated, the list must hold
+ * 1 to 18 non-blank items, and it must differ from the filed list.
+ */
+export function checkNormalizedDoneWhen(
+  filed: readonly string[],
+  proposed: readonly string[] | undefined,
+  escalated: boolean,
+): NormalizedDoneWhenDecision {
+  if (proposed === undefined) return {};
+  if (filed.length === 0) return { ignored: "no parsed Done when items" };
+  if (escalated) return { ignored: "the grill escalated" };
+  if (proposed.length === 0 || proposed.length > MAX_NORMALIZED_DONE_WHEN) {
+    return {
+      ignored: `expected 1 to ${MAX_NORMALIZED_DONE_WHEN} items, got ${proposed.length}`,
+    };
+  }
+  if (proposed.some((item) => item.trim() === "")) return { ignored: "a blank item" };
+  const items = proposed.map((item) => item.trim());
+  if (items.length === filed.length && items.every((item, i) => item === filed[i])) {
+    return { ignored: "it matches the filed list" };
+  }
+  return { items };
+}
+
+/** The parent comment that keeps the old and new Done-when lists side by side (D-063). */
+export function formatNormalizedDoneWhenComment(
+  filed: readonly { text: string; checked: boolean }[],
+  items: readonly string[],
+): string {
+  const oldList = filed.map((item) => `- [${item.checked ? "x" : " "}] ${item.text}`).join("\n");
+  const newList = items.map((item) => `- [ ] ${item}`).join("\n");
+  return (
+    "**Coordinator**: normalized Done when (reversible ticket clarification, D-011). " +
+    `Old:\n${oldList}\nNew:\n${newList}\n`
+  );
 }
 
 /**
@@ -2910,6 +2961,9 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         return;
       }
       if (grill.outcome === "needs_input") {
+        if (grill.normalizedDoneWhen !== undefined) {
+          log(`${issue.key}: normalized Done when ignored (the grill escalated)`);
+        }
         report.escalated.push(issue.key);
         clearSwitch(issue.id);
         log(`${issue.key}: grill escalated, Needs input`);
@@ -2921,6 +2975,32 @@ export function createCoordinatorLoop(options: CoordinatorLoopOptions): Coordina
         }
         log(`${issue.key}: grill failed, retrying next tick: ${grill.error ?? "unknown"}`);
         return;
+      }
+      const normalized = checkNormalizedDoneWhen(
+        issue.doneWhen.map((item) => item.text),
+        grill.normalizedDoneWhen,
+        false,
+      );
+      if (normalized.ignored !== undefined) {
+        log(`${issue.key}: normalized Done when ignored (${normalized.ignored})`);
+      } else if (normalized.items !== undefined) {
+        // The description first, then one comment, then plan from the saved list (D-063).
+        try {
+          await linear.updateDescription(
+            issue.id,
+            replaceDoneWhen(issue.description, normalized.items),
+          );
+          await linear.comment(
+            issue.id,
+            formatNormalizedDoneWhenComment(issue.doneWhen, normalized.items),
+          );
+          issue = await linear.getIssue(issue.id);
+        } catch (error) {
+          log(
+            `${issue.key}: normalized Done when not saved, the issue stays Ready: ${(error as Error).message}`,
+          );
+          return;
+        }
       }
       plan = await planIssue(issue, {
         adapter,

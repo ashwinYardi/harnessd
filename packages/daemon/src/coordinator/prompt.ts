@@ -128,7 +128,8 @@ export const GRILL_REPLY_SHAPE = `{
   "calls": [{ "question": "string", "answer": "string", "basis": "string" }],
   "escalation": null | { "trigger": "${ESCALATION_TRIGGERS.join(" | ")}", "question": "string", "why": "string" },
   "terms": [{ "term": "string", "definition": "string", "avoid": ["string"] }],
-  "precedents": [{ "title": "string", "decision": "string", "why": "string" }]
+  "precedents": [{ "title": "string", "decision": "string", "why": "string" }],
+  "normalizedDoneWhen": ["string"]
 }`;
 
 /** How the coordinator runs grill-with-docs with nobody to answer (D-017, D-022). */
@@ -140,6 +141,7 @@ const HEADLESS_RULES = [
   "- A new domain term goes in terms, not in GLOSSARY.md. Skip terms that a glossary below already defines.",
   "- A call that passes all three decision-record tests (hard to reverse, surprising, a real trade-off) also goes in precedents. Leave precedents empty when no call sets new precedent.",
   "- Only a D-011 trigger goes to the human, as the escalation.",
+  "- When the filed Done-when list cannot pass the plan rules, also set normalizedDoneWhen: a docs-only ticket gets at most 3 items, no ticket gets more than 18, every original requirement stays, and the rest of the list is unchanged. Leave it out when the filed list already passes.",
 ].join("\n");
 
 function doneWhenList(issue: Issue): string {

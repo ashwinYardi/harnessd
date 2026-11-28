@@ -69,6 +69,11 @@ export interface GrillResult {
   terms?: GlossaryTerm[];
   /** Calls that set new precedent, written as draft decision records. Set when the grill ran. */
   precedents?: Precedent[];
+  /**
+   * A Done-when list that fits the plan rules, when the filed one cannot pass them (D-063).
+   * The loop saves it on the parent before planning; it is not a D-011 trigger.
+   */
+  normalizedDoneWhen?: string[];
   /** Short reason when the outcome is `error` or `limited`. */
   error?: string;
   /**

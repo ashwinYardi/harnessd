@@ -622,6 +622,11 @@ test("the plan prompt states the size rule, the area split and the docs rule (ME
   assert.match(prompt, /backend and UI work go in separate parts/i);
   assert.match(prompt, /The backend part .* comes first/);
   assert.match(prompt, /Docs changes go in the part whose code they describe/);
+  assert.ok(
+    prompt.includes(
+      "A docs-only ticket stays one part with at most 3 parent Done-when items; when the filed list is longer, the coordinator has already normalized it.",
+    ),
+  );
   assert.match(prompt, /A backend part lists no file under "packages\/ui\/app\/"/);
   assert.match(prompt, /A frontend part lists no file in "packages\/daemon\/"/);
   assert.match(prompt, /also for a one-part plan/i);

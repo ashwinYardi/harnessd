@@ -535,6 +535,9 @@ export async function grillIssue(issue: Issue, deps: GrillDeps): Promise<GrillRe
     outcome: escalation ? "needs_input" : "proceed",
     terms,
     precedents,
+    ...(parsed.normalizedDoneWhen === undefined
+      ? {}
+      : { normalizedDoneWhen: parsed.normalizedDoneWhen }),
     ...usage(),
   };
 }

@@ -34,6 +34,8 @@ Every Ready issue without a part marker that the queue admits is first grilled (
 - If the grill escalates, the issue goes to Needs input.
 - If the grill errors, the issue is retried on the next tick.
 
+**Normalizing the Done-when list (D-011, D-063).** A grill with no escalation may reply with `normalizedDoneWhen`. The loop saves it only when the parent has parsed Done-when items, the list holds 1 to 18 non-blank items, and it differs from the filed list. It ignores the proposal in three cases: the parent has no parsed items, the grill also escalated, or the list fails these checks, and logs one line: `<key>: normalized Done when ignored (<why>)`. It then plans from the filed list. On a save it writes the description with `replaceDoneWhen`, posts one parent comment that starts `**Coordinator**: normalized Done when (reversible ticket clarification, D-011). Old:` and shows the old checklist, then `New:` and the new one, then re-parses the issue and plans from it. A failed description update or comment leaves the parent in Ready: no plan runs and no failure is counted, with one log line. The next tick grills again, and a parent already saved with a passing list needs no change. The rewrite is a reversible ticket clarification, not a D-011 trigger, and adds nothing to `loop.json`.
+
 The coordinator's harness then returns a plan as strict JSON:
 
 ```json
