@@ -24,3 +24,42 @@ Loop time runs from the split to Done.
    - Status: as designed. The owner saves a webhook in Settings (D-030).
 5. **The from-source rebuild failed under Node 22.** The shell had an nvm default of Node 22. The rebuild did not find `@typescript/typescript-darwin-x64`. The rebuild passed under Node 24.
    - Status: fixed. The MET-35 README guard (MET-37) catches Node 22 at install.
+
+## v0.1.0 self-hosting run (2026-11-26 to 2026-11-28)
+
+From 2026-11-26 to 2026-11-28, harnessd ran a self-hosting run and shipped eight parents. Times are not recorded.
+
+### Parents shipped
+
+- MET-165: a reviewer agent reviews each PR's code like a senior dev.
+- MET-184: a network error never counts as a QA error, and the daemon's Linear writes retry.
+- MET-170: a split reuses only the parent's live parts from its current plan.
+- MET-164: the coordinator never edits code, and a failed QA or review goes back to the builder.
+- MET-231: a not-judged review escalation survives a daemon restart and a re-review.
+- MET-236: the health-by-path QA app test passes reliably on CI.
+- MET-195: the QA sandbox scripts never delete files in a real harnessd home.
+- MET-241: a blocking review goes to the coordinator, which sends the builder a fix.
+
+The run merged PRs [ashwinYardi/harnessd#104](https://github.com/ashwinYardi/harnessd/pull/104) to [ashwinYardi/harnessd#125](https://github.com/ashwinYardi/harnessd/pull/125).
+
+### What broke
+
+| Break | Cause | Fix (issue) |
+| --- | --- | --- |
+| A Linear network error left a part In Progress. | The request failed before the loop could settle the part. | MET-184 |
+| Two long M builds stopped emitting events. | OpenCode went silent. The evidence does not show why. | MET-121 (the watchdog and harness switch; the runs were MET-224 and MET-226) |
+| Live QA could not check Linear in the sandbox. | The sandbox has no secrets (D-051), so the running product had no Linear access. | MET-229 |
+| A MET-225 run used all its turns. | The turn allowance ran out before the run finished. | MET-142 (per-role caps) |
+| PR #114 merged with blocking reviewer findings. | The merge gate did not yet need a reviewer approval. | MET-226 and MET-230 |
+| Review took many rounds: four on MET-230 and seven on MET-239. | Each re-review read the whole diff and could add new blockers. | MET-231, and MET-239 moved path handling from POSIX sh into one Node helper |
+| The health-by-path test failed in the full parallel CI run. | The test did not wait on real signals. | MET-236 |
+| Blocking design findings and a second failed review went straight to a human. | The loop had no coordinator route for a blocking verdict. | MET-241 |
+| A coordinator review reply was not JSON. | The reply could not be parsed as a review decision. | none, as designed (MET-244) |
+
+### What a human still did
+
+- A human sent review findings back to the builder by hand on MET-239 (6 times) and MET-243 (twice), before MET-241 went live.
+- A human re-ran one flaky CI job.
+- A human stopped and restarted the daemon to edit `loop.json` for those send-backs.
+
+**What is left:** MET-207 (agents talk only through the coordinator with typed messages). The hands-off end-to-end proof moves to v0.1.1.
